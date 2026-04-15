@@ -1,0 +1,42 @@
+{
+  "name": "flowpro-api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "nest build",
+    "start": "node dist/main",
+    "start:prod": "NODE_ENV=production node dist/main",
+    "db:push": "drizzle-kit push",
+    "db:push:test": "NODE_ENV=test drizzle-kit push",
+    "db:push:prod": "NODE_ENV=production drizzle-kit push",
+    "db:seed": "tsx src/database/seed.ts",
+    "db:seed:test": "NODE_ENV=test tsx src/database/seed.ts",
+    "db:seed:prod": "NODE_ENV=production tsx src/database/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/platform-fastify": "^11.0.0",
+    "bcryptjs": "^3.0.3",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.20.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/bcryptjs": "^3.0.0",
+    "@types/node": "^20",
+    "@types/pg": "^8.20.0",
+    "dotenv": "^17.4.2",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  }
+}
