@@ -16,9 +16,9 @@ import { useSidebar } from "../components/layout/sidebar-context";
 import useCanvasStore from "../store/canvas-store";
 import { apiGet, apiPut } from "../lib/api";
 import { STEP_MAP, DOC_SOURCE_MAP } from "../lib/constants";
-import { nodeTypes } from "../components/canvas/bpmn-nodes";
+import { nodeTypes } from "../components/canvas/nodes";
 import ElementPalette from "../components/canvas/element-palette";
-import PropertiesPanel from "../components/canvas/properties-panel";
+import PropertiesPanel from "../components/canvas/properties/PropertiesPanel";
 import CanvasToolbar from "../components/canvas/canvas-toolbar";
 import ProcessWizard from "../components/canvas/process-wizard";
 import ProcessSubheader from "../components/canvas/process-subheader";
@@ -130,6 +130,9 @@ function CanvasInner() {
           <CanvasToolbar />
         </ReactFlow>
 
+        {/* Floating properties panel */}
+        {!showWizard && <PropertiesPanel />}
+
         {/* Empty state overlay */}
         {nodes.length === 0 && (
           <div
@@ -165,8 +168,7 @@ function CanvasInner() {
         )}
       </div>
 
-      {/* Right properties — hidden during wizard */}
-      {!showWizard && <PropertiesPanel />}
+      {/* Properties panel moved inside canvas wrapper as floating card */}
       </div>
     </div>
   );

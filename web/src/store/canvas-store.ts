@@ -11,12 +11,7 @@ import {
   addEdge,
 } from "@xyflow/react";
 import { nanoid } from "nanoid";
-
-export type BpmnNodeData = {
-  label: string;
-  bpmnType: string;
-  description?: string;
-};
+import { createDefaultNodeData, type BpmnNodeData } from "../types/bpmn-node-data";
 
 export type ProcessMeta = {
   name: string;
@@ -46,6 +41,7 @@ type CanvasState = {
   addNode: (type: string, position: { x: number; y: number }, label?: string) => void;
   setSelectedNode: (id: string | null) => void;
   updateNodeLabel: (id: string, label: string) => void;
+  updateNodeData: (id: string, patch: Partial<BpmnNodeData>) => void;
   deleteSelected: () => void;
 
   setProcessId: (id: string | null) => void;
@@ -95,21 +91,11 @@ const useCanvasStore = create<CanvasState>()(
 
       addNode: (type, position, label) => {
         const id = `${type}-${nanoid(8)}`;
-        const defaults: Record<string, string> = {
-          startEvent: "Start",
-          endEvent: "End",
-          userTask: "User Task",
-          serviceTask: "Service Task",
-          exclusiveGateway: "",
-        };
         const newNode: Node = {
           id,
           type,
           position,
-          data: {
-            label: label || defaults[type] || type,
-            bpmnType: type,
-          },
+          data: createDefaultNodeData(type, label),
         };
         set({ nodes: [...get().nodes, newNode] });
       },
@@ -120,6 +106,14 @@ const useCanvasStore = create<CanvasState>()(
         set({
           nodes: get().nodes.map((n) =>
             n.id === id ? { ...n, data: { ...n.data, label } } : n
+          ),
+        });
+      },
+
+      updateNodeData: (id, patch) => {
+        set({
+          nodes: get().nodes.map((n) =>
+            n.id === id ? { ...n, data: { ...n.data, ...patch } } : n
           ),
         });
       },

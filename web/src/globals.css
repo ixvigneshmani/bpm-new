@@ -131,6 +131,153 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* ─── Properties panel form resets (no preflight) ────────────────── */
+/* Scoped to .props-panel so we don't conflict with Ant Design */
+
+.props-panel input,
+.props-panel textarea,
+.props-panel select,
+.props-panel button {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.props-panel input:focus,
+.props-panel textarea:focus,
+.props-panel select:focus {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
+}
+
+.props-panel input:hover,
+.props-panel textarea:hover,
+.props-panel select:hover {
+  border-color: #d0d5dd;
+}
+
+.props-panel input::placeholder,
+.props-panel textarea::placeholder {
+  color: #98a2b3;
+}
+
+.props-panel textarea {
+  resize: vertical;
+  min-height: 56px;
+}
+
+.props-panel select {
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2398a2b3' stroke-width='2.5' stroke-linecap='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  cursor: pointer;
+}
+
+.props-panel button {
+  border: 1px solid #e5e7eb;
+  padding: 4px 8px;
+  cursor: pointer;
+  background: #fff;
+  transition: all 0.15s ease;
+}
+
+.props-panel button:hover {
+  background: #f9fafb;
+}
+
+/* Section header buttons — no border */
+.props-panel .section-header {
+  border: none;
+  padding: 12px 20px;
+  border-radius: 0;
+  width: 100%;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+}
+
+.props-panel .section-header:hover {
+  background: #f9fafb;
+}
+
+/* Event type / binding type toggle buttons */
+.props-panel .toggle-btn {
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 6px 12px;
+  transition: all 0.15s ease;
+}
+
+.props-panel .toggle-btn.active {
+  background: #eef2ff;
+  border-color: #818cf8;
+  color: #4f46e5;
+}
+
+/* Assignment / implementation cards */
+.props-panel .type-card {
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.props-panel .type-card.active {
+  background: #eef2ff;
+  border-color: #818cf8;
+}
+
+/* Monospace inputs */
+.props-panel input.mono,
+.props-panel textarea.mono {
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 12px;
+}
+
+/* Config sub-panels */
+.props-panel .config-panel {
+  border: 1px solid #f2f4f7;
+  border-radius: 10px;
+  background: #f9fafb;
+  padding: 14px;
+}
+
+.props-panel .config-panel input,
+.props-panel .config-panel textarea,
+.props-panel .config-panel select {
+  background: #fff;
+}
+
+/* Scrollbar */
+.props-panel::-webkit-scrollbar {
+  width: 4px;
+}
+
+.props-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.props-panel::-webkit-scrollbar-thumb {
+  background: #e5e7eb;
+  border-radius: 4px;
+}
+
+.props-panel::-webkit-scrollbar-thumb:hover {
+  background: #d0d5dd;
+}
+
 /* ─── Sidebar collapse ────────────────────────────────────────────── */
 
 .sidebar-fade {
