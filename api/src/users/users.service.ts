@@ -16,6 +16,17 @@ export class UsersService {
     return rows[0] ?? null;
   }
 
+  async findByEmailAndTenant(email: string, tenantId: string) {
+    const rows = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    const user = rows[0] ?? null;
+    if (user && user.tenantId !== tenantId) return null;
+    return user;
+  }
+
   async findById(id: string) {
     const rows = await this.db
       .select()

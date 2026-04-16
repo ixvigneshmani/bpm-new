@@ -5,6 +5,7 @@ import {
   text,
   timestamp,
   boolean,
+  jsonb,
   pgEnum,
   uniqueIndex,
   index,
@@ -47,7 +48,7 @@ export const tenants = pgTable("TENANTS", {
   plan: tenantPlanEnum("PLAN").notNull().default("free"),
   logoUrl: text("LOGO_URL"),
   domain: varchar("DOMAIN", { length: 255 }),
-  settings: text("SETTINGS"),
+  settings: jsonb("SETTINGS"),
   createdAt: timestamp("CREATED_AT", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -183,4 +184,101 @@ export const workspaceMembers = pgTable(
       .defaultNow(),
   },
   (t) => [uniqueIndex("WS_MEMBER_IDX").on(t.workspaceId, t.userId)],
+);
+
+// ─── Process & Business Document Enums ──────────────────────────────
+
+export const processStatusEnum = pgEnum("PROCESS_STATUS", [
+  "DRAFT",
+  "ACTIVE",
+  "PENDING",
+  "REVIEW",
+]);
+
+export const wizardStepEnum = pgEnum("WIZARD_STEP", [
+  "DETAILS",
+  "DOCUMENT",
+  "CANVAS",
+]);
+
+export const docSourceEnum = pgEnum("DOC_SOURCE", [
+  "TEMPLATE",
+  "PASTE",
+  "EMPTY",
+]);
+
+// ─── PROCESSES ──────────────────────────────────────────────────────
+
+export const processes = pgTable(
+  "PROCESSES",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    createdBy: uuid("CREATED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: varchar("NAME", { length: 255 }).notNull(),
+    description: text("DESCRIPTION"),
+    canvasData: jsonb("CANVAS_DATA"),
+    status: processStatusEnum("STATUS").notNull().default("DRAFT"),
+    version: varchar("VERSION", { length: 20 }).default("v1.0"),
+    step: wizardStepEnum("STEP").notNull().default("DETAILS"),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("PROCESS_TENANT_IDX").on(t.tenantId)],
+);
+
+// ─── BUSINESS_DOCUMENTS (reusable templates) ────────────────────────
+
+export const businessDocuments = pgTable(
+  "BUSINESS_DOCUMENTS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    createdBy: uuid("CREATED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: varchar("NAME", { length: 255 }).notNull(),
+    schema: jsonb("SCHEMA").notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("BIZ_DOC_TENANT_IDX").on(t.tenantId)],
+);
+
+// ─── PROCESS_DOCUMENTS (links business doc to a process) ────────────
+
+export const processDocuments = pgTable(
+  "PROCESS_DOCUMENTS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    processId: uuid("PROCESS_ID")
+      .notNull()
+      .references(() => processes.id, { onDelete: "cascade" }),
+    documentId: uuid("DOCUMENT_ID").references(() => businessDocuments.id, {
+      onDelete: "cascade",
+    }),
+    schemaOverride: jsonb("SCHEMA_OVERRIDE").notNull(),
+    source: docSourceEnum("SOURCE").notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("PROC_DOC_PROCESS_IDX").on(t.processId)],
 );

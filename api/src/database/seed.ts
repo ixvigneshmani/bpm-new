@@ -35,8 +35,8 @@ async function seed() {
     .insert(schema.users)
     .values({
       tenantId: tenant.id,
-      email: "alex@acmecorp.ae",
-      displayName: "Alex Kim",
+      email: "vignesh.mani@innovatechs.com",
+      displayName: "Vignesh Mani",
       passwordHash,
       role: "owner",
       emailVerifiedAt: new Date(),
@@ -50,8 +50,69 @@ async function seed() {
     role: "owner",
   });
 
+  // ─── Business Document Templates ────────────────────────────────
+  const templates = [
+    {
+      name: "Vendor Registration Form",
+      schema: {
+        vendorName: "string",
+        email: "string",
+        phone: "string",
+        category: "string",
+        taxId: "string",
+        bankDetails: { accountNo: "string", ifsc: "string" },
+        documents: [{ name: "string", url: "string" }],
+        approved: "boolean",
+      },
+    },
+    {
+      name: "Invoice Data Schema",
+      schema: {
+        invoiceNo: "string",
+        vendor: "string",
+        amount: "number",
+        date: "date",
+        lineItems: [{ description: "string", qty: "number", price: "number" }],
+        status: "string",
+        approvedBy: "string",
+        notes: "string",
+      },
+    },
+    {
+      name: "Employee Record",
+      schema: {
+        employeeId: "string",
+        firstName: "string",
+        lastName: "string",
+        department: "string",
+        role: "string",
+        email: "string",
+        joinDate: "date",
+        manager: "string",
+        salary: "number",
+        address: { street: "string", city: "string", country: "string" },
+        active: "boolean",
+      },
+    },
+  ];
+
+  for (const tpl of templates) {
+    const [doc] = await db
+      .insert(schema.businessDocuments)
+      .values({
+        tenantId: tenant.id,
+        createdBy: user.id,
+        name: tpl.name,
+        schema: tpl.schema,
+      })
+      .returning();
+    console.log(`  Template: ${doc.name} (${doc.id})`);
+  }
+
   console.log("\nSeed complete!");
-  console.log(`\n  Login: alex@acmecorp.ae / password123\n`);
+  if (process.env.NODE_ENV === "development") {
+    console.log(`\n  Login: vignesh.mani@innovatechs.com / password123\n`);
+  }
 
   await pool.end();
 }

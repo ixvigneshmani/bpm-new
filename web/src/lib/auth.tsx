@@ -27,8 +27,13 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
-    const stored = localStorage.getItem("flowpro_user");
-    return stored ? JSON.parse(stored) : null;
+    try {
+      const stored = localStorage.getItem("flowpro_user");
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      localStorage.removeItem("flowpro_user");
+      return null;
+    }
   });
   const [loading, setLoading] = useState(false);
 

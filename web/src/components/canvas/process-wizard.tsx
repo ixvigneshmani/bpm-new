@@ -1,321 +1,172 @@
-import { useState } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { nanoid } from "nanoid";
 import useCanvasStore from "../../store/canvas-store";
+import { apiPost, apiPut, apiGet, apiPatch } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
 
-/* ─── Mock data ─── */
-const MOCK_DOCS = [
-  { id: "doc-1", name: "Vendor Registration Form", fields: 12, usedIn: 3, schema: { vendorName: "string", email: "string", phone: "string", category: "string", taxId: "string", bankDetails: { accountNo: "string", ifsc: "string" }, documents: [{ name: "string", url: "string" }], approved: "boolean" } },
-  { id: "doc-2", name: "Invoice Data Schema", fields: 8, usedIn: 1, schema: { invoiceNo: "string", vendor: "string", amount: "number", date: "date", lineItems: [{ description: "string", qty: "number", price: "number" }], status: "string", approvedBy: "string", notes: "string" } },
-  { id: "doc-3", name: "Employee Record", fields: 15, usedIn: 2, schema: { employeeId: "string", firstName: "string", lastName: "string", department: "string", role: "string", email: "string", joinDate: "date", manager: "string", salary: "number", address: { street: "string", city: "string", country: "string" }, active: "boolean" } },
-];
+/* ─── Field Builder Types & Helpers ─── */
+type FieldDef = {
+  id: string;
+  name: string;
+  type: "string" | "number" | "boolean" | "date" | "object" | "array";
+  required: boolean;
+  children?: FieldDef[];  // for object
+  items?: FieldDef[];     // for array item schema
+  collapsed?: boolean;
+};
 
-/* ─── CSS connection line ─── */
-function CLine({ left, top, width, height, dir = "h", active = false, delay = 0 }: {
-  left: string; top: string; width?: string; height?: string; dir?: "h" | "v"; active?: boolean; delay?: number;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.4, delay }}
-      style={{
-        position: "absolute", left, top,
-        width: dir === "h" ? (width || "10%") : 2,
-        height: dir === "v" ? (height || "10%") : 2,
-        background: active ? "transparent" : "#D0D5DD",
-        backgroundImage: active
-          ? dir === "h"
-            ? "repeating-linear-gradient(90deg, #818CF8 0px, #818CF8 6px, transparent 6px, transparent 12px)"
-            : "repeating-linear-gradient(180deg, #818CF8 0px, #818CF8 6px, transparent 6px, transparent 12px)"
-          : "none",
-        animation: active ? "flow-dash 0.8s linear infinite" : "none",
-      }}
-    />
-  );
+const FIELD_TYPES = ["string", "number", "boolean", "date", "object", "array"] as const;
+
+function createField(name = "", type: FieldDef["type"] = "string"): FieldDef {
+  return { id: nanoid(8), name, type, required: false };
 }
 
-/* ─── BPMN Node component ─── */
-function BpmnNode({ x, y, type, label, sublabel, glow, delay = 0 }: {
-  x: number; y: number; type: "start" | "end" | "task" | "gateway" | "service" | "script" | "subprocess" | "pool";
-  label: string; sublabel?: string; glow?: boolean; delay?: number;
-}) {
-  const nodeContent = (() => {
-    switch (type) {
-      case "start":
-        return (
-          <div style={{
-            width: 44, height: 44, borderRadius: "50%",
-            background: "linear-gradient(135deg, #F0FDF4, #DCFCE7)",
-            border: "2px solid #86EFAC",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            ...(glow ? { animation: "soft-glow 2.5s ease-in-out infinite" } : {}),
-          }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="#16A34A"><polygon points="9,5 19,12 9,19" /></svg>
-          </div>
-        );
-      case "end":
-        return (
-          <div style={{
-            width: 40, height: 40, borderRadius: "50%",
-            background: "linear-gradient(135deg, #FEF2F2, #FEE2E2)",
-            border: "3px solid #FCA5A5",
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}>
-            <div style={{ width: 14, height: 14, borderRadius: 2, background: "#DC2626" }} />
-          </div>
-        );
-      case "gateway":
-        return (
-          <div style={{
-            width: 44, height: 44, transform: "rotate(45deg)",
-            background: "linear-gradient(135deg, #FFFBEB, #FEF3C7)",
-            border: "2px solid #FDE68A", borderRadius: 5,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            ...(glow ? { animation: "soft-glow 2.5s ease-in-out infinite" } : {}),
-          }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#CA8A04" strokeWidth="2.5" strokeLinecap="round" style={{ transform: "rotate(-45deg)" }}>
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </div>
-        );
-      case "task":
-        return (
-          <div style={{
-            padding: "10px 20px", background: "linear-gradient(135deg, #EEF2FF, #E0E7FF)",
-            border: "1.5px solid #C7D2FE", borderRadius: 10,
-            ...(glow ? { animation: "soft-glow 2.5s ease-in-out infinite" } : {}),
-          }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#4F46E5" }}>{label}</div>
-            {sublabel && <div style={{ fontSize: 9, color: "#818CF8", marginTop: 1 }}>{sublabel}</div>}
-          </div>
-        );
-      case "service":
-        return (
-          <div style={{
-            padding: "10px 20px",
-            background: "linear-gradient(135deg, #FFF7ED, #FFEDD5)",
-            border: "1.5px solid #FDBA74", borderRadius: 10,
-            ...(glow ? { animation: "soft-glow 2.5s ease-in-out infinite" } : {}),
-          }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#EA580C" }}>{label}</div>
-            {sublabel && <div style={{ fontSize: 9, color: "#FB923C", marginTop: 1 }}>{sublabel}</div>}
-          </div>
-        );
-      case "script":
-        return (
-          <div style={{
-            padding: "10px 20px", background: "linear-gradient(135deg, #F0F9FF, #E0F2FE)",
-            border: "1.5px solid #BAE6FD", borderRadius: 10,
-          }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#0284C7" }}>{label}</div>
-            {sublabel && <div style={{ fontSize: 9, color: "#38BDF8", marginTop: 1 }}>{sublabel}</div>}
-          </div>
-        );
-      case "subprocess":
-        return (
-          <div style={{
-            padding: "10px 20px", background: "rgba(249,250,251,0.7)",
-            border: "1.5px dashed #D0D5DD", borderRadius: 10,
-          }}>
-            <div style={{ fontSize: 12, fontWeight: 500, color: "#475467" }}>{label}</div>
-          </div>
-        );
-      default: return null;
+function fieldsToJson(fields: FieldDef[]): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (!f.name.trim()) continue;
+    if (f.type === "object" && f.children) {
+      obj[f.name] = fieldsToJson(f.children);
+    } else if (f.type === "array" && f.items) {
+      obj[f.name] = [fieldsToJson(f.items)];
+    } else {
+      obj[f.name] = f.type;
     }
-  })();
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.85 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.5, delay, ease: [0.4, 0, 0.2, 1] }}
-      style={{ position: "absolute", left: `${x}%`, top: `${y}%` }}
-    >
-      {/* Pulse ring for glowing elements */}
-      {glow && (
-        <div style={{
-          position: "absolute", left: "50%", top: "50%",
-          width: 60, height: 60, borderRadius: "50%",
-          border: "2px solid rgba(99,102,241,0.3)",
-          animation: "ring-pulse 2s ease-out infinite",
-          pointerEvents: "none",
-        }} />
-      )}
-      {nodeContent}
-      {type !== "task" && type !== "service" && type !== "script" && type !== "subprocess" && (
-        <div style={{ fontSize: 9, color: "#6B7280", textAlign: "center", marginTop: 4, fontWeight: 500 }}>{label}</div>
-      )}
-    </motion.div>
-  );
+  }
+  return obj;
 }
 
-/* ─── BPMN Canvas Background ─── */
-function CanvasBackground({ step }: { step: string }) {
-  const isStep1 = step === "details";
-  return (
-    <>
-      {/* Dot grid */}
-      <div style={{
-        position: "absolute", inset: 0,
-        backgroundImage: "radial-gradient(circle, #A5B4FC 1.2px, transparent 1.2px)",
-        backgroundSize: "28px 28px", opacity: 0.25,
-      }} />
-
-      {/* CSS connection lines — vertically centered with nodes */}
-      {/* Start(3%,24%) center ~27.5% → Review(17%,21%) center ~24.5% — avg ~26% */}
-      <CLine left="7.5%" top="27.5%" width="9.5%" active={isStep1} delay={0.1} />
-      {/* Review(17%+13%wide=30%) → Gateway(39%) — line from 30% to 39% */}
-      <CLine left="30%" top="26%" width="9%" active={isStep1} delay={0.15} />
-      {/* Gateway(39%+4.4%=43.4%) → Approve(53%) */}
-      <CLine left="43.5%" top="26%" width="9.5%" active={isStep1} delay={0.2} />
-      {/* Approve(53%+13%=66%) → End(76%) */}
-      <CLine left="66%" top="27.5%" width="10%" delay={0.25} />
-      {/* Gateway(41%) center down → Notify(46%,50%) */}
-      <CLine left="41.5%" top="30%" height="20%" dir="v" active={!isStep1} delay={0.3} />
-      {/* Notify(46%+12%=58%) → Archive(67%) */}
-      <CLine left="58%" top="54%" width="9%" active={!isStep1} delay={0.35} />
-
-      {/* BPMN Nodes — pushed down 10% to clear stepper */}
-      <BpmnNode x={3} y={24} type="start" label="Start" delay={0.1} />
-      <BpmnNode x={17} y={21} type="task" label="Review" sublabel="User Task" delay={0.15} glow={isStep1} />
-      <BpmnNode x={39} y={20} type="gateway" label="Decision" delay={0.2} glow={isStep1} />
-      <BpmnNode x={53} y={21} type="task" label="Approve" sublabel="User Task" delay={0.25} />
-      <BpmnNode x={76} y={24} type="end" label="End" delay={0.3} />
-      <BpmnNode x={46} y={50} type="service" label="Notify Team" sublabel="Service Task" delay={0.35} glow={!isStep1} />
-      <BpmnNode x={67} y={50} type="script" label="Archive" sublabel="Script Task" delay={0.4} glow={!isStep1} />
-      <BpmnNode x={10} y={62} type="subprocess" label="Error Handling" delay={0.45} />
-
-      {/* Pool/Lane */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5, delay: 0.5 }}
-        style={{
-          position: "absolute", left: "3%", top: "78%", right: "3%", height: 50,
-          border: "1.5px solid #E5E7EB", borderRadius: 10,
-          background: "rgba(249,250,251,0.3)",
-        }}
-      >
-        <div style={{
-          position: "absolute", left: 0, top: 0, bottom: 0, width: 26,
-          background: "rgba(238,242,255,0.5)", borderRadius: "10px 0 0 10px",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          writingMode: "vertical-rl", fontSize: 8, color: "#818CF8", fontWeight: 600,
-        }}>Pool</div>
-      </motion.div>
-    </>
-  );
+function jsonToFields(json: Record<string, unknown>): FieldDef[] {
+  return Object.entries(json).map(([key, val]) => {
+    if (Array.isArray(val)) {
+      return { ...createField(key, "array"), items: val[0] && typeof val[0] === "object" ? jsonToFields(val[0] as Record<string, unknown>) : [] };
+    }
+    if (val && typeof val === "object") {
+      return { ...createField(key, "object"), children: jsonToFields(val as Record<string, unknown>) };
+    }
+    const t = typeof val === "string" && FIELD_TYPES.includes(val as FieldDef["type"]) ? (val as FieldDef["type"]) : "string";
+    return createField(key, t);
+  });
 }
 
-/* ─── Stepper ─── */
-function Stepper({ step, onStepClick }: { step: number; onStepClick: (s: number) => void }) {
+function updateFieldInTree(fields: FieldDef[], id: string, updater: (f: FieldDef) => FieldDef): FieldDef[] {
+  return fields.map((f) => {
+    if (f.id === id) return updater(f);
+    return {
+      ...f,
+      children: f.children ? updateFieldInTree(f.children, id, updater) : undefined,
+      items: f.items ? updateFieldInTree(f.items, id, updater) : undefined,
+    };
+  });
+}
+
+function removeFieldFromTree(fields: FieldDef[], id: string): FieldDef[] {
+  return fields.filter((f) => f.id !== id).map((f) => ({
+    ...f,
+    children: f.children ? removeFieldFromTree(f.children, id) : undefined,
+    items: f.items ? removeFieldFromTree(f.items, id) : undefined,
+  }));
+}
+
+function addFieldToParent(fields: FieldDef[], parentId: string, target: "children" | "items"): FieldDef[] {
+  return fields.map((f) => {
+    if (f.id === parentId) {
+      const arr = f[target] || [];
+      return { ...f, [target]: [...arr, createField()] };
+    }
+    return {
+      ...f,
+      children: f.children ? addFieldToParent(f.children, parentId, target) : undefined,
+      items: f.items ? addFieldToParent(f.items, parentId, target) : undefined,
+    };
+  });
+}
+
+/* ─── Stepper Bar ─── */
+function StepperBar({ currentIndex, onStepClick, isExisting }: { currentIndex: number; onStepClick: (i: number) => void; isExisting: boolean }) {
+  const documentDirty = useCanvasStore((s) => s.documentDirty);
   const labels = ["Details", "Business Doc", "Canvas"];
   return (
-    <motion.div
-      initial={{ opacity: 0, y: -12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.3 }}
-      style={{
-        position: "absolute", top: 14, zIndex: 30,
-        left: 0, right: 0,
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}
-    >
-      <div style={{
-        display: "flex", alignItems: "center",
-        background: "rgba(255,255,255,0.92)", backdropFilter: "blur(12px)",
-        padding: "8px 22px", borderRadius: 12,
-        border: "1px solid rgba(229,231,235,0.6)",
-        boxShadow: "0 4px 20px rgba(0,0,0,0.06)",
-      }}>
+    <div style={{
+      padding: "16px 48px", borderBottom: "1px solid #F2F4F7",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      background: "rgba(255,255,255,0.6)", backdropFilter: "blur(8px)",
+      position: "relative", zIndex: 2,
+    }}>
       {labels.map((label, i) => {
-        const isDone = i + 1 < step;
-        const isActive = i + 1 === step;
+        const isDone = i < currentIndex;
+        const isActive = i === currentIndex;
+        const isClickable = (isExisting || isDone) && !documentDirty;
         return (
           <div key={label} style={{ display: "flex", alignItems: "center" }}>
             <div
-              onClick={() => isDone && onStepClick(i + 1)}
-              style={{ display: "flex", alignItems: "center", gap: 8, cursor: isDone ? "pointer" : "default" }}
+              onClick={() => isClickable && !isActive && onStepClick(i)}
+              style={{ display: "flex", alignItems: "center", gap: 10, cursor: isClickable && !isActive ? "pointer" : "default" }}
+              title={documentDirty && !isActive ? "Save or discard schema changes first" : undefined}
             >
-              <motion.div
-                animate={{
-                  background: isDone ? "#10B981" : isActive ? "#4F46E5" : "#F3F4F6",
-                  borderColor: isDone ? "#10B981" : isActive ? "#4F46E5" : "#E5E7EB",
-                  scale: isActive ? 1.05 : 1,
-                }}
-                transition={{ duration: 0.3 }}
-                style={{
-                  width: 28, height: 28, borderRadius: "50%",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 11, fontWeight: 700,
-                  color: isDone || isActive ? "#fff" : "#9CA3AF",
-                  border: "2px solid #E5E7EB",
-                }}
-              >
-                {isDone ? "✓" : i + 1}
-              </motion.div>
+              <div style={{
+                width: 34, height: 34, borderRadius: "50%",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "all 0.3s ease",
+                ...(isDone ? {
+                  background: "#10B981", border: "2px solid #10B981", color: "#fff",
+                  boxShadow: "0 0 0 4px rgba(16,185,129,0.12)",
+                } : isActive ? {
+                  background: "#4F46E5", border: "2px solid #4F46E5", color: "#fff",
+                  boxShadow: "0 0 0 4px rgba(79,70,229,0.12)",
+                } : {
+                  background: "#F9FAFB", border: isExisting ? "2px solid #D0D5DD" : "2px solid #E5E7EB", color: isExisting ? "#6B7280" : "#9CA3AF",
+                }),
+              }}>
+                {isDone ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                ) : (
+                  <span style={{ fontSize: 13, fontWeight: 700 }}>{i + 1}</span>
+                )}
+              </div>
               <span style={{
-                fontSize: 12, fontWeight: 600,
-                color: isDone ? "#10B981" : isActive ? "#111827" : "#9CA3AF",
+                fontSize: 13, fontWeight: 600,
+                color: isDone ? "#10B981" : isActive ? "#111827" : isExisting ? "#6B7280" : "#9CA3AF",
                 transition: "color 0.3s ease",
               }}>{label}</span>
             </div>
             {i < 2 && (
-              <motion.div
-                animate={{ background: isDone ? "#A7F3D0" : isActive ? "#C7D2FE" : "#E5E7EB" }}
-                transition={{ duration: 0.4 }}
-                style={{ width: 50, height: 2, margin: "0 14px", borderRadius: 1 }}
-              />
+              <div style={{
+                width: 80, height: 2, margin: "0 16px", borderRadius: 1,
+                background: isDone ? "#A7F3D0" : isActive ? "#C7D2FE" : "#E5E7EB",
+                transition: "background 0.3s ease",
+              }} />
             )}
           </div>
         );
       })}
-      </div>
-    </motion.div>
+    </div>
   );
 }
 
-/* ─── Spotlight Overlay ─── */
-function SpotlightOverlay({ focusX, focusY }: { focusX: string; focusY: string }) {
-  return (
-    <motion.div
-      animate={{
-        background: `radial-gradient(ellipse 550px 450px at ${focusX} ${focusY}, transparent 0%, rgba(15,23,42,0.6) 100%)`,
-      }}
-      transition={{ duration: 1, ease: [0.4, 0, 0.2, 1] }}
-      style={{ position: "absolute", inset: 0, zIndex: 10, pointerEvents: "none" }}
-    />
-  );
-}
-
-/* ─── Glassmorphism card wrapper with 3D ─── */
-function WizardCard({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 30, rotateX: 6, scale: 0.96, filter: "blur(4px)" }}
-      animate={{ opacity: 1, y: 0, rotateX: 0, scale: 1, filter: "blur(0px)" }}
-      exit={{ opacity: 0, y: -20, rotateX: -4, scale: 0.96, filter: "blur(3px)" }}
-      transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-      style={{
-        position: "absolute", zIndex: 20,
-        background: "rgba(255,255,255,0.92)",
-        backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-        borderRadius: 18,
-        border: "1px solid rgba(255,255,255,0.6)",
-        boxShadow: "0 20px 60px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.04), inset 0 1px 0 rgba(255,255,255,0.8)",
-        ...style,
-      }}
-    >
-      {children}
-    </motion.div>
-  );
-}
-
-/* ─── Step 1: Process Details ─── */
-function StepDetails({ onNext }: { onNext: () => void }) {
+/* ─── Step 1: Process Details (two-column) ─── */
+function StepDetails() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const processId = useCanvasStore((s) => s.processId);
   const processMeta = useCanvasStore((s) => s.processMeta);
   const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
-  const canContinue = processMeta.name.trim().length > 0;
+  const setProcessId = useCanvasStore((s) => s.setProcessId);
+  const setWizardStep = useCanvasStore((s) => s.setWizardStep);
+  const wizardOrigin = useCanvasStore((s) => s.wizardOrigin);
+  const [saving, setSaving] = useState(false);
+  const canContinue = processMeta.name.trim().length > 0 && !saving;
+  const isExisting = !!processId;
+  const cameFromCanvas = wizardOrigin === "canvas";
+
+  const handleGoBack = () => {
+    if (cameFromCanvas) {
+      setWizardStep("canvas");
+    } else {
+      navigate("/processes");
+    }
+  };
 
   const inputFocus = (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     e.currentTarget.style.borderColor = "#818CF8";
@@ -327,267 +178,852 @@ function StepDetails({ onNext }: { onNext: () => void }) {
   };
 
   return (
-    <WizardCard style={{ left: "32%", top: "24%", width: 380, padding: "26px 26px 22px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-        <div style={{
-          width: 40, height: 40, borderRadius: 12,
-          background: "linear-gradient(135deg, #EEF2FF, #E0E7FF)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          boxShadow: "0 2px 8px rgba(99,102,241,0.12)",
-        }}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4F46E5" strokeWidth="1.5" strokeLinecap="round">
-            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-          </svg>
+    <div style={{
+      display: "grid", gridTemplateColumns: "1fr 1fr",
+      minHeight: "calc(100vh - 124px)", position: "relative", zIndex: 1,
+    }}>
+      {/* Left: Form */}
+      <div style={{
+        padding: "32px 36px", borderRight: "1px solid #F2F4F7",
+        background: "rgba(255,255,255,0.9)", backdropFilter: "blur(12px)",
+        display: "flex", flexDirection: "column",
+      }}>
+        <h2 style={{ fontSize: 20, fontWeight: 700, color: "#111827", marginBottom: 4 }}>{isExisting ? "Process Details" : "Create new process"}</h2>
+        <div style={{ fontSize: 14, color: "#6B7280", marginBottom: 28, lineHeight: 1.5 }}>{isExisting ? "Review or update your process details." : "Give it a name and description to get started."}</div>
+
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6, display: "block" }}>Process Name *</label>
+            <input
+              type="text" value={processMeta.name}
+              onChange={(e) => { if (!processId) setProcessMeta({ name: e.target.value }); }}
+              placeholder="Enter process name"
+              autoFocus={!processId}
+              readOnly={!!processId}
+              style={{ width: "100%", padding: "12px 14px", border: "1.5px solid #E5E7EB", borderRadius: 10, fontSize: 14, color: processId ? "#6B7280" : "#111827", fontFamily: "inherit", outline: "none", background: processId ? "#F9FAFB" : "#fff", transition: "all 0.15s ease", cursor: processId ? "not-allowed" : "text" }}
+              onFocus={processId ? undefined : inputFocus} onBlur={processId ? undefined : inputBlur}
+            />
+          </div>
+
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6, display: "block" }}>Description</label>
+            <textarea
+              value={processMeta.description}
+              onChange={(e) => setProcessMeta({ description: e.target.value })}
+              placeholder="Briefly describe the purpose of this process"
+              style={{ width: "100%", padding: "12px 14px", minHeight: 110, resize: "vertical", border: "1.5px solid #E5E7EB", borderRadius: 10, fontSize: 14, color: "#111827", fontFamily: "inherit", outline: "none", background: "#fff", transition: "all 0.15s ease" }}
+              onFocus={inputFocus} onBlur={inputBlur}
+            />
+          </div>
         </div>
-        <div>
-          <div style={{ fontSize: 17, fontWeight: 700, color: "#111827" }}>Create new process</div>
-          <div style={{ fontSize: 12, color: "#9CA3AF" }}>Step 1 of 2</div>
+
+        {/* Footer */}
+        <div style={{ display: "flex", gap: 12, marginTop: 14, paddingTop: 14, borderTop: "1px solid #F2F4F7" }}>
+          <button onClick={handleGoBack} style={{ padding: "11px 20px", borderRadius: 10, border: "1.5px solid #E5E7EB", background: "#fff", color: "#374151", fontSize: 14, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" }}>
+            {cameFromCanvas ? "← Back to Canvas" : "← Back to Processes"}
+          </button>
+          <button
+            onClick={async () => {
+              if (!canContinue) return;
+              setSaving(true);
+              try {
+                if (processId) {
+                  await apiPatch(`/processes/${processId}`, { description: processMeta.description });
+                  setWizardStep("document");
+                } else {
+                  const proc = await apiPost<{ id: string }>("/processes", { name: processMeta.name, description: processMeta.description });
+                  setProcessId(proc.id);
+                  setProcessMeta({ creatorName: user?.displayName || "", status: "DRAFT", updatedAt: new Date().toISOString() });
+                  setWizardStep("document");
+                  navigate(`/designer/${proc.id}`, { replace: true });
+                }
+              } catch (e) {
+                console.error("Save failed:", e);
+              } finally {
+                setSaving(false);
+              }
+            }}
+            style={{
+              padding: "11px 32px", borderRadius: 10, border: "none",
+              background: canContinue ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
+              color: canContinue ? "#fff" : "#9CA3AF", fontSize: 14, fontWeight: 600,
+              cursor: canContinue ? "pointer" : "not-allowed", fontFamily: "inherit",
+              boxShadow: canContinue ? "0 4px 12px rgba(79,70,229,0.25)" : "none",
+              transition: "all 0.2s ease",
+            }}
+          >{saving ? "Saving..." : isExisting ? "Save & Continue →" : "Continue →"}</button>
         </div>
       </div>
 
-      <div style={{ marginBottom: 14 }}>
-        <label style={{ fontSize: 11, fontWeight: 600, color: "#374151", marginBottom: 5, display: "block" }}>Process Name *</label>
-        <input
-          type="text"
-          value={processMeta.name}
-          onChange={(e) => setProcessMeta({ name: e.target.value })}
-          placeholder="e.g. Vendor Onboarding"
-          autoFocus
-          style={{
-            width: "100%", padding: "11px 14px",
-            border: "1.5px solid #E5E7EB", borderRadius: 10,
-            fontSize: 14, color: "#111827", fontFamily: "inherit", outline: "none",
-            background: "#fff", transition: "all 0.15s ease",
-          }}
-          onFocus={inputFocus} onBlur={inputBlur}
-        />
-      </div>
+      {/* Right: Muted canvas illustration */}
+      <div style={{
+        background: "#F8FAFC",
+        overflow: "hidden", position: "relative",
+        opacity: 0.4,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: "40px",
+      }}>
+        <svg width="100%" height="100%" viewBox="0 0 600 700" fill="none" style={{ maxWidth: 360, maxHeight: 420 }}>
+          {/* Dot grid background */}
+          <defs>
+            <pattern id="wizGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+              <circle cx="10" cy="10" r="0.9" fill="#C7D2FE" fillOpacity="0.4" />
+            </pattern>
+          </defs>
+          <rect width="600" height="700" fill="url(#wizGrid)" />
 
-      <div style={{ marginBottom: 14 }}>
-        <label style={{ fontSize: 11, fontWeight: 600, color: "#374151", marginBottom: 5, display: "block" }}>Description</label>
-        <textarea
-          value={processMeta.description}
-          onChange={(e) => setProcessMeta({ description: e.target.value })}
-          placeholder="What does this process do?"
-          style={{
-            width: "100%", padding: "11px 14px", minHeight: 80, resize: "vertical",
-            border: "1.5px solid #E5E7EB", borderRadius: 10,
-            fontSize: 13, color: "#111827", fontFamily: "inherit", outline: "none",
-            background: "#fff", transition: "all 0.15s ease",
-          }}
-          onFocus={inputFocus} onBlur={inputBlur}
-        />
-      </div>
+          {/* ─── Row 1: Start → Review → Gateway ─── */}
+          {/* Start Event */}
+          <circle cx="60" cy="120" r="24" fill="#F0FDF4" stroke="#86EFAC" strokeWidth="2.5" />
+          <polygon points="55,112 68,120 55,128" fill="#16A34A" />
+          <text x="60" y="158" textAnchor="middle" fontSize="10" fill="#6B7280" fontFamily="Inter">Start</text>
 
-      <div style={{ display: "flex", gap: 10 }}>
-        <button style={{
-          padding: "10px 18px", borderRadius: 10,
-          border: "1.5px solid #E5E7EB", background: "rgba(255,255,255,0.8)",
-          color: "#374151", fontSize: 13, fontWeight: 500,
-          cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s ease",
-        }}>Cancel</button>
-        <button
-          onClick={() => canContinue && onNext()}
-          style={{
-            flex: 1, padding: "10px 18px", borderRadius: 10, border: "none",
-            background: canContinue ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
-            color: canContinue ? "#fff" : "#9CA3AF",
-            fontSize: 13, fontWeight: 600,
-            cursor: canContinue ? "pointer" : "not-allowed",
-            fontFamily: "inherit",
-            boxShadow: canContinue ? "0 4px 16px rgba(79,70,229,0.3)" : "none",
-            transition: "all 0.2s ease",
-          }}
-        >Continue →</button>
+          {/* Arrow → */}
+          <line x1="84" y1="120" x2="140" y2="120" stroke="#94A3B8" strokeWidth="1.5" />
+          <polygon points="137,116 145,120 137,124" fill="#94A3B8" />
+
+          {/* Review Task */}
+          <rect x="148" y="100" width="110" height="40" rx="10" fill="#EEF2FF" stroke="#C7D2FE" strokeWidth="1.5" />
+          <text x="203" y="124" textAnchor="middle" fontSize="12" fontWeight="600" fill="#4F46E5" fontFamily="Inter">Review</text>
+          <text x="203" y="136" textAnchor="middle" fontSize="8" fill="#818CF8" fontFamily="Inter">User Task</text>
+
+          {/* Arrow → */}
+          <line x1="258" y1="120" x2="310" y2="120" stroke="#94A3B8" strokeWidth="1.5" />
+          <polygon points="307,116 315,120 307,124" fill="#94A3B8" />
+
+          {/* Exclusive Gateway */}
+          <g transform="translate(340,120)">
+            <rect x="-20" y="-20" width="40" height="40" rx="5" transform="rotate(45)" fill="#FFFBEB" stroke="#FDE68A" strokeWidth="2.5" />
+            <line x1="-8" y1="-8" x2="8" y2="8" stroke="#CA8A04" strokeWidth="2.5" strokeLinecap="round" />
+            <line x1="8" y1="-8" x2="-8" y2="8" stroke="#CA8A04" strokeWidth="2.5" strokeLinecap="round" />
+          </g>
+          <text x="340" y="158" textAnchor="middle" fontSize="10" fill="#6B7280" fontFamily="Inter">Decision</text>
+
+          {/* ─── Right branch: Gateway → Approve → End ─── */}
+          <line x1="364" y1="120" x2="416" y2="120" stroke="#94A3B8" strokeWidth="1.5" />
+          <polygon points="413,116 421,120 413,124" fill="#94A3B8" />
+          <text x="390" y="112" textAnchor="middle" fontSize="8" fill="#10B981" fontFamily="Inter">Yes</text>
+
+          <rect x="424" y="100" width="100" height="40" rx="10" fill="#F0FDF4" stroke="#A7F3D0" strokeWidth="1.5" />
+          <text x="474" y="124" textAnchor="middle" fontSize="12" fontWeight="600" fill="#059669" fontFamily="Inter">Approve</text>
+
+          <line x1="524" y1="120" x2="556" y2="120" stroke="#94A3B8" strokeWidth="1.5" />
+          <polygon points="553,116 561,120 553,124" fill="#94A3B8" />
+
+          {/* End Event */}
+          <circle cx="572" cy="120" r="18" fill="#FEF2F2" stroke="#FCA5A5" strokeWidth="3" />
+          <rect x="564" y="112" width="16" height="16" rx="3" fill="#DC2626" />
+
+          {/* ─── Down branch: Gateway → Notify → Archive ─── */}
+          <line x1="340" y1="148" x2="340" y2="220" stroke="#94A3B8" strokeWidth="1.5" />
+          <polygon points="336,217 340,225 344,217" fill="#94A3B8" />
+          <text x="350" y="185" fontSize="8" fill="#DC2626" fontFamily="Inter">No</text>
+
+          <rect x="285" y="228" width="110" height="40" rx="10" fill="#FFF7ED" stroke="#FDBA74" strokeWidth="1.5" />
+          <text x="340" y="252" textAnchor="middle" fontSize="12" fontWeight="600" fill="#EA580C" fontFamily="Inter">Notify Team</text>
+          <text x="340" y="264" textAnchor="middle" fontSize="8" fill="#FB923C" fontFamily="Inter">Service Task</text>
+
+          <line x1="395" y1="248" x2="440" y2="248" stroke="#94A3B8" strokeWidth="1.5" />
+          <polygon points="437,244 445,248 437,252" fill="#94A3B8" />
+
+          <rect x="448" y="228" width="100" height="40" rx="10" fill="#F0F9FF" stroke="#BAE6FD" strokeWidth="1.5" />
+          <text x="498" y="252" textAnchor="middle" fontSize="12" fontWeight="600" fill="#0284C7" fontFamily="Inter">Archive</text>
+          <text x="498" y="264" textAnchor="middle" fontSize="8" fill="#38BDF8" fontFamily="Inter">Script Task</text>
+
+          {/* ─── Row 3: Subprocess + Parallel branch ─── */}
+          <line x1="340" y1="268" x2="340" y2="340" stroke="#94A3B8" strokeWidth="1" strokeDasharray="5 3" opacity="0.5" />
+
+          <rect x="270" y="345" width="140" height="45" rx="10" fill="#F9FAFB" stroke="#D0D5DD" strokeWidth="1.5" strokeDasharray="5 3" />
+          <text x="340" y="372" textAnchor="middle" fontSize="11" fontWeight="500" fill="#475467" fontFamily="Inter">Error Handling</text>
+          <text x="340" y="384" textAnchor="middle" fontSize="8" fill="#9CA3AF" fontFamily="Inter">Subprocess</text>
+
+          {/* Parallel Gateway */}
+          <g transform="translate(120,248)">
+            <rect x="-18" y="-18" width="36" height="36" rx="4" transform="rotate(45)" fill="#EFF6FF" stroke="#93C5FD" strokeWidth="2" />
+            <line x1="0" y1="-9" x2="0" y2="9" stroke="#2563EB" strokeWidth="2.5" strokeLinecap="round" />
+            <line x1="-9" y1="0" x2="9" y2="0" stroke="#2563EB" strokeWidth="2.5" strokeLinecap="round" />
+          </g>
+          <text x="120" y="284" textAnchor="middle" fontSize="10" fill="#6B7280" fontFamily="Inter">Parallel</text>
+
+          <line x1="60" y1="144" x2="60" y2="248" stroke="#94A3B8" strokeWidth="1" strokeDasharray="5 3" opacity="0.4" />
+          <line x1="60" y1="248" x2="96" y2="248" stroke="#94A3B8" strokeWidth="1.5" />
+          <line x1="144" y1="248" x2="285" y2="248" stroke="#94A3B8" strokeWidth="1" strokeDasharray="5 3" opacity="0.4" />
+
+          {/* Send Task */}
+          <rect x="50" y="330" width="110" height="40" rx="10" fill="#F5F3FF" stroke="#DDD6FE" strokeWidth="1.5" />
+          <text x="105" y="354" textAnchor="middle" fontSize="12" fontWeight="600" fill="#7C3AED" fontFamily="Inter">Send Email</text>
+          <text x="105" y="366" textAnchor="middle" fontSize="8" fill="#A78BFA" fontFamily="Inter">Send Task</text>
+          <line x1="120" y1="274" x2="120" y2="330" stroke="#94A3B8" strokeWidth="1" strokeDasharray="5 3" opacity="0.4" />
+
+          {/* Pool/Lane at bottom */}
+          <rect x="30" y="420" width="540" height="65" rx="10" fill="white" fillOpacity="0.4" stroke="#E5E7EB" strokeWidth="1.5" />
+          <rect x="30" y="420" width="32" height="65" rx="10" fill="#EEF2FF" fillOpacity="0.4" />
+          <text x="46" y="458" textAnchor="middle" fontSize="8" fill="#818CF8" fontWeight="600" transform="rotate(-90 46 458)">Pool</text>
+          <line x1="30" y1="452" x2="570" y2="452" stroke="#E5E7EB" strokeWidth="1" strokeDasharray="4 3" />
+          <text x="80" y="440" fontSize="8" fill="#9CA3AF" fontFamily="Inter">Lane A</text>
+          <text x="80" y="470" fontSize="8" fill="#9CA3AF" fontFamily="Inter">Lane B</text>
+
+          {/* Timer Event */}
+          <circle cx="500" y="360" cy="360" r="18" fill="#F0F9FF" stroke="#7DD3FC" strokeWidth="2" />
+          <circle cx="500" cy="360" r="10" fill="none" stroke="#0EA5E9" strokeWidth="1.5" />
+          <line x1="500" y1="354" x2="500" y2="360" stroke="#0EA5E9" strokeWidth="1.5" strokeLinecap="round" />
+          <line x1="500" y1="360" x2="504" y2="363" stroke="#0EA5E9" strokeWidth="1.5" strokeLinecap="round" />
+          <text x="500" y="392" textAnchor="middle" fontSize="10" fill="#6B7280" fontFamily="Inter">Timer</text>
+
+          {/* Data Object */}
+          <path d="M480 440 L510 440 L520 450 L520 480 L480 480 Z" fill="white" fillOpacity="0.6" stroke="#D0D5DD" strokeWidth="1.5" />
+          <path d="M510 440 L510 450 L520 450" fill="none" stroke="#D0D5DD" strokeWidth="1.5" />
+          <text x="500" y="496" textAnchor="middle" fontSize="8" fill="#9CA3AF" fontFamily="Inter">Data</text>
+        </svg>
       </div>
-    </WizardCard>
+    </div>
   );
 }
 
-/* ─── Step 2: Business Document ─── */
-function StepDocument({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
-  const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
-  const [tab, setTab] = useState<"existing" | "json" | "build">("existing");
-  const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
-  const [jsonInput, setJsonInput] = useState("");
+/* ─── Type color map ─── */
+const TYPE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  string: { bg: "#EEF2FF", text: "#4F46E5", border: "#C7D2FE" },
+  number: { bg: "#FFF7ED", text: "#EA580C", border: "#FDBA74" },
+  boolean: { bg: "#F0FDF4", text: "#059669", border: "#A7F3D0" },
+  date: { bg: "#FFF1F2", text: "#BE123C", border: "#FECDD3" },
+  object: { bg: "#F5F3FF", text: "#7C3AED", border: "#DDD6FE" },
+  array: { bg: "#F0F9FF", text: "#0284C7", border: "#BAE6FD" },
+};
 
-  const selectedSchema = MOCK_DOCS.find((d) => d.id === selectedDoc)?.schema;
-  const schemaToShow = tab === "existing" ? selectedSchema : tab === "json" ? (() => { try { return JSON.parse(jsonInput); } catch { return null; } })() : null;
-  const canContinue = tab === "existing" ? !!selectedDoc : tab === "json" ? !!schemaToShow : false;
-
-  const handleOpenCanvas = () => {
-    const doc = MOCK_DOCS.find((d) => d.id === selectedDoc);
-    setProcessMeta({ businessDoc: schemaToShow || null, businessDocName: doc?.name || "Custom Schema" });
-    onNext();
-  };
+/* ─── Field Row (redesigned — card style) ─── */
+function FieldRow({ field, depth, onChange, onRemove, onAddChild }: {
+  field: FieldDef; depth: number;
+  onChange: (id: string, partial: Partial<FieldDef>) => void;
+  onRemove: (id: string) => void;
+  onAddChild: (parentId: string, target: "children" | "items") => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const hasNested = field.type === "object" || field.type === "array";
+  const nestedFields = field.type === "object" ? field.children : field.type === "array" ? field.items : null;
+  const nestedTarget = field.type === "object" ? "children" : "items";
+  const tc = TYPE_COLORS[field.type] || TYPE_COLORS.string;
 
   return (
-    <WizardCard style={{
-      left: "4%", top: "10%",
-      width: "min(88%, 760px)", maxHeight: "80%",
-      display: "grid", gridTemplateColumns: "1fr 1fr",
-      padding: 0, overflow: "hidden",
-    }}>
-      {/* Left: selector */}
-      <div style={{ padding: "24px 24px 20px", borderRight: "1px solid #F2F4F7", display: "flex", flexDirection: "column" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
-          <div style={{
-            width: 40, height: 40, borderRadius: 12,
-            background: "linear-gradient(135deg, #F0FDF4, #DCFCE7)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "0 2px 8px rgba(16,185,129,0.12)",
+    <div style={{ marginLeft: depth * 20 }}>
+      {/* Card row */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "6px 10px", marginBottom: 4,
+        borderRadius: 8, background: "#fff",
+        border: "1px solid #F2F4F7",
+        transition: "border-color 0.12s ease",
+      }}>
+        {/* Collapse chevron or nesting dot */}
+        {hasNested ? (
+          <button onClick={() => setCollapsed(!collapsed)} style={{
+            width: 20, height: 20, borderRadius: 4, border: "none",
+            background: "#F9FAFB", cursor: "pointer", display: "flex",
+            alignItems: "center", justifyContent: "center", color: "#6B7280",
+            flexShrink: 0, padding: 0,
           }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="1.5">
-              <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+              style={{ transition: "transform 0.15s ease", transform: collapsed ? "rotate(-90deg)" : "rotate(0)" }}>
+              <polyline points="6 9 12 15 18 9" />
             </svg>
+          </button>
+        ) : depth > 0 ? (
+          <div style={{ width: 20, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#D0D5DD" }} />
           </div>
-          <div>
-            <div style={{ fontSize: 17, fontWeight: 700, color: "#111827" }}>Business Document</div>
-            <div style={{ fontSize: 12, color: "#9CA3AF" }}>Step 2 of 2</div>
-          </div>
-        </div>
+        ) : <div style={{ width: 20, flexShrink: 0 }} />}
 
-        {/* Tabs */}
-        <div style={{ display: "flex", gap: 0, marginBottom: 14, borderBottom: "2px solid #F2F4F7" }}>
-          {([["existing", "Existing"], ["json", "Paste JSON"], ["build", "Build"]] as const).map(([key, label]) => (
-            <button
-              key={key} onClick={() => setTab(key)}
-              style={{
-                padding: "7px 14px", border: "none", background: "none",
-                fontSize: 12, fontWeight: tab === key ? 600 : 500,
-                color: tab === key ? "#4F46E5" : "#9CA3AF",
-                borderBottom: tab === key ? "2px solid #4F46E5" : "2px solid transparent",
-                marginBottom: -2, cursor: "pointer", fontFamily: "inherit",
-              }}
-            >{label}</button>
-          ))}
-        </div>
+        {/* Field name input */}
+        <input
+          type="text"
+          value={field.name}
+          onChange={(e) => onChange(field.id, { name: e.target.value })}
+          placeholder="field name"
+          style={{
+            flex: 1, minWidth: 0, padding: "4px 0",
+            border: "none", borderBottom: "1.5px solid transparent",
+            fontSize: 13, color: "#111827", fontFamily: "'JetBrains Mono', monospace",
+            outline: "none", background: "transparent",
+            transition: "border-color 0.15s ease",
+          }}
+          onFocus={(e) => { e.currentTarget.style.borderBottomColor = "#C7D2FE"; }}
+          onBlur={(e) => { e.currentTarget.style.borderBottomColor = "transparent"; }}
+        />
 
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {tab === "existing" && MOCK_DOCS.map((doc, i) => (
-            <motion.div
-              key={doc.id}
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ duration: 0.3, delay: i * 0.08 }}
-              onClick={() => setSelectedDoc(doc.id)}
-              style={{
-                padding: "12px 14px", borderRadius: 10, marginBottom: 8,
-                border: `1.5px solid ${selectedDoc === doc.id ? "#818CF8" : "#E5E7EB"}`,
-                background: selectedDoc === doc.id ? "#EEF2FF" : "#fff",
-                display: "flex", alignItems: "center", gap: 10,
-                cursor: "pointer", transition: "all 0.15s ease",
-              }}
-            >
-              <div style={{
-                width: 34, height: 34, borderRadius: 8, flexShrink: 0,
-                background: selectedDoc === doc.id ? "#EEF2FF" : "#F3F4F6",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={selectedDoc === doc.id ? "#4F46E5" : "#6B7280"} strokeWidth="1.5">
-                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" />
-                </svg>
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "#111827" }}>{doc.name}</div>
-                <div style={{ fontSize: 10, color: "#6B7280", marginTop: 1 }}>{doc.fields} fields · {doc.usedIn} process{doc.usedIn !== 1 ? "es" : ""}</div>
-              </div>
-              {selectedDoc === doc.id && <span style={{ color: "#4F46E5", fontWeight: 700, fontSize: 14 }}>✓</span>}
-            </motion.div>
-          ))}
-
-          {tab === "json" && (
-            <textarea
-              value={jsonInput} onChange={(e) => setJsonInput(e.target.value)}
-              placeholder={'{ "fieldName": "dataType", ... }'}
-              style={{
-                width: "100%", padding: "12px 14px", minHeight: 180, resize: "vertical",
-                border: "1.5px solid #E5E7EB", borderRadius: 10,
-                fontSize: 12, color: "#111827", fontFamily: "'JetBrains Mono', monospace",
-                lineHeight: 1.7, outline: "none", background: "#F9FAFB",
-              }}
-            />
-          )}
-
-          {tab === "build" && (
-            <div style={{ padding: "20px 0", textAlign: "center", color: "#9CA3AF", fontSize: 12 }}>
-              Field builder coming soon — use "Paste JSON" for now.
-            </div>
-          )}
-        </div>
-
-        <div style={{ display: "flex", gap: 10, paddingTop: 14, borderTop: "1px solid #F2F4F7" }}>
-          <button onClick={onBack} style={{
-            padding: "10px 16px", borderRadius: 10,
-            border: "1.5px solid #E5E7EB", background: "rgba(255,255,255,0.8)",
-            color: "#374151", fontSize: 13, fontWeight: 500,
-            cursor: "pointer", fontFamily: "inherit",
-          }}>← Back</button>
-          <button
-            onClick={() => canContinue && handleOpenCanvas()}
-            style={{
-              flex: 1, padding: "10px 16px", borderRadius: 10, border: "none",
-              background: canContinue ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
-              color: canContinue ? "#fff" : "#9CA3AF",
-              fontSize: 13, fontWeight: 600,
-              cursor: canContinue ? "pointer" : "not-allowed",
-              fontFamily: "inherit",
-              boxShadow: canContinue ? "0 4px 16px rgba(79,70,229,0.3)" : "none",
+        {/* Type badge (clickable dropdown) */}
+        <div style={{ position: "relative", flexShrink: 0 }}>
+          <select
+            value={field.type}
+            onChange={(e) => {
+              const newType = e.target.value as FieldDef["type"];
+              const update: Partial<FieldDef> = { type: newType };
+              if (newType === "object") { update.children = field.children || []; update.items = undefined; }
+              else if (newType === "array") { update.items = field.items || []; update.children = undefined; }
+              else { update.children = undefined; update.items = undefined; }
+              onChange(field.id, update);
             }}
-          >Open Canvas →</button>
-        </div>
-      </div>
-
-      {/* Right: schema preview */}
-      <div style={{ padding: "24px 24px 20px", background: "rgba(249,250,251,0.6)", display: "flex", flexDirection: "column" }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "#111827", marginBottom: 12 }}>Schema Preview</div>
-        <pre style={{
-          flex: 1, minHeight: 160,
-          background: "#1E293B", borderRadius: 12, padding: "18px 20px",
-          fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 11.5, lineHeight: 1.8, color: "#94A3B8",
-          overflow: "auto", whiteSpace: "pre", margin: 0,
-          boxShadow: "inset 0 2px 8px rgba(0,0,0,0.1)",
-        }}>
-          {schemaToShow ? JSON.stringify(schemaToShow, null, 2)
-            .split("\n").map((line, i) => {
-              const parts = line.split(/("(?:[^"\\]|\\.)*")/g);
-              return (
-                <div key={i}>
-                  {parts.map((part, j) => {
-                    if (part.startsWith('"') && part.endsWith('"')) {
-                      const rest = parts.slice(j + 1).join("");
-                      if (rest.trimStart().startsWith(":"))
-                        return <span key={j} style={{ color: "#7DD3FC" }}>{part}</span>;
-                      return <span key={j} style={{ color: "#86EFAC" }}>{part}</span>;
-                    }
-                    return <span key={j} style={{ color: "#64748B" }}>{part}</span>;
-                  })}
-                </div>
-              );
-            }) : (
-            <span style={{ color: "#475569", fontStyle: "italic" }}>Select a document or paste JSON to preview</span>
-          )}
-        </pre>
-        {selectedDoc && tab === "existing" && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
             style={{
-              marginTop: 12, padding: "10px 14px", borderRadius: 10,
-              background: "#EEF2FF", border: "1px solid #C7D2FE",
+              padding: "3px 20px 3px 8px", borderRadius: 6,
+              border: `1px solid ${tc.border}`, background: tc.bg,
+              fontSize: 11, fontWeight: 600, color: tc.text,
+              fontFamily: "inherit", outline: "none", cursor: "pointer",
+              appearance: "none", WebkitAppearance: "none",
             }}
           >
-            <div style={{ fontSize: 11, fontWeight: 600, color: "#4F46E5", marginBottom: 2 }}>📄 Selected</div>
-            <div style={{ fontSize: 11, color: "#475467", lineHeight: 1.4 }}>
-              {MOCK_DOCS.find((d) => d.id === selectedDoc)?.name}
-            </div>
-          </motion.div>
-        )}
+            {FIELD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={tc.text} strokeWidth="2.5"
+            style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+
+        {/* Required toggle */}
+        <button
+          onClick={() => onChange(field.id, { required: !field.required })}
+          title={field.required ? "Required" : "Optional"}
+          style={{
+            padding: "2px 6px", borderRadius: 4, flexShrink: 0,
+            border: "none", cursor: "pointer",
+            background: field.required ? "#EEF2FF" : "transparent",
+            fontSize: 10, fontWeight: 600,
+            color: field.required ? "#4F46E5" : "#D0D5DD",
+            transition: "all 0.12s ease",
+          }}
+        >
+          {field.required ? "REQ" : "OPT"}
+        </button>
+
+        {/* Delete */}
+        <button
+          onClick={() => onRemove(field.id)}
+          style={{
+            width: 20, height: 20, borderRadius: 4, border: "none",
+            background: "none", cursor: "pointer", display: "flex",
+            alignItems: "center", justifyContent: "center",
+            color: "#D0D5DD", padding: 0, flexShrink: 0,
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "#EF4444"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = "#D0D5DD"; }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
       </div>
-    </WizardCard>
+
+      {/* Nested children */}
+      {hasNested && !collapsed && nestedFields && (
+        <div style={{
+          marginLeft: 10, paddingLeft: 10,
+          borderLeft: `2px solid ${tc.border}`,
+          marginBottom: 4,
+        }}>
+          {field.type === "array" && nestedFields.length === 0 && (
+            <div style={{ fontSize: 10, color: "#9CA3AF", fontStyle: "italic", padding: "4px 0" }}>
+              Define the structure of each array item
+            </div>
+          )}
+          {nestedFields.map((child) => (
+            <FieldRow key={child.id} field={child} depth={depth + 1}
+              onChange={onChange} onRemove={onRemove} onAddChild={onAddChild} />
+          ))}
+          <button
+            onClick={() => onAddChild(field.id, nestedTarget as "children" | "items")}
+            style={{
+              display: "flex", alignItems: "center", gap: 4,
+              padding: "4px 8px", border: "none", borderRadius: 4,
+              background: "none", color: tc.text, fontSize: 11, fontWeight: 500,
+              cursor: "pointer", fontFamily: "inherit", opacity: 0.7,
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.7"; }}
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            + {field.type === "array" ? "item field" : "child"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Field Tree Builder ─── */
+function FieldTreeBuilder({ fields, onChange }: { fields: FieldDef[]; onChange: (f: FieldDef[]) => void }) {
+  const handleFieldChange = (id: string, partial: Partial<FieldDef>) => {
+    onChange(updateFieldInTree(fields, id, (f) => ({ ...f, ...partial })));
+  };
+  const handleRemove = (id: string) => { onChange(removeFieldFromTree(fields, id)); };
+  const handleAddChild = (parentId: string, target: "children" | "items") => { onChange(addFieldToParent(fields, parentId, target)); };
+  const handleAddRoot = () => { onChange([...fields, createField()]); };
+
+  return (
+    <div>
+      {fields.length === 0 && (
+        <div style={{ padding: "24px 0", textAlign: "center" }}>
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#D0D5DD" strokeWidth="1.5" style={{ margin: "0 auto 8px", display: "block" }}>
+            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
+          </svg>
+          <div style={{ fontSize: 13, color: "#9CA3AF", marginBottom: 2 }}>No fields defined</div>
+          <div style={{ fontSize: 11, color: "#D0D5DD" }}>Add fields below or import a template / paste JSON above</div>
+        </div>
+      )}
+      {fields.map((f) => (
+        <FieldRow key={f.id} field={f} depth={0}
+          onChange={handleFieldChange} onRemove={handleRemove} onAddChild={handleAddChild} />
+      ))}
+      <button
+        onClick={handleAddRoot}
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          marginTop: 6, padding: "8px 12px",
+          border: "1.5px dashed #D0D5DD", borderRadius: 8,
+          background: "none", color: "#6B7280", fontSize: 12, fontWeight: 500,
+          cursor: "pointer", fontFamily: "inherit", width: "100%",
+          justifyContent: "center", transition: "all 0.15s ease",
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#818CF8"; e.currentTarget.style.color = "#4F46E5"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#D0D5DD"; e.currentTarget.style.color = "#6B7280"; }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+        Add Field
+      </button>
+    </div>
+  );
+}
+
+/* ─── Template type ─── */
+type DocTemplate = { id: string; name: string; schema: Record<string, unknown>; createdAt: string };
+
+/* ─── Unsaved Changes Dialog ─── */
+function UnsavedChangesDialog({ onSave, onDiscard, onCancel, saving }: {
+  onSave: () => void; onDiscard: () => void; onCancel: () => void; saving: boolean;
+}) {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 100,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div onClick={onCancel} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)" }} />
+      <div style={{
+        position: "relative", background: "#fff", borderRadius: 14,
+        padding: "28px 32px", width: 440, maxWidth: "90vw",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05)",
+      }}>
+        {/* Warning icon */}
+        <div style={{
+          width: 44, height: 44, borderRadius: 12,
+          background: "#FFF7ED", border: "1px solid #FED7AA",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          marginBottom: 16,
+        }}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2" strokeLinecap="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+        </div>
+
+        <h3 style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 6 }}>Unsaved schema changes</h3>
+        <p style={{ fontSize: 13, color: "#6B7280", lineHeight: 1.6, marginBottom: 24 }}>
+          You've modified the business document schema. Would you like to save your changes before leaving?
+        </p>
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button onClick={onDiscard} style={{
+            padding: "9px 18px", borderRadius: 8, border: "1px solid #E5E7EB",
+            background: "#fff", color: "#374151", fontSize: 13, fontWeight: 500,
+            cursor: "pointer", fontFamily: "inherit",
+          }}>Discard Changes</button>
+          <button onClick={onCancel} style={{
+            padding: "9px 18px", borderRadius: 8, border: "1px solid #E5E7EB",
+            background: "#fff", color: "#374151", fontSize: 13, fontWeight: 500,
+            cursor: "pointer", fontFamily: "inherit",
+          }}>Keep Editing</button>
+          <button onClick={onSave} disabled={saving} style={{
+            padding: "9px 22px", borderRadius: 8, border: "none",
+            background: "linear-gradient(135deg, #4F46E5, #6366F1)",
+            color: "#fff", fontSize: 13, fontWeight: 600,
+            cursor: saving ? "not-allowed" : "pointer", fontFamily: "inherit",
+            boxShadow: "0 2px 8px rgba(79,70,229,0.25)",
+          }}>{saving ? "Saving..." : "Save & Continue"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Step 2: Business Document — Smart Single View ─── */
+function StepDocument() {
+  const processId = useCanvasStore((s) => s.processId);
+  const setWizardStep = useCanvasStore((s) => s.setWizardStep);
+  const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
+  const processMeta = useCanvasStore((s) => s.processMeta);
+  const wizardOrigin = useCanvasStore((s) => s.wizardOrigin);
+  const [expanded, setExpanded] = useState<"template" | "paste" | null>(null);
+  const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [fields, setFields] = useState<FieldDef[]>([]);
+  const [source, setSource] = useState<"template" | "paste" | "empty" | null>(null);
+  const [templates, setTemplates] = useState<DocTemplate[]>([]);
+  const [initialSchemaJson, setInitialSchemaJson] = useState<string>("");
+  const [pendingNav, setPendingNav] = useState<"details" | "canvas" | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Load templates from API
+  useEffect(() => {
+    apiGet<DocTemplate[]>("/processes/templates/list").then(setTemplates).catch(() => {});
+    // If process already has a document, load it into fields
+    if (processMeta.businessDoc) {
+      const loadedFields = jsonToFields(processMeta.businessDoc);
+      setFields(loadedFields);
+      setSource(processMeta.businessDocSource || "paste");
+      setInitialSchemaJson(JSON.stringify(fieldsToJson(loadedFields)));
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const schemaJson = fieldsToJson(fields);
+  const schemaStr = JSON.stringify(schemaJson, null, 2);
+  const hasSchema = fields.length > 0 && fields.some((f) => f.name.trim());
+
+  // Import from template
+  const handleSelectDoc = (docId: string) => {
+    setSelectedDoc(docId);
+    const doc = templates.find((d) => d.id === docId);
+    if (doc) {
+      setFields(jsonToFields(doc.schema));
+      setExpanded(null);
+      setSource("template");
+    }
+  };
+
+  // Import from pasted JSON
+  const handleImportPaste = () => {
+    if (!pasteText.trim()) return;
+    try {
+      const parsed = JSON.parse(pasteText);
+      setFields(jsonToFields(parsed));
+      setPasteError(null);
+      setExpanded(null);
+      setSelectedDoc(null);
+      setSource("paste");
+    } catch (e) {
+      setPasteError((e as Error).message);
+    }
+  };
+
+  // Field builder changes
+  const handleFieldsChange = (f: FieldDef[]) => { setFields(f); };
+
+  // Start empty
+  const handleStartEmpty = () => {
+    setFields([createField()]);
+    setExpanded(null);
+    setSelectedDoc(null);
+    setSource("empty");
+  };
+
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const setDocumentDirty = useCanvasStore((s) => s.setDocumentDirty);
+  const schemaChanged = JSON.stringify(schemaJson) !== initialSchemaJson;
+
+  // Keep store in sync with dirty state
+  useEffect(() => { setDocumentDirty(schemaChanged); return () => setDocumentDirty(false); }, [schemaChanged]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveSchema = async (): Promise<boolean> => {
+    if (!processId) { setSaveError("Process not saved yet. Go back and save details first."); return false; }
+    if (!hasSchema) { setSaveError("Add at least one named field before continuing."); return false; }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const sourceMap: Record<string, string> = { template: "TEMPLATE", paste: "PASTE", empty: "EMPTY" };
+      await apiPut(`/processes/${processId}/document`, {
+        schema: schemaJson,
+        source: sourceMap[source || "empty"] || "EMPTY",
+        templateId: source === "template" ? selectedDoc : undefined,
+      });
+      const doc = templates.find((d) => d.id === selectedDoc);
+      setProcessMeta({ businessDoc: schemaJson, businessDocName: doc?.name || "Custom Schema", businessDocSource: source });
+      setInitialSchemaJson(JSON.stringify(schemaJson));
+      return true;
+    } catch (e: any) {
+      setSaveError(e?.message || "Failed to save document. Check if the API server is running.");
+      console.error("Save document failed:", e);
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const navigateTo = (target: "details" | "canvas") => {
+    if (schemaChanged && initialSchemaJson) {
+      setPendingNav(target);
+    } else {
+      setWizardStep(target);
+    }
+  };
+
+  const handleOpenCanvas = async () => {
+    if (!processId) { setSaveError("Process not saved yet. Go back and save details first."); return; }
+    if (!schemaChanged && initialSchemaJson) {
+      setWizardStep("canvas");
+      return;
+    }
+    const ok = await saveSchema();
+    if (ok) setWizardStep("canvas");
+  };
+
+  const handleDialogSave = async () => {
+    const ok = await saveSchema();
+    if (ok && pendingNav) {
+      setWizardStep(pendingNav);
+      setPendingNav(null);
+    }
+  };
+
+  const handleDialogDiscard = () => {
+    // Revert fields to the original schema
+    if (processMeta.businessDoc) {
+      setFields(jsonToFields(processMeta.businessDoc));
+      setSource(processMeta.businessDocSource || "paste");
+    }
+    if (pendingNav) {
+      setWizardStep(pendingNav);
+      setPendingNav(null);
+    }
+  };
+
+  const cardBtn = (icon: React.ReactNode, label: string, desc: string, isActive: boolean, onClick: () => void) => (
+    <button onClick={onClick} style={{
+      flex: 1, padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${isActive ? "#818CF8" : "#E5E7EB"}`,
+      background: isActive ? "#EEF2FF" : "#fff", cursor: "pointer", fontFamily: "inherit",
+      display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+      transition: "all 0.15s ease", textAlign: "center",
+    }}
+      onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.borderColor = "#C7D2FE"; }}
+      onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.borderColor = isActive ? "#818CF8" : "#E5E7EB"; }}
+    >
+      <div style={{ color: isActive ? "#4F46E5" : "#6B7280" }}>{icon}</div>
+      <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? "#4F46E5" : "#111827" }}>{label}</div>
+      <div style={{ fontSize: 10, color: "#9CA3AF" }}>{desc}</div>
+    </button>
+  );
+
+  return (
+    <>
+    {pendingNav && (
+      <UnsavedChangesDialog
+        saving={saving}
+        onSave={handleDialogSave}
+        onDiscard={handleDialogDiscard}
+        onCancel={() => setPendingNav(null)}
+      />
+    )}
+    <div style={{
+      display: "grid", gridTemplateColumns: "1fr 1fr",
+      height: "calc(100vh - 124px)", position: "relative", zIndex: 1,
+    }}>
+      {/* ═══ Left: Smart single view ═══ */}
+      <div style={{
+        borderRight: "1px solid #F2F4F7",
+        background: "rgba(255,255,255,0.9)", backdropFilter: "blur(12px)",
+        display: "flex", flexDirection: "column",
+        height: "100%", overflow: "hidden",
+      }}>
+        {/* Fixed header */}
+        <div style={{ padding: "32px 36px 0 36px", flexShrink: 0 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 700, color: "#111827", marginBottom: 4 }}>Business Document</h2>
+        <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 16, lineHeight: 1.5 }}>Define the data schema your process will work with.</div>
+
+        {/* 3 option cards — active card shows which method was used */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {cardBtn(
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>,
+            "Template", "From existing",
+            expanded === "template" || (source === "template" && expanded === null),
+            () => { setExpanded(expanded === "template" ? null : "template"); setFields([]); setSelectedDoc(null); setSource(null); setPasteText(""); setPasteError(null); },
+          )}
+          {cardBtn(
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>,
+            "Paste JSON", "Import schema",
+            expanded === "paste" || (source === "paste" && expanded === null),
+            () => { setExpanded(expanded === "paste" ? null : "paste"); setFields([]); setSelectedDoc(null); setSource(null); setPasteText(""); setPasteError(null); },
+          )}
+          {cardBtn(
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>,
+            "Start Empty", "Build from scratch",
+            source === "empty" && expanded === null,
+            handleStartEmpty,
+          )}
+        </div>
+
+        {/* Expanded: Template picker */}
+        {expanded === "template" && (
+          <div style={{
+            marginBottom: 12, padding: "10px", borderRadius: 10,
+            background: "#F9FAFB", border: "1px solid #E5E7EB",
+          }}>
+            {templates.map((doc) => (
+              <div key={doc.id} onClick={() => handleSelectDoc(doc.id)} style={{
+                padding: "10px 12px", borderRadius: 8, marginBottom: 4,
+                border: `1.5px solid ${selectedDoc === doc.id ? "#818CF8" : "transparent"}`,
+                background: selectedDoc === doc.id ? "#EEF2FF" : "#fff",
+                display: "flex", alignItems: "center", gap: 10,
+                cursor: "pointer", transition: "all 0.12s ease",
+              }}
+                onMouseEnter={(e) => { if (selectedDoc !== doc.id) e.currentTarget.style.background = "#F3F4F6"; }}
+                onMouseLeave={(e) => { if (selectedDoc !== doc.id) e.currentTarget.style.background = "#fff"; }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={selectedDoc === doc.id ? "#4F46E5" : "#9CA3AF"} strokeWidth="1.5">
+                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" />
+                </svg>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#111827" }}>{doc.name}</div>
+                  <div style={{ fontSize: 10, color: "#9CA3AF" }}>{Object.keys(doc.schema || {}).length} fields</div>
+                </div>
+                {selectedDoc === doc.id && <span style={{ color: "#4F46E5", fontWeight: 700, fontSize: 13 }}>✓</span>}
+              </div>
+            ))}
+            <div style={{ fontSize: 10, color: "#92400E", background: "#FFFBEB", padding: "6px 8px", borderRadius: 6, border: "1px solid #FDE68A", marginTop: 4 }}>
+              Changes below won't affect the original template.
+            </div>
+          </div>
+        )}
+
+        {/* Expanded: Paste JSON */}
+        {expanded === "paste" && (
+          <div style={{
+            marginBottom: 12, padding: "12px", borderRadius: 10,
+            background: "#F9FAFB", border: "1px solid #E5E7EB",
+          }}>
+            <textarea
+              value={pasteText}
+              onChange={(e) => { setPasteText(e.target.value); setPasteError(null); }}
+              placeholder={'{\n  "fieldName": "string",\n  "amount": "number"\n}'}
+              style={{
+                width: "100%", padding: "12px 14px", minHeight: 120, resize: "vertical",
+                border: `1.5px solid ${pasteError ? "#FCA5A5" : "#E5E7EB"}`, borderRadius: 8,
+                fontSize: 12, color: "#111827", fontFamily: "'JetBrains Mono', monospace",
+                lineHeight: 1.7, outline: "none", background: "#fff",
+              }}
+            />
+            {pasteError && (
+              <div style={{ marginTop: 4, fontSize: 11, color: "#DC2626" }}>
+                Invalid JSON: {pasteError.split(" at ")[0]}
+              </div>
+            )}
+            <button onClick={handleImportPaste} style={{
+              marginTop: 8, padding: "7px 16px", borderRadius: 6, border: "none",
+              background: pasteText.trim() ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
+              color: pasteText.trim() ? "#fff" : "#9CA3AF", fontSize: 12, fontWeight: 600,
+              cursor: pasteText.trim() ? "pointer" : "not-allowed", fontFamily: "inherit",
+            }}>Import into Fields ↓</button>
+          </div>
+        )}
+
+        {/* Source badge with clear button */}
+        {fields.length > 0 && !expanded && selectedDoc && (
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 10,
+            padding: "4px 6px 4px 10px", borderRadius: 6, background: "#F0FDF4", border: "1px solid #A7F3D0",
+            fontSize: 11, color: "#059669", fontWeight: 500, width: "fit-content",
+          }}>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+            From: {templates.find((d) => d.id === selectedDoc)?.name}
+            <button
+              onClick={() => { setFields([]); setSelectedDoc(null); setSource(null); }}
+              title="Clear and start over"
+              style={{
+                width: 16, height: 16, borderRadius: 4, border: "none",
+                background: "none", cursor: "pointer", display: "flex",
+                alignItems: "center", justifyContent: "center", color: "#6B7280",
+                padding: 0, marginLeft: 2,
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "#DC2626"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "#6B7280"; }}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        )}
+
+        </div>
+
+        {/* ─── Scrollable Field Builder ─── */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 36px" }}>
+          <FieldTreeBuilder fields={fields} onChange={handleFieldsChange} />
+        </div>
+
+        {/* Fixed Footer */}
+        <div style={{ flexShrink: 0, padding: "14px 36px", borderTop: "1px solid #F2F4F7" }}>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button onClick={() => navigateTo("details")} style={{
+              padding: "11px 20px", borderRadius: 10, border: "1.5px solid #E5E7EB",
+              background: "#fff", color: "#374151", fontSize: 14, fontWeight: 500,
+              cursor: "pointer", fontFamily: "inherit",
+            }}>← Details</button>
+            <button onClick={() => !saving && handleOpenCanvas()} style={{
+              padding: "11px 32px", borderRadius: 10, border: "none",
+              background: (hasSchema || initialSchemaJson) ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
+              color: (hasSchema || initialSchemaJson) ? "#fff" : "#9CA3AF", fontSize: 14, fontWeight: 600,
+              cursor: saving ? "not-allowed" : "pointer", fontFamily: "inherit",
+              boxShadow: (hasSchema || initialSchemaJson) ? "0 4px 12px rgba(79,70,229,0.25)" : "none",
+            }}>{saving ? "Saving..." : schemaChanged ? "Save & Open Canvas →" : wizardOrigin === "canvas" ? "Back to Canvas →" : "Open Canvas →"}</button>
+          </div>
+          {saveError && (
+            <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: 8, background: "#FEF2F2", border: "1px solid #FECACA", color: "#DC2626", fontSize: 12 }}>
+              {saveError}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ═══ Right: Read-only JSON Preview ═══ */}
+      <div style={{ padding: "32px 32px", background: "rgba(249,250,251,0.8)", backdropFilter: "blur(8px)", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Schema Preview</div>
+          {hasSchema && (
+            <span style={{ fontSize: 11, color: "#10B981", fontWeight: 500, display: "flex", alignItems: "center", gap: 4 }}>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+              {fields.filter((f) => f.name.trim()).length} fields
+            </span>
+          )}
+        </div>
+
+        <pre style={{
+          flex: 1, minHeight: 200, margin: 0,
+          background: "#1E293B", borderRadius: 12, padding: "20px 24px",
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 12.5, lineHeight: 1.8, color: "#94A3B8",
+          overflow: "auto", whiteSpace: "pre",
+          border: "1.5px solid #334155",
+        }}>
+          {hasSchema ? schemaStr.split("\n").map((line, i) => {
+            const parts = line.split(/("(?:[^"\\]|\\.)*")/g);
+            return (
+              <div key={i}>{parts.map((part, j) => {
+                if (part.startsWith('"') && part.endsWith('"')) {
+                  const rest = parts.slice(j + 1).join("");
+                  if (rest.trimStart().startsWith(":")) return <span key={j} style={{ color: "#7DD3FC" }}>{part}</span>;
+                  return <span key={j} style={{ color: "#86EFAC" }}>{part}</span>;
+                }
+                return <span key={j} style={{ color: "#64748B" }}>{part}</span>;
+              })}</div>
+            );
+          }) : <span style={{ color: "#475569", fontStyle: "italic" }}>Schema will appear here as you define fields</span>}
+        </pre>
+
+        <div style={{ marginTop: 10, fontSize: 10, color: "#64748B", lineHeight: 1.5 }}>
+          This preview updates live as you build fields.
+          Supported types: {["string", "number", "boolean", "date", "object", "array"].map((t) => (
+            <code key={t} style={{ color: "#94A3B8", marginRight: 3 }}>{t}</code>
+          ))}
+        </div>
+      </div>
+    </div>
+    </>
   );
 }
 
@@ -595,50 +1031,27 @@ function StepDocument({ onNext, onBack }: { onNext: () => void; onBack: () => vo
 export default function ProcessWizard() {
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const setWizardStep = useCanvasStore((s) => s.setWizardStep);
+  const processId = useCanvasStore((s) => s.processId);
+  const stepIndex = wizardStep === "details" ? 0 : wizardStep === "document" ? 1 : 2;
 
-  const stepNum = wizardStep === "details" ? 1 : wizardStep === "document" ? 2 : 3;
-  const spotlightPos = wizardStep === "details"
-    ? { x: "55%", y: "35%" }
-    : { x: "30%", y: "55%" };
-
-  const handleStepClick = (s: number) => {
+  const handleStepClick = (i: number) => {
     const keys = ["details", "document", "canvas"] as const;
-    setWizardStep(keys[s - 1]);
+    setWizardStep(keys[i]);
   };
 
   return (
-    <div style={{
-      position: "absolute", inset: 0, zIndex: 20,
-      background: "#F8FAFC",
-      overflow: "hidden",
-      perspective: 1200,
-    }}>
-      {/* Camera pan + 3D tilt — canvas shifts per step */}
-      <motion.div
-        animate={{
-          x: wizardStep === "details" ? 0 : wizardStep === "document" ? -100 : 0,
-          y: wizardStep === "details" ? 0 : wizardStep === "document" ? -60 : 0,
-          scale: wizardStep === "canvas" ? 0.85 : 1,
-          rotateY: wizardStep === "details" ? 0 : wizardStep === "document" ? 1.5 : 0,
-          rotateX: wizardStep === "details" ? 0 : wizardStep === "document" ? 0.5 : 0,
-        }}
-        transition={{ duration: 1, ease: [0.22, 1, 0.36, 1] }}
-        style={{ position: "absolute", inset: -80, transformOrigin: "center center", transformStyle: "preserve-3d" }}
-      >
-        <CanvasBackground step={wizardStep} />
-      </motion.div>
+    <div style={{ position: "absolute", inset: 0, zIndex: 20, background: "#F8FAFC", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {/* Dot grid background */}
+      <div style={{ position: "absolute", inset: 0, backgroundImage: "radial-gradient(circle, #C7D2FE 1.2px, transparent 1.2px)", backgroundSize: "28px 28px", opacity: 0.35, pointerEvents: "none" }} />
+      {/* Radial glow */}
+      <div style={{ position: "absolute", top: "10%", left: "50%", transform: "translateX(-50%)", width: 700, height: 500, background: "radial-gradient(ellipse, rgba(99,102,241,0.06) 0%, rgba(99,102,241,0.02) 40%, transparent 70%)", pointerEvents: "none", borderRadius: "50%" }} />
 
-      <SpotlightOverlay focusX={spotlightPos.x} focusY={spotlightPos.y} />
-      <Stepper step={stepNum} onStepClick={handleStepClick} />
+      <StepperBar currentIndex={stepIndex} onStepClick={handleStepClick} isExisting={!!processId} />
 
-      <AnimatePresence mode="wait">
-        {wizardStep === "details" && (
-          <StepDetails key="step-details" onNext={() => setWizardStep("document")} />
-        )}
-        {wizardStep === "document" && (
-          <StepDocument key="step-document" onNext={() => setWizardStep("canvas")} onBack={() => setWizardStep("details")} />
-        )}
-      </AnimatePresence>
+      <div style={{ flex: 1, overflow: "auto" }}>
+        {wizardStep === "details" && <StepDetails />}
+        {wizardStep === "document" && <StepDocument />}
+      </div>
     </div>
   );
 }

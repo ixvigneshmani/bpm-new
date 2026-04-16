@@ -23,11 +23,18 @@ export type ProcessMeta = {
   description: string;
   businessDoc: Record<string, unknown> | null;
   businessDocName: string;
+  businessDocSource: "template" | "paste" | "empty" | null;
+  status: string;
+  creatorName: string;
+  updatedAt: string;
 };
 
 type CanvasState = {
+  processId: string | null;
   processMeta: ProcessMeta;
   wizardStep: "details" | "document" | "canvas";
+  wizardOrigin: "list" | "canvas";
+  documentDirty: boolean;
   nodes: Node[];
   edges: Edge[];
   selectedNodeId: string | null;
@@ -41,15 +48,23 @@ type CanvasState = {
   updateNodeLabel: (id: string, label: string) => void;
   deleteSelected: () => void;
 
+  setProcessId: (id: string | null) => void;
   setProcessMeta: (meta: Partial<ProcessMeta>) => void;
   setWizardStep: (step: "details" | "document" | "canvas") => void;
+  setWizardOrigin: (origin: "list" | "canvas") => void;
+  setDocumentDirty: (dirty: boolean) => void;
+  loadCanvasData: (nodes: Node[], edges: Edge[]) => void;
+  resetCanvas: () => void;
 };
 
 const useCanvasStore = create<CanvasState>()(
   temporal(
     (set, get) => ({
-      processMeta: { name: "", description: "", businessDoc: null, businessDocName: "" },
+      processId: null as string | null,
+      processMeta: { name: "", description: "", businessDoc: null, businessDocName: "", businessDocSource: null, status: "DRAFT", creatorName: "", updatedAt: "" },
       wizardStep: "details" as const,
+      wizardOrigin: "list" as const,
+      documentDirty: false,
       nodes: [],
       edges: [],
       selectedNodeId: null,
@@ -121,11 +136,30 @@ const useCanvasStore = create<CanvasState>()(
         });
       },
 
+      setProcessId: (id) => set({ processId: id }),
+
       setProcessMeta: (meta) => {
         set({ processMeta: { ...get().processMeta, ...meta } });
       },
 
       setWizardStep: (step) => set({ wizardStep: step }),
+
+      setWizardOrigin: (origin) => set({ wizardOrigin: origin }),
+
+      setDocumentDirty: (dirty) => set({ documentDirty: dirty }),
+
+      loadCanvasData: (nodes, edges) => set({ nodes, edges }),
+
+      resetCanvas: () => set({
+        processId: null,
+        processMeta: { name: "", description: "", businessDoc: null, businessDocName: "", businessDocSource: null, status: "DRAFT", creatorName: "", updatedAt: "" },
+        wizardStep: "details",
+        wizardOrigin: "list",
+        documentDirty: false,
+        nodes: [],
+        edges: [],
+        selectedNodeId: null,
+      }),
     }),
     {
       limit: 50,

@@ -4,13 +4,12 @@ import { useSidebar } from "./sidebar-context";
 import Sidebar from "./sidebar";
 import Header from "./header";
 
-const FULL_BLEED_ROUTES = ["/designer/new"];
-
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const { collapsed } = useSidebar();
   const location = useLocation();
 
-  const isFullBleed = FULL_BLEED_ROUTES.some((r) => location.pathname.startsWith(r));
+  // Full-bleed for canvas pages: /designer/new and /designer/:uuid
+  const isFullBleed = location.pathname.startsWith("/designer/") && location.pathname !== "/designer";
 
   return (
     <div

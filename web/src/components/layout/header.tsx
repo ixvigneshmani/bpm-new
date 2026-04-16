@@ -19,6 +19,15 @@ const ROUTE_LABELS: Record<string, string> = {
 function buildBreadcrumbs(pathname: string) {
   const crumbs: { label: string; path: string }[] = [];
 
+  // Handle dynamic /designer/:id routes
+  const designerMatch = pathname.match(/^\/designer\/(.+)$/);
+  if (designerMatch && designerMatch[1] !== "new") {
+    crumbs.push({ label: "Acme Corp", path: "/home" });
+    crumbs.push({ label: "Process Designer", path: "/designer" });
+    crumbs.push({ label: "Edit Process", path: pathname });
+    return crumbs;
+  }
+
   // Always start with workspace
   crumbs.push({ label: "Acme Corp", path: "/home" });
 

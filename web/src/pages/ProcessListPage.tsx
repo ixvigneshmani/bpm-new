@@ -1,27 +1,13 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { apiGet } from "../lib/api";
+import { STATUS_DISPLAY, STATUS_COLORS } from "../lib/constants";
 
 type ViewMode = "card" | "list";
 type SortKey = "updated" | "name" | "tasks";
 
-const MOCK_PROCESSES = [
-  { id: "PRO-1247", name: "Vendor Onboarding", description: "End-to-end vendor registration and approval workflow", status: "Active", owner: "Sarah Chen", ownerInitials: "SC", ownerColor: "#F59E0B", updated: "2m ago", updatedSort: 1, version: "v2.1", tasks: 8, runs: 142 },
-  { id: "PRO-892", name: "Invoice Approval", description: "Multi-level invoice review and payment authorization", status: "Pending", owner: "Mike Torres", ownerInitials: "MT", ownerColor: "#10B981", updated: "15m ago", updatedSort: 2, version: "v1.4", tasks: 5, runs: 89 },
-  { id: "PRO-331", name: "Employee Offboarding", description: "Structured exit process with asset return and knowledge transfer", status: "Review", owner: "Priya Patel", ownerInitials: "PP", ownerColor: "#3B82F6", updated: "1h ago", updatedSort: 3, version: "v3.0", tasks: 12, runs: 56 },
-  { id: "PRO-567", name: "Contract Renewal", description: "Automated contract expiry tracking and renewal pipeline", status: "Active", owner: "James Wilson", ownerInitials: "JW", ownerColor: "#8B5CF6", updated: "2h ago", updatedSort: 4, version: "v1.2", tasks: 6, runs: 234 },
-  { id: "PRO-445", name: "Purchase Request", description: "Budget-aware purchase requisition and procurement flow", status: "Draft", owner: "Alex Kim", ownerInitials: "AK", ownerColor: "#6366F1", updated: "3h ago", updatedSort: 5, version: "v1.0", tasks: 4, runs: 0 },
-  { id: "PRO-210", name: "Leave Approval", description: "Manager-cascaded leave request and balance management", status: "Active", owner: "Sarah Chen", ownerInitials: "SC", ownerColor: "#F59E0B", updated: "5h ago", updatedSort: 6, version: "v2.3", tasks: 3, runs: 312 },
-];
-
-const ALL_STATUSES = ["Active", "Pending", "Review", "Draft"];
-const ALL_OWNERS = [...new Set(MOCK_PROCESSES.map((p) => p.owner))];
-
-const statusColors: Record<string, { bg: string; text: string; dot: string; border: string; accent: string }> = {
-  Active: { bg: "#ECFDF3", text: "#027A48", dot: "#12B76A", border: "#A6F4C5", accent: "#12B76A" },
-  Pending: { bg: "#FFF6ED", text: "#B54708", dot: "#F79009", border: "#FEDF89", accent: "#F79009" },
-  Review: { bg: "#EFF8FF", text: "#175CD3", dot: "#2E90FA", border: "#B2DDFF", accent: "#2E90FA" },
-  Draft: { bg: "#F2F4F7", text: "#475467", dot: "#98A2B3", border: "#D0D5DD", accent: "#98A2B3" },
-};
+const ALL_STATUSES = Object.values(STATUS_DISPLAY);
+const statusColors = STATUS_COLORS;
 
 export default function ProcessListPage() {
   const navigate = useNavigate();
@@ -33,8 +19,36 @@ export default function ProcessListPage() {
   const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [showSortDropdown, setShowSortDropdown] = useState(false);
 
+  // Fetch real processes from API
+  type ApiProcess = { id: string; name: string; description: string | null; status: string; version: string; step: string; createdBy: string; createdAt: string; updatedAt: string };
+  const [apiProcesses, setApiProcesses] = useState<ApiProcess[]>([]);
+
+  useEffect(() => {
+    apiGet<ApiProcess[]>("/processes").then(setApiProcesses).catch((e) => console.warn("Failed to load processes:", e.message));
+  }, []);
+
+  // Merge API processes into the display format
+  const allProcesses = useMemo(() => {
+    const fromApi = apiProcesses.map((p) => {
+      const timeDiff = Date.now() - new Date(p.updatedAt).getTime();
+      const updated = timeDiff < 60000 ? "Just now" : timeDiff < 3600000 ? `${Math.floor(timeDiff / 60000)}m ago` : timeDiff < 86400000 ? `${Math.floor(timeDiff / 3600000)}h ago` : `${Math.floor(timeDiff / 86400000)}d ago`;
+      const statusMap = STATUS_DISPLAY;
+      return {
+        id: p.id, name: p.name, description: p.description || "",
+        status: statusMap[p.status] || p.status,
+        owner: "You", ownerInitials: "VM", ownerColor: "#6366F1",
+        updated, updatedSort: new Date(p.updatedAt).getTime(),
+        version: p.version || "v1.0", tasks: 0, runs: 0,
+        step: p.step, isReal: true,
+      };
+    });
+    return fromApi;
+  }, [apiProcesses]);
+
+  const ALL_OWNERS = useMemo(() => [...new Set(allProcesses.map((p) => p.owner))], [allProcesses]);
+
   const filtered = useMemo(() => {
-    let result = MOCK_PROCESSES.filter((p) => {
+    let result = allProcesses.filter((p) => {
       const matchesSearch =
         p.name.toLowerCase().includes(search.toLowerCase()) ||
         p.id.toLowerCase().includes(search.toLowerCase()) ||
@@ -46,10 +60,10 @@ export default function ProcessListPage() {
     result = [...result].sort((a, b) => {
       if (sortBy === "name") return a.name.localeCompare(b.name);
       if (sortBy === "tasks") return b.tasks - a.tasks;
-      return a.updatedSort - b.updatedSort;
+      return b.updatedSort - a.updatedSort;
     });
     return result;
-  }, [search, statusFilter, ownerFilter, sortBy]);
+  }, [allProcesses, search, statusFilter, ownerFilter, sortBy]);
 
   const activeFilterCount = statusFilter.length + ownerFilter.length;
 
@@ -165,7 +179,7 @@ export default function ProcessListPage() {
                   {ALL_STATUSES.map((s) => {
                     const st = statusColors[s];
                     const checked = statusFilter.includes(s);
-                    const count = MOCK_PROCESSES.filter((p) => p.status === s).length;
+                    const count = allProcesses.filter((p) => p.status === s).length;
                     return (
                       <label
                         key={s}
@@ -199,7 +213,7 @@ export default function ProcessListPage() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                   {ALL_OWNERS.map((o) => {
                     const checked = ownerFilter.includes(o);
-                    const proc = MOCK_PROCESSES.find((p) => p.owner === o);
+                    const proc = allProcesses.find((p) => p.owner === o);
                     return (
                       <label
                         key={o}
@@ -353,7 +367,7 @@ export default function ProcessListPage() {
             );
           })}
           {ownerFilter.map((o) => {
-            const proc = MOCK_PROCESSES.find((p) => p.owner === o);
+            const proc = allProcesses.find((p) => p.owner === o);
             return (
               <span key={`o-${o}`} style={{
                 display: "inline-flex", alignItems: "center", gap: 5,
@@ -415,7 +429,7 @@ export default function ProcessListPage() {
               <div
                 className="process-card"
                 key={proc.id}
-                onClick={() => navigate(`/designer/new`)}
+                onClick={() => navigate((proc as any).isReal ? `/designer/${proc.id}` : `/designer/new`)}
                 style={{
                   background: "#fff",
                   border: "1px solid #E5E7EB",
@@ -528,7 +542,7 @@ export default function ProcessListPage() {
             const st = statusColors[proc.status] || statusColors.Draft;
             return (
               <div
-                key={proc.id} onClick={() => navigate(`/designer/new`)}
+                key={proc.id} onClick={() => navigate((proc as any).isReal ? `/designer/${proc.id}` : `/designer/new`)}
                 style={{
                   display: "grid", gridTemplateColumns: "minmax(220px, 2.5fr) 100px 80px 80px 140px 100px 40px",
                   padding: "14px 20px", borderBottom: "1px solid #F2F4F7",

@@ -180,9 +180,11 @@ export default function Sidebar() {
               {group.items.map((item) => {
                 const isActive = location.pathname === item.href || (item.href !== "/home" && location.pathname.startsWith(item.href));
                 return (
-                <div
+                <button
                   key={item.name}
                   onClick={() => navigate(item.href)}
+                  aria-label={`Navigate to ${item.name}`}
+                  aria-current={isActive ? "page" : undefined}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -196,6 +198,10 @@ export default function Sidebar() {
                     cursor: "pointer",
                     justifyContent: collapsed ? "center" : "flex-start",
                     transition: "background 0.15s ease",
+                    border: "none",
+                    width: "100%",
+                    textAlign: "left",
+                    fontFamily: "inherit",
                   }}
                 >
                   <svg
@@ -225,7 +231,7 @@ export default function Sidebar() {
                       )}
                     </>
                   )}
-                </div>
+                </button>
                 );
               })}
             </div>

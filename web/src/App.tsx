@@ -22,6 +22,7 @@ export function App() {
         <Route path="home" element={<DashboardPage />} />
         <Route path="designer" element={<ProcessListPage />} />
         <Route path="designer/new" element={<DesignCanvasPage />} />
+        <Route path="designer/:id" element={<DesignCanvasPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/home" replace />} />
     </Routes>

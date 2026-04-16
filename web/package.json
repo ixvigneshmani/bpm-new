@@ -19,7 +19,6 @@
     "hotkeys-js": "^4.0.3",
     "html-to-image": "^1.11.13",
     "immer": "^11.1.4",
-    "motion": "^12.38.0",
     "nanoid": "^5.1.7",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

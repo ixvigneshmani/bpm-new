@@ -131,22 +131,6 @@ body {
   to { transform: rotate(360deg); }
 }
 
-/* ─── Wizard BPMN animations ─────────────────────────────────────── */
-
-@keyframes flow-dash {
-  to { background-position: -20px 0; }
-}
-
-@keyframes soft-glow {
-  0%, 100% { box-shadow: 0 0 12px rgba(79,70,229,0.15), 0 0 4px rgba(79,70,229,0.08); }
-  50% { box-shadow: 0 0 24px rgba(79,70,229,0.25), 0 0 8px rgba(79,70,229,0.12); }
-}
-
-@keyframes ring-pulse {
-  0% { transform: translate(-50%,-50%) scale(1); opacity: 0.4; }
-  100% { transform: translate(-50%,-50%) scale(2.5); opacity: 0; }
-}
-
 /* ─── Sidebar collapse ────────────────────────────────────────────── */
 
 .sidebar-fade {
