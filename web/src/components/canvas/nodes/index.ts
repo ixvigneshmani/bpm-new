@@ -7,6 +7,12 @@ import StartEventNode from "./StartEventNode";
 import EndEventNode from "./EndEventNode";
 import UserTaskNode from "./UserTaskNode";
 import ServiceTaskNode from "./ServiceTaskNode";
+import ScriptTaskNode from "./ScriptTaskNode";
+import SendTaskNode from "./SendTaskNode";
+import ReceiveTaskNode from "./ReceiveTaskNode";
+import ManualTaskNode from "./ManualTaskNode";
+import BusinessRuleTaskNode from "./BusinessRuleTaskNode";
+import CallActivityNode from "./CallActivityNode";
 import ExclusiveGatewayNode from "./ExclusiveGatewayNode";
 
 export const nodeTypes = {
@@ -14,5 +20,11 @@ export const nodeTypes = {
   endEvent: EndEventNode,
   userTask: UserTaskNode,
   serviceTask: ServiceTaskNode,
+  scriptTask: ScriptTaskNode,
+  sendTask: SendTaskNode,
+  receiveTask: ReceiveTaskNode,
+  manualTask: ManualTaskNode,
+  businessRuleTask: BusinessRuleTaskNode,
+  callActivity: CallActivityNode,
   exclusiveGateway: ExclusiveGatewayNode,
 };

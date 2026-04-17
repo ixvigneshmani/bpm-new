@@ -214,6 +214,87 @@ export type TaskHooks = {
   onTimeout?: string;
 };
 
+/* ─── Multi-Instance & Loop Markers ─── */
+
+export type LoopMarker =
+  | { kind: "none" }
+  | { kind: "standardLoop"; condition?: FeelExpression; testBefore?: boolean; loopMaximum?: number }
+  | {
+      kind: "multiInstance";
+      mode: "parallel" | "sequential";
+      collection?: FeelExpression;   // FEEL collection expression
+      elementVariable?: string;       // per-iteration variable name
+      completionCondition?: FeelExpression;
+    };
+
+export type CompensationMarker = {
+  enabled: boolean;
+};
+
+/* ─── Script Task implementation ─── */
+
+export type ScriptLanguage = "feel" | "javascript" | "python" | "groovy";
+
+export type ScriptConfig = {
+  language: ScriptLanguage;
+  script: string;
+  resultVariable?: string;
+};
+
+/* ─── Send / Receive message config ─── */
+
+export type SendMessageConfig = {
+  messageName: string;
+  correlationKey?: FeelExpression;
+  payloadMappings?: VariableMapping[];
+  targetSystem?: string; // optional endpoint/broker reference
+};
+
+export type ReceiveMessageConfig = {
+  messageName: string;
+  correlationKey?: FeelExpression;
+  payloadMappings?: VariableMapping[]; // where to store incoming data
+};
+
+/* ─── Business Rule (DMN) config ─── */
+
+export type BusinessRuleBinding = "dmnRef" | "inlineTable" | "expression";
+
+export type DmnRefConfig = {
+  binding: "dmnRef";
+  decisionId: string;
+  decisionName?: string;
+  resultVariable?: string;
+};
+
+export type InlineTableConfig = {
+  binding: "inlineTable";
+  tableId?: string; // link to table builder (later)
+  resultVariable?: string;
+};
+
+export type RuleExpressionConfig = {
+  binding: "expression";
+  expression: FeelExpression;
+  resultVariable?: string;
+};
+
+export type BusinessRuleConfig = DmnRefConfig | InlineTableConfig | RuleExpressionConfig;
+
+/* ─── Call Activity config ─── */
+
+export type CallActivityBinding = "latest" | "deployment" | "version";
+
+export type CallActivityConfig = {
+  calledProcessId: string;
+  calledProcessName?: string;
+  binding: CallActivityBinding;
+  version?: string;
+  inputMappings?: VariableMapping[];   // parent → child
+  outputMappings?: VariableMapping[];  // child → parent
+  propagateAllVariables?: boolean;
+};
+
 /* ─── Per-node-type data interfaces ─── */
 
 export type BaseNodeData = {
@@ -224,6 +305,15 @@ export type BaseNodeData = {
   inputMappings?: VariableMapping[];
   outputMappings?: VariableMapping[];
   extensionProperties?: KeyValuePair[];
+  /** Optional resize overrides — written by NodeResizer when user drags. */
+  width?: number;
+  height?: number;
+};
+
+/** Shared by all activities (tasks + subprocesses). */
+export type ActivityCommon = {
+  loopMarker?: LoopMarker;
+  compensation?: CompensationMarker;
 };
 
 export type StartEventData = BaseNodeData & {
@@ -237,7 +327,7 @@ export type EndEventData = BaseNodeData & {
   eventDefinition: EventDefinition;
 };
 
-export type UserTaskData = BaseNodeData & {
+export type UserTaskData = BaseNodeData & ActivityCommon & {
   bpmnType: "userTask";
   assignment?: Assignment;
   form?: FormConfig;
@@ -246,11 +336,42 @@ export type UserTaskData = BaseNodeData & {
   hooks?: TaskHooks;
 };
 
-export type ServiceTaskData = BaseNodeData & {
+export type ServiceTaskData = BaseNodeData & ActivityCommon & {
   bpmnType: "serviceTask";
   implementation?: ServiceImplementation;
   resilience?: ResilienceConfig;
   errorMappings?: ErrorMapping[];
+};
+
+export type ScriptTaskData = BaseNodeData & ActivityCommon & {
+  bpmnType: "scriptTask";
+  script?: ScriptConfig;
+};
+
+export type SendTaskData = BaseNodeData & ActivityCommon & {
+  bpmnType: "sendTask";
+  message?: SendMessageConfig;
+};
+
+export type ReceiveTaskData = BaseNodeData & ActivityCommon & {
+  bpmnType: "receiveTask";
+  message?: ReceiveMessageConfig;
+  instantiate?: boolean;
+};
+
+export type ManualTaskData = BaseNodeData & ActivityCommon & {
+  bpmnType: "manualTask";
+  instructions?: string;
+};
+
+export type BusinessRuleTaskData = BaseNodeData & ActivityCommon & {
+  bpmnType: "businessRuleTask";
+  rule?: BusinessRuleConfig;
+};
+
+export type CallActivityData = BaseNodeData & ActivityCommon & {
+  bpmnType: "callActivity";
+  call?: CallActivityConfig;
 };
 
 export type ExclusiveGatewayData = BaseNodeData & {
@@ -265,6 +386,12 @@ export type BpmnNodeData =
   | EndEventData
   | UserTaskData
   | ServiceTaskData
+  | ScriptTaskData
+  | SendTaskData
+  | ReceiveTaskData
+  | ManualTaskData
+  | BusinessRuleTaskData
+  | CallActivityData
   | ExclusiveGatewayData
   | BaseNodeData; // fallback for types not yet fully typed
 
@@ -276,6 +403,12 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     endEvent: "End",
     userTask: "User Task",
     serviceTask: "Service Task",
+    scriptTask: "Script Task",
+    sendTask: "Send Message",
+    receiveTask: "Receive Message",
+    manualTask: "Manual Task",
+    businessRuleTask: "Business Rule",
+    callActivity: "Call Process",
     exclusiveGateway: "",
   };
 
@@ -284,15 +417,44 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     bpmnType,
   };
 
+  const activityBase = { loopMarker: { kind: "none" } as LoopMarker };
+
   switch (bpmnType) {
     case "startEvent":
       return { ...base, bpmnType: "startEvent", eventDefinition: { kind: "none" } } as StartEventData;
     case "endEvent":
       return { ...base, bpmnType: "endEvent", eventDefinition: { kind: "none" } } as EndEventData;
     case "userTask":
-      return { ...base, bpmnType: "userTask" } as UserTaskData;
+      return { ...base, ...activityBase, bpmnType: "userTask" } as UserTaskData;
     case "serviceTask":
-      return { ...base, bpmnType: "serviceTask" } as ServiceTaskData;
+      return { ...base, ...activityBase, bpmnType: "serviceTask" } as ServiceTaskData;
+    case "scriptTask":
+      return {
+        ...base, ...activityBase, bpmnType: "scriptTask",
+        script: { language: "feel", script: "" },
+      } as ScriptTaskData;
+    case "sendTask":
+      return {
+        ...base, ...activityBase, bpmnType: "sendTask",
+        message: { messageName: "" },
+      } as SendTaskData;
+    case "receiveTask":
+      return {
+        ...base, ...activityBase, bpmnType: "receiveTask",
+        message: { messageName: "" },
+      } as ReceiveTaskData;
+    case "manualTask":
+      return { ...base, ...activityBase, bpmnType: "manualTask" } as ManualTaskData;
+    case "businessRuleTask":
+      return {
+        ...base, ...activityBase, bpmnType: "businessRuleTask",
+        rule: { binding: "dmnRef", decisionId: "" },
+      } as BusinessRuleTaskData;
+    case "callActivity":
+      return {
+        ...base, ...activityBase, bpmnType: "callActivity",
+        call: { calledProcessId: "", binding: "latest", propagateAllVariables: false },
+      } as CallActivityData;
     case "exclusiveGateway":
       return { ...base, bpmnType: "exclusiveGateway" } as ExclusiveGatewayData;
     default:

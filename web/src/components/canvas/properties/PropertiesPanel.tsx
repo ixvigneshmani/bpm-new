@@ -10,6 +10,12 @@ import type {
   EndEventData,
   UserTaskData,
   ServiceTaskData,
+  ScriptTaskData,
+  SendTaskData,
+  ReceiveTaskData,
+  ManualTaskData,
+  BusinessRuleTaskData,
+  CallActivityData,
   ExclusiveGatewayData,
   EventDefinition,
   Assignment,
@@ -17,6 +23,13 @@ import type {
   SlaConfig,
   ServiceImplementation,
   ResilienceConfig,
+  ScriptConfig,
+  SendMessageConfig,
+  ReceiveMessageConfig,
+  BusinessRuleConfig,
+  CallActivityConfig,
+  LoopMarker,
+  CompensationMarker,
   VariableMapping,
   KeyValuePair,
 } from "../../../types/bpmn-node-data";
@@ -28,6 +41,18 @@ import ImplementationSection from "./sections/ImplementationSection";
 import ResilienceSection from "./sections/ResilienceSection";
 import GatewayFlowsSection from "./sections/GatewayFlowsSection";
 import VariablesSection from "./sections/VariablesSection";
+import ScriptSection from "./sections/ScriptSection";
+import MessageSection from "./sections/MessageSection";
+import ManualInstructionsSection from "./sections/ManualInstructionsSection";
+import BusinessRuleSection from "./sections/BusinessRuleSection";
+import CallActivitySection from "./sections/CallActivitySection";
+import MultiInstanceSection from "./sections/MultiInstanceSection";
+
+/** BPMN types that support activity markers (loop / multi-instance / compensation). */
+const ACTIVITY_TYPES = new Set([
+  "userTask", "serviceTask", "scriptTask", "sendTask", "receiveTask",
+  "manualTask", "businessRuleTask", "callActivity",
+]);
 
 type SectionConfig = {
   id: string;
@@ -70,12 +95,7 @@ export default function PropertiesPanel() {
         nodeId={selectedNode.id}
         bpmnType={bpmnType}
         label={(data.label as string) || ""}
-        description={(data.description as string) || ""}
-        documentation={(data.documentation as string) || ""}
-        showDescriptionDocs={bpmnType !== "startEvent" && bpmnType !== "endEvent"}
         onLabelChange={(label) => updateNodeLabel(selectedNode.id, label)}
-        onDescriptionChange={(desc) => update({ description: desc })}
-        onDocumentationChange={(doc) => update({ documentation: doc })}
       />
     ),
   });
@@ -171,6 +191,106 @@ export default function PropertiesPanel() {
     });
   }
 
+  if (bpmnType === "scriptTask") {
+    const d = data as unknown as ScriptTaskData;
+    sections.push({
+      id: "script",
+      title: "Script",
+      icon: <SectionIcon d="M16 18l6-6-6-6" extra={<path d="M8 6l-6 6 6 6" />} />,
+      defaultOpen: true,
+      content: (
+        <ScriptSection
+          script={d.script}
+          onChange={(s: ScriptConfig) => update({ script: s })}
+        />
+      ),
+    });
+  }
+
+  if (bpmnType === "sendTask") {
+    const d = data as unknown as SendTaskData;
+    sections.push({
+      id: "message",
+      title: "Message",
+      icon: <SectionIcon d="M22 2L11 13" extra={<polygon points="22 2 15 22 11 13 2 9 22 2" />} />,
+      defaultOpen: true,
+      content: (
+        <MessageSection
+          mode="send"
+          config={d.message}
+          onChange={(c) => update({ message: c as SendMessageConfig })}
+        />
+      ),
+    });
+  }
+
+  if (bpmnType === "receiveTask") {
+    const d = data as unknown as ReceiveTaskData;
+    sections.push({
+      id: "message",
+      title: "Message",
+      icon: <SectionIcon d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" extra={<polyline points="22,6 12,13 2,6" />} />,
+      defaultOpen: true,
+      content: (
+        <MessageSection
+          mode="receive"
+          config={d.message}
+          onChange={(c) => update({ message: c as ReceiveMessageConfig })}
+          instantiate={d.instantiate}
+          onInstantiateChange={(v) => update({ instantiate: v })}
+        />
+      ),
+    });
+  }
+
+  if (bpmnType === "manualTask") {
+    const d = data as unknown as ManualTaskData;
+    sections.push({
+      id: "instructions",
+      title: "Instructions",
+      icon: <SectionIcon d="M9 12h6M9 16h6M9 8h6" extra={<path d="M14 3v4a1 1 0 001 1h4M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z" />} />,
+      defaultOpen: true,
+      content: (
+        <ManualInstructionsSection
+          instructions={d.instructions}
+          onChange={(v) => update({ instructions: v })}
+        />
+      ),
+    });
+  }
+
+  if (bpmnType === "businessRuleTask") {
+    const d = data as unknown as BusinessRuleTaskData;
+    sections.push({
+      id: "rule",
+      title: "Decision Rule",
+      icon: <SectionIcon d="M3 3h18v18H3z" extra={<><line x1="3" y1="9" x2="21" y2="9" /><line x1="3" y1="15" x2="21" y2="15" /><line x1="9" y1="3" x2="9" y2="21" /></>} />,
+      defaultOpen: true,
+      content: (
+        <BusinessRuleSection
+          rule={d.rule}
+          onChange={(r: BusinessRuleConfig) => update({ rule: r })}
+        />
+      ),
+    });
+  }
+
+  if (bpmnType === "callActivity") {
+    const d = data as unknown as CallActivityData;
+    sections.push({
+      id: "call",
+      title: "Called Process",
+      icon: <SectionIcon d="M6 3h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5a2 2 0 012-2z" extra={<polyline points="9 10 12 13 15 10" />} />,
+      defaultOpen: true,
+      content: (
+        <CallActivitySection
+          call={d.call}
+          onChange={(c: CallActivityConfig) => update({ call: c })}
+        />
+      ),
+    });
+  }
+
   if (bpmnType === "exclusiveGateway") {
     const d = data as unknown as ExclusiveGatewayData;
     sections.push({
@@ -184,7 +304,17 @@ export default function PropertiesPanel() {
           edges={edges}
           nodes={nodes.map((n) => ({ id: n.id, data: n.data as Record<string, unknown> }))}
           defaultFlowId={d.defaultFlowId}
-          onDefaultFlowChange={(id) => update({ defaultFlowId: id })}
+          onDefaultFlowChange={(id) => {
+            update({ defaultFlowId: id });
+            // Mirror onto each outgoing edge's data.isDefault so the slash marker renders.
+            useCanvasStore.setState({
+              edges: edges.map((e) =>
+                e.source === selectedNode.id
+                  ? { ...e, data: { ...((e.data || {}) as Record<string, unknown>), isDefault: e.id === id } }
+                  : e
+              ),
+            });
+          }}
           onEdgeConditionChange={(edgeId, condition) => {
             useCanvasStore.setState({
               edges: edges.map((e) =>
@@ -201,6 +331,23 @@ export default function PropertiesPanel() {
               ),
             });
           }}
+        />
+      ),
+    });
+  }
+
+  // Multi-Instance / Loop Markers — shared by all activity types
+  if (ACTIVITY_TYPES.has(bpmnType)) {
+    sections.push({
+      id: "multiInstance",
+      title: "Multi-Instance & Loop",
+      icon: <SectionIcon d="M17 4v4h-4" extra={<><path d="M20 11a8 8 0 00-15-3" /><path d="M7 20v-4h4" /><path d="M4 13a8 8 0 0015 3" /></>} />,
+      content: (
+        <MultiInstanceSection
+          loopMarker={data.loopMarker as LoopMarker | undefined}
+          compensation={data.compensation as CompensationMarker | undefined}
+          onLoopChange={(lm) => update({ loopMarker: lm })}
+          onCompensationChange={(c) => update({ compensation: c })}
         />
       ),
     });
@@ -225,35 +372,33 @@ export default function PropertiesPanel() {
 
   return (
     <div style={{
-      position: "absolute", top: 12, right: 12, zIndex: 10,
-      width: 480,
-      maxWidth: "calc(100% - 24px)",
-      background: "rgba(255,255,255,0.97)",
-      backdropFilter: "blur(12px)",
-      WebkitBackdropFilter: "blur(12px)",
-      border: "1px solid #E5E7EB",
-      borderRadius: 14,
-      boxShadow: "0 4px 24px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04)",
+      position: "absolute",
+      top: 0, right: 0, bottom: 0,
+      width: "50%",
+      minWidth: 420,
+      zIndex: 10,
+      background: "#ffffff",
+      borderLeft: "1px solid #E5E7EB",
       display: "flex", flexDirection: "column",
-      maxHeight: "calc(100% - 24px)",
       overflow: "hidden",
     }}>
       {/* Header */}
       <div style={{
-        padding: "12px 16px 10px", borderBottom: "1px solid #f2f4f7",
+        padding: "18px 28px 16px",
+        borderBottom: "1px solid #f2f4f7",
         display: "flex", alignItems: "center", justifyContent: "space-between",
         flexShrink: 0,
       }}>
         <div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Properties</div>
-          <div style={{ fontSize: 10, color: "#98a2b3", marginTop: 1 }}>Configure element behavior</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#101828", letterSpacing: "-0.01em" }}>Properties</div>
+          <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 2 }}>Configure element behavior</div>
         </div>
-        {/* Close / collapse button */}
+        {/* Close button */}
         <button
           type="button"
           onClick={() => useCanvasStore.getState().setSelectedNode(null)}
           style={{
-            width: 28, height: 28, borderRadius: 8, border: "none",
+            width: 32, height: 32, borderRadius: 8, border: "none",
             background: "transparent", cursor: "pointer",
             display: "flex", alignItems: "center", justifyContent: "center",
             color: "#98a2b3", transition: "all 0.15s",
@@ -262,7 +407,7 @@ export default function PropertiesPanel() {
           onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
           title="Close properties"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
@@ -307,8 +452,8 @@ function CollapsibleSection({
         className="section-header"
         onClick={() => setOpen(!open)}
         style={{
-          display: "flex", alignItems: "center", gap: 10,
-          width: "100%", padding: "12px 20px",
+          display: "flex", alignItems: "center", gap: 12,
+          width: "100%", padding: "16px 28px",
           background: "transparent", border: "none", borderRadius: 0,
           cursor: "pointer", textAlign: "left",
           transition: "background 0.15s ease",
@@ -319,10 +464,10 @@ function CollapsibleSection({
         <div style={{ width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", color: "#98a2b3" }}>
           {icon}
         </div>
-        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#344054" }}>{title}</span>
+        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: "#344054" }}>{title}</span>
         <svg
-          width="12"
-          height="12"
+          width="14"
+          height="14"
           viewBox="0 0 24 24"
           fill="none"
           stroke="#9CA3AF"
@@ -338,7 +483,7 @@ function CollapsibleSection({
       </button>
 
       {open && (
-        <div style={{ padding: "6px 20px 22px" }}>
+        <div style={{ padding: "4px 28px 28px" }}>
           {children}
         </div>
       )}

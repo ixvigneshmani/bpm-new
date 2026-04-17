@@ -131,6 +131,32 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* ─── BPMN connect chip — hidden until node hover ─────────────────── */
+.bpmn-connect-chip {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.bpmn-task-node:hover .bpmn-connect-chip,
+.bpmn-event-node:hover .bpmn-connect-chip,
+.bpmn-gateway-node:hover .bpmn-connect-chip {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* When selected, suppress chip — resize owns the node */
+.bpmn-task-node.is-selected .bpmn-connect-chip,
+.bpmn-event-node.is-selected .bpmn-connect-chip,
+.bpmn-gateway-node.is-selected .bpmn-connect-chip {
+  display: none;
+}
+
+/* ─── Edge hover — give visual cue that endpoints can be re-attached ── */
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke-width: 2.5px;
+  filter: drop-shadow(0 0 2px rgba(99, 102, 241, 0.35));
+  cursor: grab;
+}
+
 /* ─── Properties panel form resets (no preflight) ────────────────── */
 /* Scoped to .props-panel so we don't conflict with Ant Design */
 

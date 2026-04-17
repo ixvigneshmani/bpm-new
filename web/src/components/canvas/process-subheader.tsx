@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import useCanvasStore from "../../store/canvas-store";
 import { STATUS_COLORS, STATUS_DISPLAY } from "../../lib/constants";
 import { formatRelativeTime } from "../../lib/utils";
@@ -7,6 +8,16 @@ export default function ProcessSubheader() {
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const setWizardStep = useCanvasStore((s) => s.setWizardStep);
   const setWizardOrigin = useCanvasStore((s) => s.setWizardOrigin);
+  const saveStatus = useCanvasStore((s) => s.saveStatus);
+  const lastSavedAt = useCanvasStore((s) => s.lastSavedAt);
+
+  // Re-render once a minute so "Saved 30s ago" stays current.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!lastSavedAt) return;
+    const t = setInterval(() => setTick((n) => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, [lastSavedAt]);
 
   if (wizardStep !== "canvas") return null;
 
@@ -41,8 +52,10 @@ export default function ProcessSubheader() {
         </span>
       </div>
 
-      {/* Right: Creator + last updated + Edit button */}
+      {/* Right: Save status + Creator + last updated + Edit button */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <SaveStatusPill status={saveStatus} lastSavedAt={lastSavedAt} />
+
         {processMeta.creatorName && (
           <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <div style={{
@@ -96,4 +109,69 @@ export default function ProcessSubheader() {
       </div>
     </div>
   );
+}
+
+/* ─── Save status pill ─── */
+function SaveStatusPill({
+  status, lastSavedAt,
+}: {
+  status: "idle" | "saving" | "saved" | "error";
+  lastSavedAt: number | null;
+}) {
+  if (status === "idle" && !lastSavedAt) return null;
+
+  let icon: React.ReactNode = null;
+  let text = "";
+  let color = "#9CA3AF";
+
+  if (status === "saving") {
+    icon = (
+      <span
+        style={{
+          width: 10, height: 10, borderRadius: "50%",
+          border: "1.5px solid #CBD5E1", borderTopColor: "#6B7280",
+          animation: "spin 0.8s linear infinite",
+          display: "inline-block",
+        }}
+      />
+    );
+    text = "Saving…";
+    color = "#6B7280";
+  } else if (status === "error") {
+    icon = (
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2.5" strokeLinecap="round">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+    );
+    text = "Save failed";
+    color = "#DC2626";
+  } else if (status === "saved" || (status === "idle" && lastSavedAt)) {
+    icon = (
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="20 6 9 17 4 12" />
+      </svg>
+    );
+    text = lastSavedAt ? `Saved ${relTime(lastSavedAt)}` : "Saved";
+    color = "#10B981";
+  }
+
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      fontSize: 11, color, fontWeight: 500,
+    }}>
+      {icon}
+      {text}
+    </span>
+  );
+}
+
+function relTime(ms: number): string {
+  const diff = Math.floor((Date.now() - ms) / 1000);
+  if (diff < 5) return "just now";
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
 }
