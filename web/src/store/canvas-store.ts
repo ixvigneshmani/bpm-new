@@ -56,6 +56,12 @@ type CanvasState = {
   updateNodeData: (id: string, patch: Partial<BpmnNodeData>) => void;
   updateEdgeLabel: (id: string, label: string) => void;
   updateEdgeData: (id: string, patch: Record<string, unknown>) => void;
+  /** Set an edge's condition (FEEL) for exclusive/inclusive gateways. */
+  setEdgeCondition: (edgeId: string, condition: string) => void;
+  /** Atomically mark a single outgoing edge of `gatewayId` as the default.
+   *  Writes `defaultFlowId` on the node *and* mirrors `isDefault` onto each
+   *  outgoing edge so the slash marker renders. Pass `null` to clear. */
+  setGatewayDefaultFlow: (gatewayId: string, flowId: string | null) => void;
   reconnectEdge: (oldEdge: Edge, newConnection: Connection) => void;
 
   /* Selection-aware actions (multi-select) */
@@ -165,6 +171,33 @@ const useCanvasStore = create<CanvasState>()(
         });
       },
 
+      setEdgeCondition: (edgeId, condition) => {
+        set({
+          edges: get().edges.map((e) =>
+            e.id === edgeId
+              ? { ...e, data: { ...(e.data || {}), condition } }
+              : e
+          ),
+        });
+      },
+
+      setGatewayDefaultFlow: (gatewayId, flowId) => {
+        const node = get().nodes.find((n) => n.id === gatewayId);
+        const bpmnType = (node?.data as { bpmnType?: string } | undefined)?.bpmnType;
+        // Only exclusive and inclusive gateways carry a default flow per BPMN spec.
+        if (bpmnType !== "exclusiveGateway" && bpmnType !== "inclusiveGateway") return;
+        set({
+          nodes: get().nodes.map((n) =>
+            n.id === gatewayId ? { ...n, data: { ...n.data, defaultFlowId: flowId ?? undefined } } : n
+          ),
+          edges: get().edges.map((e) =>
+            e.source === gatewayId
+              ? { ...e, data: { ...(e.data || {}), isDefault: e.id === flowId } }
+              : e
+          ),
+        });
+      },
+
       reconnectEdge: (oldEdge, newConnection) => {
         set({
           edges: reconnectEdge(oldEdge, newConnection, get().edges),
@@ -204,25 +237,47 @@ const useCanvasStore = create<CanvasState>()(
       pasteClipboard: () => {
         const { clipboard, nodes, edges } = get();
         if (!clipboard || clipboard.nodes.length === 0) return;
-        const idMap = new Map<string, string>();
+
+        // 1. Remap node IDs
+        const nodeIdMap = new Map<string, string>();
+        for (const n of clipboard.nodes) {
+          nodeIdMap.set(n.id, `${n.type ?? "node"}-${nanoid(8)}`);
+        }
+
+        // 2. Remap edge IDs (build the map first so node data can reference new edge IDs)
+        const edgeIdMap = new Map<string, string>();
+        for (const e of clipboard.edges) {
+          edgeIdMap.set(e.id, `e-${nanoid(8)}`);
+        }
+
+        // 3. Build new nodes with remapped internal refs (e.g. defaultFlowId)
         const newNodes: Node[] = clipboard.nodes.map((n) => {
-          const newId = `${n.type ?? "node"}-${nanoid(8)}`;
-          idMap.set(n.id, newId);
+          const data = { ...(n.data as Record<string, unknown>) };
+          if (typeof data.defaultFlowId === "string") {
+            const remapped = edgeIdMap.get(data.defaultFlowId as string);
+            // Drop the ref if the referenced edge wasn't copied — the paste
+            // is a partial selection, so a dangling reference is worse than none.
+            data.defaultFlowId = remapped ?? undefined;
+          }
           return {
             ...n,
-            id: newId,
+            id: nodeIdMap.get(n.id)!,
+            data,
             position: { x: n.position.x + 32, y: n.position.y + 32 },
             selected: true,
           };
         });
+
+        // 4. Build new edges with remapped endpoints
         const newEdges: Edge[] = clipboard.edges.map((e) => ({
           ...e,
-          id: `e-${nanoid(8)}`,
-          source: idMap.get(e.source) ?? e.source,
-          target: idMap.get(e.target) ?? e.target,
+          id: edgeIdMap.get(e.id)!,
+          source: nodeIdMap.get(e.source) ?? e.source,
+          target: nodeIdMap.get(e.target) ?? e.target,
           selected: false,
         }));
-        // Deselect all existing then select the pasted ones
+
+        // 5. Deselect all existing then select the pasted nodes
         set({
           nodes: [
             ...nodes.map((n) => ({ ...n, selected: false })),

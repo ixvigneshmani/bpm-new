@@ -17,6 +17,8 @@ import type {
   BusinessRuleTaskData,
   CallActivityData,
   ExclusiveGatewayData,
+  InclusiveGatewayData,
+  EventBasedGatewayData,
   EventDefinition,
   Assignment,
   SchedulingConfig,
@@ -33,6 +35,7 @@ import type {
   VariableMapping,
   KeyValuePair,
 } from "../../../types/bpmn-node-data";
+import type { GatewayKind } from "./sections/GatewayFlowsSection";
 import GeneralSection from "./sections/GeneralSection";
 import EventDefinitionSection from "./sections/EventDefinitionSection";
 import AssignmentSection from "./sections/AssignmentSection";
@@ -54,6 +57,14 @@ const ACTIVITY_TYPES = new Set([
   "manualTask", "businessRuleTask", "callActivity",
 ]);
 
+/** Maps a gateway bpmnType to its behavioural kind. */
+const GATEWAY_KIND_BY_TYPE: Record<string, GatewayKind | undefined> = {
+  exclusiveGateway: "exclusive",
+  inclusiveGateway: "inclusive",
+  parallelGateway: "parallel",
+  eventBasedGateway: "eventBased",
+};
+
 type SectionConfig = {
   id: string;
   title: string;
@@ -68,6 +79,9 @@ export default function PropertiesPanel() {
   const selectedNodeId = useCanvasStore((s) => s.selectedNodeId);
   const updateNodeData = useCanvasStore((s) => s.updateNodeData);
   const updateNodeLabel = useCanvasStore((s) => s.updateNodeLabel);
+  const updateEdgeLabel = useCanvasStore((s) => s.updateEdgeLabel);
+  const setEdgeCondition = useCanvasStore((s) => s.setEdgeCondition);
+  const setGatewayDefaultFlow = useCanvasStore((s) => s.setGatewayDefaultFlow);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
@@ -291,8 +305,14 @@ export default function PropertiesPanel() {
     });
   }
 
-  if (bpmnType === "exclusiveGateway") {
-    const d = data as unknown as ExclusiveGatewayData;
+  const gatewayKind = GATEWAY_KIND_BY_TYPE[bpmnType];
+  if (gatewayKind) {
+    // Only exclusive and inclusive gateways carry a default flow per BPMN spec.
+    const defaultFlowId =
+      gatewayKind === "exclusive" || gatewayKind === "inclusive"
+        ? (data as unknown as ExclusiveGatewayData | InclusiveGatewayData).defaultFlowId
+        : undefined;
+
     sections.push({
       id: "flows",
       title: "Outgoing Flows",
@@ -301,39 +321,44 @@ export default function PropertiesPanel() {
       content: (
         <GatewayFlowsSection
           nodeId={selectedNode.id}
+          kind={gatewayKind}
           edges={edges}
-          nodes={nodes.map((n) => ({ id: n.id, data: n.data as Record<string, unknown> }))}
-          defaultFlowId={d.defaultFlowId}
-          onDefaultFlowChange={(id) => {
-            update({ defaultFlowId: id });
-            // Mirror onto each outgoing edge's data.isDefault so the slash marker renders.
-            useCanvasStore.setState({
-              edges: edges.map((e) =>
-                e.source === selectedNode.id
-                  ? { ...e, data: { ...((e.data || {}) as Record<string, unknown>), isDefault: e.id === id } }
-                  : e
-              ),
-            });
-          }}
-          onEdgeConditionChange={(edgeId, condition) => {
-            useCanvasStore.setState({
-              edges: edges.map((e) =>
-                e.id === edgeId
-                  ? { ...e, data: { ...((e.data || {}) as Record<string, unknown>), condition } }
-                  : e
-              ),
-            });
-          }}
-          onEdgeLabelChange={(edgeId, label) => {
-            useCanvasStore.setState({
-              edges: edges.map((e) =>
-                e.id === edgeId ? { ...e, label } : e
-              ),
-            });
-          }}
+          nodes={nodes.map((n) => ({ id: n.id, type: n.type, data: n.data as Record<string, unknown> }))}
+          defaultFlowId={defaultFlowId}
+          onDefaultFlowChange={(id) => setGatewayDefaultFlow(selectedNode.id, id ?? null)}
+          onEdgeConditionChange={(edgeId, condition) => setEdgeCondition(edgeId, condition)}
+          onEdgeLabelChange={(edgeId, label) => updateEdgeLabel(edgeId, label)}
         />
       ),
     });
+
+    // Event-based: extra instantiate toggle
+    if (gatewayKind === "eventBased") {
+      const dEb = data as unknown as EventBasedGatewayData;
+      sections.push({
+        id: "ebConfig",
+        title: "Event-Based Config",
+        icon: <SectionIcon d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z" />,
+        content: (
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 text-[12px] text-gray-700">
+              <input
+                type="checkbox"
+                checked={!!dEb.instantiate}
+                onChange={(e) => update({ instantiate: e.target.checked })}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-medium">Instantiating</span>
+                <span className="block text-[10px] text-gray-500">
+                  When checked, the first arriving event starts a new process instance (no incoming flow needed).
+                </span>
+              </span>
+            </label>
+          </div>
+        ),
+      });
+    }
   }
 
   // Multi-Instance / Loop Markers — shared by all activity types

@@ -379,6 +379,21 @@ export type ExclusiveGatewayData = BaseNodeData & {
   defaultFlowId?: string;
 };
 
+export type ParallelGatewayData = BaseNodeData & {
+  bpmnType: "parallelGateway";
+};
+
+export type InclusiveGatewayData = BaseNodeData & {
+  bpmnType: "inclusiveGateway";
+  defaultFlowId?: string;
+};
+
+export type EventBasedGatewayData = BaseNodeData & {
+  bpmnType: "eventBasedGateway";
+  /** When true, this gateway instantiates a new process on first event. */
+  instantiate?: boolean;
+};
+
 /* ─── Discriminated union ─── */
 
 export type BpmnNodeData =
@@ -393,6 +408,9 @@ export type BpmnNodeData =
   | BusinessRuleTaskData
   | CallActivityData
   | ExclusiveGatewayData
+  | ParallelGatewayData
+  | InclusiveGatewayData
+  | EventBasedGatewayData
   | BaseNodeData; // fallback for types not yet fully typed
 
 /* ─── Default data factories ─── */
@@ -410,6 +428,9 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     businessRuleTask: "Business Rule",
     callActivity: "Call Process",
     exclusiveGateway: "",
+    parallelGateway: "",
+    inclusiveGateway: "",
+    eventBasedGateway: "",
   };
 
   const base: BaseNodeData = {
@@ -457,6 +478,12 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
       } as CallActivityData;
     case "exclusiveGateway":
       return { ...base, bpmnType: "exclusiveGateway" } as ExclusiveGatewayData;
+    case "parallelGateway":
+      return { ...base, bpmnType: "parallelGateway" } as ParallelGatewayData;
+    case "inclusiveGateway":
+      return { ...base, bpmnType: "inclusiveGateway" } as InclusiveGatewayData;
+    case "eventBasedGateway":
+      return { ...base, bpmnType: "eventBasedGateway", instantiate: false } as EventBasedGatewayData;
     default:
       return base;
   }

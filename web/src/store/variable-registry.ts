@@ -1,10 +1,14 @@
 /* ─── Variable Registry ──────────────────────────────────────────────
- * Derives a typed variable tree from the business document schema.
- * Provides autocomplete, type lookup, and a browsable tree for the
- * properties panel and FEEL expression inputs.
+ * Two sources of variables feed autocomplete + type lookup:
+ *   1. Business document schema (input variables — what the process
+ *      starts with).
+ *   2. Node-declared outputs harvested from the canvas (script result
+ *      vars, receive-task payload targets, call-activity output
+ *      mappings, business-rule result vars, generic outputMappings).
  * ──────────────────────────────────────────────────────────────────── */
 
 import { useMemo } from "react";
+import type { Node } from "@xyflow/react";
 import useCanvasStore from "./canvas-store";
 
 /* ─── Types ─── */
@@ -20,11 +24,16 @@ export type VariableNode = {
   itemType?: VariableNode[];  // for array item schema
 };
 
+export type VariableSource = "document" | "node";
+
 export type FlatVariable = {
   path: string;
   type: VariableType;
   required: boolean;
   depth: number;
+  source?: VariableSource;
+  /** Human-readable origin label for node-declared vars, e.g. "Script: Calc Total". */
+  originLabel?: string;
 };
 
 /* ─── Schema → Variable tree parser ─── */
@@ -92,28 +101,129 @@ function flattenTree(nodes: VariableNode[], depth = 0): FlatVariable[] {
   return result;
 }
 
+/* ─── Node-output harvester ─── */
+
+type AnyData = Record<string, unknown>;
+
+function readString(obj: AnyData | undefined, key: string): string | undefined {
+  const v = obj?.[key];
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function readMappings(obj: AnyData | undefined, key: string): Array<{ target?: string; type?: string }> {
+  const v = obj?.[key];
+  if (!Array.isArray(v)) return [];
+  return v.filter((m) => m && typeof m === "object") as Array<{ target?: string; type?: string }>;
+}
+
+/** Coerce a free-form type string (from VariableMapping.type) to a VariableType. */
+function coerceType(raw: string | undefined): VariableType {
+  if (!raw) return "string";
+  const t = raw.toLowerCase();
+  if (t === "number" || t === "int" || t === "integer" || t === "float") return "number";
+  if (t === "boolean" || t === "bool") return "boolean";
+  if (t === "date" || t === "datetime" || t === "timestamp") return "date";
+  if (t === "object" || t === "map") return "object";
+  if (t === "array" || t === "list") return "array";
+  return "string";
+}
+
+function harvestNodeOutputs(nodes: Node[]): FlatVariable[] {
+  const out: FlatVariable[] = [];
+  const seen = new Set<string>();
+  const push = (path: string, type: VariableType, originLabel: string) => {
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    out.push({ path, type, required: false, depth: 0, source: "node", originLabel });
+  };
+
+  for (const n of nodes) {
+    const data = (n.data || {}) as AnyData;
+    const label = (data.label as string) || (n.type ?? "node");
+    const type = n.type ?? "";
+
+    // Script task — resultVariable
+    if (type === "scriptTask") {
+      const rv = readString(data.script as AnyData | undefined, "resultVariable");
+      if (rv) push(rv, "string", `Script: ${label}`);
+    }
+
+    // Business rule — resultVariable on whichever binding is active
+    if (type === "businessRuleTask") {
+      const rv = readString(data.rule as AnyData | undefined, "resultVariable");
+      if (rv) push(rv, "object", `Rule: ${label}`);
+    }
+
+    // Receive task — payload targets
+    if (type === "receiveTask") {
+      for (const m of readMappings(data.message as AnyData | undefined, "payloadMappings")) {
+        if (m.target) push(m.target, coerceType(m.type), `Receive: ${label}`);
+      }
+    }
+
+    // Call activity — child → parent output mappings
+    if (type === "callActivity") {
+      for (const m of readMappings(data.call as AnyData | undefined, "outputMappings")) {
+        if (m.target) push(m.target, coerceType(m.type), `Call: ${label}`);
+      }
+    }
+
+    // Generic outputMappings (any activity that writes back to process vars)
+    for (const m of readMappings(data, "outputMappings")) {
+      if (m.target) push(m.target, coerceType(m.type), `Output: ${label}`);
+    }
+  }
+
+  return out;
+}
+
 /* ─── Hook: useVariableRegistry ─── */
+
+/** Extract only the node fields that could affect declared outputs. This lets
+ *  us memoize the registry against a stable digest rather than the full `nodes`
+ *  array — which changes on every drag/pan frame (60Hz). */
+function outputDigest(nodes: Node[]): string {
+  const parts: string[] = [];
+  for (const n of nodes) {
+    const d = (n.data || {}) as AnyData;
+    if (n.type === "scriptTask") {
+      parts.push(`s:${n.id}:${(d.script as AnyData)?.resultVariable ?? ""}:${d.label ?? ""}`);
+    } else if (n.type === "businessRuleTask") {
+      parts.push(`b:${n.id}:${(d.rule as AnyData)?.resultVariable ?? ""}:${d.label ?? ""}`);
+    } else if (n.type === "receiveTask") {
+      const targets = readMappings(d.message as AnyData | undefined, "payloadMappings")
+        .map((m) => `${m.target ?? ""}/${m.type ?? ""}`).join(",");
+      parts.push(`r:${n.id}:${targets}:${d.label ?? ""}`);
+    } else if (n.type === "callActivity") {
+      const targets = readMappings(d.call as AnyData | undefined, "outputMappings")
+        .map((m) => `${m.target ?? ""}/${m.type ?? ""}`).join(",");
+      parts.push(`c:${n.id}:${targets}:${d.label ?? ""}`);
+    }
+    const generic = readMappings(d, "outputMappings")
+      .map((m) => `${m.target ?? ""}/${m.type ?? ""}`).join(",");
+    if (generic) parts.push(`g:${n.id}:${generic}`);
+  }
+  return parts.join("|");
+}
 
 export function useVariableRegistry() {
   const businessDoc = useCanvasStore((s) => s.processMeta.businessDoc);
+  // Subscribe to a string digest rather than `nodes` directly — zustand's
+  // default strict equality prevents re-renders when the digest is unchanged.
+  const nodesDigest = useCanvasStore((s) => outputDigest(s.nodes));
+  const nodes = useCanvasStore.getState().nodes;
 
   return useMemo(() => {
-    if (!businessDoc || typeof businessDoc !== "object") {
-      return {
-        variables: [] as VariableNode[],
-        flatList: [] as FlatVariable[],
-        getType: (_path: string) => undefined as VariableType | undefined,
-        getCompletions: (_prefix: string) => [] as FlatVariable[],
-        isEmpty: true,
-      };
-    }
-
-    const variables = parseSchemaToTree(businessDoc);
-    const flatList = flattenTree(variables);
+    const variables =
+      businessDoc && typeof businessDoc === "object" ? parseSchemaToTree(businessDoc) : [];
+    const docFlat = flattenTree(variables).map<FlatVariable>((v) => ({ ...v, source: "document" }));
+    const nodeFlat = harvestNodeOutputs(nodes);
+    const flatList: FlatVariable[] = [...docFlat, ...nodeFlat];
 
     const typeMap = new Map<string, VariableType>();
     for (const v of flatList) {
-      typeMap.set(v.path, v.type);
+      // First writer wins — document schema takes precedence over node-declared.
+      if (!typeMap.has(v.path)) typeMap.set(v.path, v.type);
     }
 
     return {
@@ -131,7 +241,9 @@ export function useVariableRegistry() {
         return flatList.filter((v) => v.path.toLowerCase().includes(lower));
       },
     };
-  }, [businessDoc]);
+    // nodes is read inside via getState() — the digest drives re-computation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [businessDoc, nodesDigest]);
 }
 
 /* ─── Type display helpers ─── */

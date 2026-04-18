@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, type DragEvent } from "react";
+import { nodeTypes } from "./nodes";
 
 type PaletteItem = {
   type: string;
@@ -7,6 +8,11 @@ type PaletteItem = {
   shape: "circle" | "circle-bold" | "rect" | "diamond" | "rect-dash";
   icon: React.ReactNode;
 };
+
+/** Types registered as first-class renderable nodes. Palette entries not in this
+ *  set are shown as "coming soon" and cannot be dragged — this prevents the
+ *  palette from advertising elements the canvas can't actually render. */
+const REGISTERED_TYPES = new Set(Object.keys(nodeTypes));
 
 const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
   {
@@ -350,31 +356,46 @@ export default function ElementPalette() {
 
               {!isCollapsed && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 1, padding: "2px 6px 4px" }}>
-                  {group.items.map((item) => (
-                    <div
-                      key={item.type}
-                      draggable
-                      onDragStart={(e) => onDragStart(e, item)}
-                      title={item.label}
-                      style={{
-                        display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-                        width: 54, padding: "5px 2px 3px",
-                        borderRadius: 6, cursor: "grab",
-                        transition: "background 0.12s ease",
-                        userSelect: "none",
-                      }}
-                      onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(99,102,241,0.06)"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-                    >
-                      <ShapeIcon item={item} />
-                      <span style={{
-                        fontSize: 8, fontWeight: 500, color: "#667085",
-                        textAlign: "center", lineHeight: "10px",
-                        maxWidth: 50, overflow: "hidden", textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}>{item.label}</span>
-                    </div>
-                  ))}
+                  {group.items.map((item) => {
+                    const registered = REGISTERED_TYPES.has(item.type);
+                    return (
+                      <div
+                        key={item.type}
+                        draggable={registered}
+                        onDragStart={registered ? (e) => onDragStart(e, item) : undefined}
+                        title={registered ? item.label : `${item.label} — coming soon`}
+                        aria-disabled={!registered}
+                        style={{
+                          display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+                          width: 54, padding: "5px 2px 3px",
+                          borderRadius: 6, cursor: registered ? "grab" : "not-allowed",
+                          transition: "background 0.12s ease",
+                          userSelect: "none",
+                          opacity: registered ? 1 : 0.45,
+                          position: "relative",
+                        }}
+                        onMouseEnter={registered ? (e) => { e.currentTarget.style.background = "rgba(99,102,241,0.06)"; } : undefined}
+                        onMouseLeave={registered ? (e) => { e.currentTarget.style.background = "transparent"; } : undefined}
+                      >
+                        <ShapeIcon item={item} />
+                        <span style={{
+                          fontSize: 8, fontWeight: 500, color: "#667085",
+                          textAlign: "center", lineHeight: "10px",
+                          maxWidth: 50, overflow: "hidden", textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}>{item.label}</span>
+                        {!registered && (
+                          <span style={{
+                            position: "absolute", top: 2, right: 2,
+                            fontSize: 7, fontWeight: 600,
+                            padding: "1px 3px", borderRadius: 3,
+                            background: "#F3F4F6", color: "#9CA3AF",
+                            letterSpacing: "0.03em",
+                          }}>soon</span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

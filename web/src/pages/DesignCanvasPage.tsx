@@ -18,6 +18,7 @@ import "@xyflow/react/dist/style.css";
 
 import { useSidebar } from "../components/layout/sidebar-context";
 import useCanvasStore from "../store/canvas-store";
+import { normalizeCanvasPayload, toCanvasPayload } from "../store/canvas-schema";
 import { apiGet, apiPut } from "../lib/api";
 import { STEP_MAP, DOC_SOURCE_MAP } from "../lib/constants";
 import { nodeTypes } from "../components/canvas/nodes";
@@ -339,9 +340,10 @@ export default function DesignCanvasPage() {
             creatorName: proc.creatorName || "",
             updatedAt: proc.updatedAt || "",
           });
-          // Restore canvas data if available
-          if (proc.canvasData?.nodes && proc.canvasData?.edges) {
-            loadCanvasData(proc.canvasData.nodes, proc.canvasData.edges);
+          // Restore canvas data if available — run through schema migrations
+          if (proc.canvasData) {
+            const payload = normalizeCanvasPayload(proc.canvasData);
+            loadCanvasData(payload.nodes, payload.edges);
           }
           // Resume at the correct step
           setWizardStep(STEP_MAP[proc.step] || "details");
@@ -379,7 +381,7 @@ export default function DesignCanvasPage() {
       setSaveStatus("saving");
       try {
         await apiPut(`/processes/${processId}/canvas`, {
-          canvasData: { nodes, edges },
+          canvasData: toCanvasPayload(nodes, edges),
         });
         setSaveStatus("saved");
       } catch (e) {

@@ -14,6 +14,9 @@ import ManualTaskNode from "./ManualTaskNode";
 import BusinessRuleTaskNode from "./BusinessRuleTaskNode";
 import CallActivityNode from "./CallActivityNode";
 import ExclusiveGatewayNode from "./ExclusiveGatewayNode";
+import ParallelGatewayNode from "./ParallelGatewayNode";
+import InclusiveGatewayNode from "./InclusiveGatewayNode";
+import EventBasedGatewayNode from "./EventBasedGatewayNode";
 
 export const nodeTypes = {
   startEvent: StartEventNode,
@@ -27,4 +30,7 @@ export const nodeTypes = {
   businessRuleTask: BusinessRuleTaskNode,
   callActivity: CallActivityNode,
   exclusiveGateway: ExclusiveGatewayNode,
+  parallelGateway: ParallelGatewayNode,
+  inclusiveGateway: InclusiveGatewayNode,
+  eventBasedGateway: EventBasedGatewayNode,
 };
