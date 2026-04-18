@@ -1,6 +1,9 @@
+import { useRef, useState } from "react";
 import { useReactFlow } from "@xyflow/react";
 import { useStore } from "zustand";
 import useCanvasStore from "../../store/canvas-store";
+import { serializeCanvasToBpmn } from "../../lib/bpmn/serialize";
+import { parseBpmnToCanvas } from "../../lib/bpmn/parse";
 
 export default function CanvasToolbar() {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
@@ -9,6 +12,83 @@ export default function CanvasToolbar() {
   const { undo, redo } = useCanvasStore.temporal.getState();
   const pastStates = useStore(useCanvasStore.temporal, (state) => state.pastStates);
   const futureStates = useStore(useCanvasStore.temporal, (state) => state.futureStates);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState<null | "export" | "import">(null);
+
+  const handleExport = async () => {
+    if (busy) return;
+    setBusy("export");
+    try {
+      const { nodes, edges, processMeta } = useCanvasStore.getState();
+      const { xml, warnings } = await serializeCanvasToBpmn(nodes, edges, {
+        processName: processMeta.name || "Process",
+      });
+      if (warnings.length) {
+        console.warn("BPMN export warnings:", warnings);
+        alert(`Export completed with ${warnings.length} warning(s):\n\n${warnings.join("\n\n")}`);
+      }
+      const blob = new Blob([xml], { type: "application/bpmn+xml" });
+      const url = URL.createObjectURL(blob);
+      const safeName = (processMeta.name || "process").replace(/[^a-z0-9-_]+/gi, "_");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${safeName}.bpmn`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("BPMN export failed:", e);
+      alert(`Export failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleImportClick = () => {
+    if (busy) return;
+    fileInputRef.current?.click();
+  };
+
+  const handleImportFile = async (evt: React.ChangeEvent<HTMLInputElement>) => {
+    const file = evt.target.files?.[0];
+    evt.target.value = ""; // reset so selecting same file twice still fires change
+    if (!file) return;
+
+    const { nodes: existing } = useCanvasStore.getState();
+    if (existing.length > 0) {
+      const ok = window.confirm(
+        `Importing will replace ${existing.length} node(s) already on the canvas. Continue?`,
+      );
+      if (!ok) return;
+    }
+
+    setBusy("import");
+    try {
+      const xml = await file.text();
+      const result = await parseBpmnToCanvas(xml);
+      const store = useCanvasStore.getState();
+      // Clear any selection so the Properties Panel doesn't render against a
+      // stale node ID that may no longer exist after the import.
+      store.setSelectedNode(null);
+      store.loadCanvasData(result.nodes, result.edges);
+      // Mark dirty so auto-save picks up the imported canvas.
+      store.setDocumentDirty(true);
+      if (result.warnings.length) {
+        console.warn("BPMN import warnings:", result.warnings);
+        alert(
+          `Imported ${result.nodes.length} element(s) with ${result.warnings.length} warning(s). See console for details.`,
+        );
+      }
+      setTimeout(() => fitView({ padding: 0.2 }), 50);
+    } catch (e) {
+      console.error("BPMN import failed:", e);
+      alert(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const btnStyle = (disabled = false): React.CSSProperties => ({
     width: 32,
@@ -97,6 +177,36 @@ export default function CanvasToolbar() {
 
       {divider}
 
+      {/* Import BPMN XML */}
+      <button
+        onClick={handleImportClick}
+        disabled={busy !== null}
+        style={btnStyle(busy !== null)}
+        title="Import BPMN 2.0 XML"
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+      </button>
+
+      {/* Export BPMN XML */}
+      <button
+        onClick={handleExport}
+        disabled={busy !== null}
+        style={btnStyle(busy !== null)}
+        title="Export BPMN 2.0 XML"
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+      </button>
+
+      {divider}
+
       {/* Delete */}
       <button
         onClick={deleteSelected}
@@ -109,6 +219,14 @@ export default function CanvasToolbar() {
         </svg>
       </button>
 
+      {/* Hidden file input for import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".bpmn,.xml,application/bpmn+xml,application/xml,text/xml"
+        style={{ display: "none" }}
+        onChange={handleImportFile}
+      />
     </div>
   );
 }
