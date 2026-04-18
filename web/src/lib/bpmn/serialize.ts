@@ -14,6 +14,10 @@
 import type { Node, Edge } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
 import { INTERNAL_TO_BPMN, getSize } from "./element-map";
+import { flowproDescriptor } from "./flowpro-descriptor";
+import { buildEventDefinitionElements } from "./event-definitions";
+import { packRichData } from "./extensions";
+import type { EventDefinition } from "../../types/bpmn-node-data";
 
 type ModdleElement = Record<string, unknown> & { $type: string; id?: string };
 
@@ -36,7 +40,7 @@ export async function serializeCanvasToBpmn(
   edges: Edge[],
   opts: SerializeOptions = {},
 ): Promise<SerializeResult> {
-  const moddle = new BpmnModdle();
+  const moddle = new BpmnModdle({ flowpro: flowproDescriptor });
   const warnings: string[] = [];
 
   const processId = opts.processId || "Process_1";
@@ -77,6 +81,19 @@ export async function serializeCanvasToBpmn(
     if (bpmnType === "bpmn:EventBasedGateway" && data.instantiate) {
       el.instantiate = true;
     }
+
+    // Event definitions on start / end events
+    if (bpmnType === "bpmn:StartEvent" || bpmnType === "bpmn:EndEvent") {
+      const defs = buildEventDefinitionElements(
+        moddle,
+        data.eventDefinition as EventDefinition | undefined,
+      );
+      if (defs.length > 0) el.eventDefinitions = defs;
+    }
+
+    // Rich node data → bpmn:extensionElements / flowpro:Data
+    const ext = packRichData(moddle, data);
+    if (ext) el.extensionElements = ext;
 
     flowElements.push(el);
   }

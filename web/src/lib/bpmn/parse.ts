@@ -12,6 +12,9 @@ import { MarkerType } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
 import { BPMN_TO_INTERNAL, getSize } from "./element-map";
 import { createDefaultNodeData } from "../../types/bpmn-node-data";
+import { flowproDescriptor } from "./flowpro-descriptor";
+import { readEventDefinition } from "./event-definitions";
+import { unpackRichData } from "./extensions";
 
 type ModdleElement = {
   $type: string;
@@ -42,7 +45,7 @@ const DEFAULT_EDGE_VISUAL = {
 };
 
 export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
-  const moddle = new BpmnModdle();
+  const moddle = new BpmnModdle({ flowpro: flowproDescriptor });
   const warnings: string[] = [];
 
   const { rootElement, warnings: parseWarnings } = await moddle.fromXML(xml);
@@ -142,6 +145,18 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     }
     if (bounds?.width && bounds.width !== size.width) baseData.width = bounds.width;
     if (bounds?.height && bounds.height !== size.height) baseData.height = bounds.height;
+
+    // Event definitions → baseData.eventDefinition (only meaningful for
+    // start/end events today; a future boundary/intermediate event parse
+    // would read the same way).
+    if (internalType === "startEvent" || internalType === "endEvent") {
+      baseData.eventDefinition = readEventDefinition(el);
+    }
+
+    // Merge rich data from extensionElements last so our defaults win
+    // only when the extension payload is silent.
+    const rich = unpackRichData(el);
+    for (const [k, v] of Object.entries(rich)) baseData[k] = v;
 
     nodes.push({
       id: el.id,

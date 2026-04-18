@@ -26,6 +26,7 @@ import { edgeTypes } from "../components/canvas/edges";
 import ElementPalette from "../components/canvas/element-palette";
 import PropertiesPanel from "../components/canvas/properties/PropertiesPanel";
 import CanvasToolbar from "../components/canvas/canvas-toolbar";
+import ProblemsPanel from "../components/canvas/problems-panel";
 import ProcessWizard from "../components/canvas/process-wizard";
 import ProcessSubheader from "../components/canvas/process-subheader";
 
@@ -252,6 +253,7 @@ function CanvasInner() {
 
         {/* Floating properties panel */}
         {!showWizard && <PropertiesPanel />}
+        {!showWizard && <ProblemsPanel />}
 
         {/* Empty state overlay */}
         {nodes.length === 0 && (
