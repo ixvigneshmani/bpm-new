@@ -9,7 +9,8 @@
 
 import { useMemo } from "react";
 import type { Node } from "@xyflow/react";
-import useCanvasStore from "./canvas-store";
+import { useStoreWithEqualityFn } from "zustand/traditional";
+import useCanvasStore, { type CanvasState } from "./canvas-store";
 
 /* ─── Types ─── */
 
@@ -206,12 +207,22 @@ function outputDigest(nodes: Node[]): string {
   return parts.join("|");
 }
 
+type NodesSnapshot = { nodes: Node[]; digest: string };
+const selectNodesSnapshot = (s: CanvasState): NodesSnapshot => ({
+  nodes: s.nodes,
+  digest: outputDigest(s.nodes),
+});
+const eqByNodesDigest = (a: NodesSnapshot, b: NodesSnapshot) => a.digest === b.digest;
+
 export function useVariableRegistry() {
   const businessDoc = useCanvasStore((s) => s.processMeta.businessDoc);
-  // Subscribe to a string digest rather than `nodes` directly — zustand's
-  // default strict equality prevents re-renders when the digest is unchanged.
-  const nodesDigest = useCanvasStore((s) => outputDigest(s.nodes));
-  const nodes = useCanvasStore.getState().nodes;
+  // Subscribe with a custom equality that collapses re-renders when the
+  // output-declaring shape hasn't changed (drags don't touch it).
+  const { nodes, digest: nodesDigest } = useStoreWithEqualityFn(
+    useCanvasStore,
+    selectNodesSnapshot,
+    eqByNodesDigest,
+  );
 
   return useMemo(() => {
     const variables =

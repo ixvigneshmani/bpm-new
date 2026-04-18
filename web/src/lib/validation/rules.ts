@@ -5,19 +5,7 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { ValidationRule, ValidationIssue } from "./types";
-
-/** Valid targets for an event-based gateway per BPMN 2.0 §13.3.6. Only
- *  `receiveTask` is registered today; the intermediate catch events land
- *  in P4b. Kept in sync with GatewayFlowsSection — a TODO there points
- *  to a future shared BPMN_CAPABILITIES table. */
-const EVENT_BASED_VALID_TARGETS = new Set([
-  "receiveTask",
-  "intermediateCatchEvent",
-  "messageIntermediateCatchEvent",
-  "timerIntermediateCatchEvent",
-  "signalIntermediateCatchEvent",
-  "conditionalIntermediateCatchEvent",
-]);
+import { EVENT_BASED_VALID_TARGETS } from "../bpmn/capabilities";
 
 const labelOf = (n: { data: Record<string, unknown>; id: string }) =>
   (n.data?.label as string) || n.id;

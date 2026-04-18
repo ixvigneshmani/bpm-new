@@ -11,6 +11,7 @@ import type { Edge, Node } from "@xyflow/react";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 import AiAssistButton from "../fields/AiAssistButton";
 import { NODE_THEMES } from "../../../../types/bpmn-node-data";
+import { EVENT_BASED_VALID_TARGETS } from "../../../../lib/bpmn/capabilities";
 
 export type GatewayKind = "exclusive" | "inclusive" | "parallel" | "eventBased";
 
@@ -24,20 +25,6 @@ type Props = {
   onEdgeConditionChange: (edgeId: string, condition: string) => void;
   onEdgeLabelChange: (edgeId: string, label: string) => void;
 };
-
-/** Types valid as targets of an event-based gateway. Today only `receiveTask`
- *  actually renders — the intermediate catch-event variants land in P4. Once
- *  those node types exist, this should be replaced by a `BPMN_CAPABILITIES`
- *  lookup keyed by bpmnType with a boolean `isCatchEvent` flag. */
-const EVENT_BASED_VALID_TARGETS = new Set([
-  "receiveTask",
-  "intermediateCatchEvent",
-  "intermediateEvent",
-  "messageIntermediateCatchEvent",
-  "timerIntermediateCatchEvent",
-  "signalIntermediateCatchEvent",
-  "conditionalIntermediateCatchEvent",
-]);
 
 /** Maps a gateway kind to the matching entry in `NODE_THEMES` so banner colors
  *  stay in lock-step with the on-canvas node colors. */

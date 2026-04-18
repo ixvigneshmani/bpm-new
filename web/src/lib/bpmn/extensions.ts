@@ -37,7 +37,10 @@ export function packRichData(
   const rich: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
     if (SPEC_MAPPED_KEYS.has(k)) continue;
-    if (v === undefined || v === null) continue;
+    // Strip only `undefined` — `null` can carry meaning (e.g. an
+    // explicitly-cleared field) and JSON preserves it, so it round-trips
+    // cleanly. Dropping nulls would silently turn "unset" into "default".
+    if (v === undefined) continue;
     rich[k] = v;
   }
   if (Object.keys(rich).length === 0) return null;

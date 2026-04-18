@@ -29,7 +29,7 @@ export type ProcessMeta = {
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
-type CanvasState = {
+export type CanvasState = {
   processId: string | null;
   processMeta: ProcessMeta;
   wizardStep: "details" | "document" | "canvas";

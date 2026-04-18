@@ -1,15 +1,17 @@
 /* ─── useValidationIssues ─────────────────────────────────────────────
  * Runs the validation engine against the current canvas and memoizes
- * the result. Subscribed to a minimal "connectivity digest" rather than
- * the raw nodes/edges arrays so a drag or pan doesn't re-run every rule
- * at 60Hz — only structural changes invalidate the memo.
+ * the result. Subscribed with a custom equality function that compares
+ * a minimal "connectivity digest", so drag/pan frames (which mutate
+ * node positions but not structure) don't cause a re-render.
  * ──────────────────────────────────────────────────────────────────── */
 
 import { useMemo } from "react";
 import type { Node, Edge } from "@xyflow/react";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 import useCanvasStore from "./canvas-store";
 import { runValidation } from "../lib/validation";
 import type { ValidationIssue } from "../lib/validation/types";
+import type { CanvasState } from "./canvas-store";
 
 /** Small, stable signature that changes iff structure / connectivity /
  *  labels change. Positions, sizes, and selection flags are excluded. */
@@ -19,15 +21,22 @@ function connectivityDigest(nodes: Node[], edges: Edge[]): string {
   return `${n}##${e}`;
 }
 
-export function useValidationIssues(): ValidationIssue[] {
-  const digest = useCanvasStore((s) => connectivityDigest(s.nodes, s.edges));
-  const nodes = useCanvasStore.getState().nodes;
-  const edges = useCanvasStore.getState().edges;
+type Snapshot = { nodes: Node[]; edges: Edge[]; digest: string };
 
-  return useMemo(
-    () => runValidation(nodes, edges),
-    // Digest drives re-computation — actual arrays read via getState().
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [digest],
+const selectSnapshot = (s: CanvasState): Snapshot => ({
+  nodes: s.nodes,
+  edges: s.edges,
+  digest: connectivityDigest(s.nodes, s.edges),
+});
+
+const eqByDigest = (a: Snapshot, b: Snapshot) => a.digest === b.digest;
+
+export function useValidationIssues(): ValidationIssue[] {
+  const { nodes, edges, digest } = useStoreWithEqualityFn(
+    useCanvasStore,
+    selectSnapshot,
+    eqByDigest,
   );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => runValidation(nodes, edges), [digest]);
 }
