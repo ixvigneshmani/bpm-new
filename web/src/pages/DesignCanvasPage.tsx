@@ -219,12 +219,21 @@ function CanvasInner() {
       // root-only and never auto-nest.
       const isSubprocess = isSubprocessType(type);
       const isPool = type === "pool";
+      const isLane = type === "lane";
       const canAutoNestSubprocess = type === "eventSubProcess";
       const parentId = isPool
         ? null
         : (isSubprocess && !canAutoNestSubprocess)
           ? null
           : findSubprocessAt(position);
+      // Lanes must live inside a pool (or another lane) — refuse a
+      // root-level drop rather than create an orphan lane that
+      // disappears from the XML on next export.
+      if (isLane && !parentId) {
+        // eslint-disable-next-line no-alert
+        console.warn("[canvas] Lane drop rejected: drop inside a pool or lane.");
+        return;
+      }
       addNode(type, position, label, parentId || undefined);
     },
     [screenToFlowPosition, addNode, findSubprocessAt]

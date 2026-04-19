@@ -211,6 +211,16 @@ const useCanvasStore = create<CanvasState>()(
         // need a special-case.
         if (node.type === "pool" && parentId !== null) return;
 
+        // Lanes must live inside a pool or another lane. Reject drops
+        // onto anything else (subprocess, root, etc.) because those
+        // targets produce structurally invalid BPMN on next export.
+        if (node.type === "lane") {
+          if (parentId === null) return;
+          const newParent = nodes.find((n) => n.id === parentId);
+          if (!newParent) return;
+          if (newParent.type !== "pool" && newParent.type !== "lane") return;
+        }
+
         // No self-parenting, no creating cycles (can't drop a subprocess
         // into one of its own descendants).
         if (parentId === nodeId) return;

@@ -334,21 +334,39 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     if (laneSets.length > 0) {
       const poolAbs = owningParticipant?.id ? (poolAbsById.get(owningParticipant.id) || { x: 0, y: 0 }) : { x: 0, y: 0 };
       const poolParent = owningParticipant?.id ?? null;
-      for (const ls of laneSets) hydrateLaneSet(ls, poolParent, poolAbs);
+      // Shared id→Node lookup so flowNodeRef resolution is O(1).
+      const nodeById = new Map<string, Node>();
+      for (const n of nodes) nodeById.set(n.id, n);
+      // Tracks which lane claimed each flow node so we can detect and
+      // warn on duplicate flowNodeRef references.
+      const claimedRefs = new Map<string, string>();
+      for (const ls of laneSets) hydrateLaneSet(ls, poolParent, poolAbs, nodeById, claimedRefs);
     }
   }
 
-  /** Walk a LaneSet, push lane nodes, re-parent flow nodes by flowNodeRef. */
+  /** Walk a LaneSet, push lane nodes, re-parent flow nodes by flowNodeRef.
+   *  `nodeById` is a shared Map built once per parse so we get O(1) lookup
+   *  per flowNodeRef — otherwise this is O(N²) for large pools.
+   *  `claimedRefs` tracks which flow nodes a lane has already adopted; if
+   *  a second lane references the same id we ignore it and warn (spec
+   *  disallows lane overlap; the winning lane is the first to reference). */
   function hydrateLaneSet(
     laneSet: ModdleElement,
     containerParentId: string | null,
     containerAbs: { x: number; y: number },
+    nodeById: Map<string, Node>,
+    claimedRefs: Map<string, string>,
   ): void {
     const lanes = (laneSet.lanes as ModdleElement[] | undefined) || [];
     for (const lane of lanes) {
       if (!lane.id) continue;
       const shape = shapeByRef.get(lane.id);
       const bounds = shape?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
+      if (!shape || !bounds) {
+        warnings.push(
+          `Lane "${(lane.name as string) || lane.id}" has no DI bounds — rendered at (0,0) with default size.`,
+        );
+      }
       const absX = bounds?.x ?? 0;
       const absY = bounds?.y ?? 0;
       const baseData = createDefaultNodeData("lane", (lane.name as string) || undefined) as Record<string, unknown>;
@@ -367,18 +385,27 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
         laneNode.extent = "parent";
       }
       nodes.push(laneNode);
+      nodeById.set(lane.id, laneNode);
 
-      // Re-parent referenced flow nodes to this lane. BPMN stores them
-      // flat in Process.flowElements; we've already walked them with
-      // the pool as parentId, so now we just rewrite parentId.
       const refs = (lane.flowNodeRef as Array<ModdleElement | string> | undefined) || [];
       for (const ref of refs) {
         const refId = typeof ref === "string" ? ref : ref?.id;
         if (!refId) continue;
-        const target = nodes.find((n) => n.id === refId);
-        if (!target) continue;
-        // Recompute position: it was parent-relative to the pool; now it
-        // needs to be relative to the lane. Convert via abs.
+        const target = nodeById.get(refId);
+        if (!target) {
+          warnings.push(
+            `Lane "${(lane.name as string) || lane.id}" references unknown flow node "${refId}" — ref dropped.`,
+          );
+          continue;
+        }
+        const alreadyClaimedBy = claimedRefs.get(refId);
+        if (alreadyClaimedBy && alreadyClaimedBy !== lane.id) {
+          warnings.push(
+            `Flow node "${refId}" is referenced by both lane "${alreadyClaimedBy}" and lane "${lane.id}" — first-writer wins.`,
+          );
+          continue;
+        }
+        claimedRefs.set(refId, lane.id);
         const targetAbsX = (target.position?.x ?? 0) + containerAbs.x;
         const targetAbsY = (target.position?.y ?? 0) + containerAbs.y;
         target.position = { x: targetAbsX - absX, y: targetAbsY - absY };
@@ -386,10 +413,8 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
         target.extent = "parent";
       }
 
-      // Nested lanes (childLaneSet) — recurse with this lane as the
-      // container and its absolute origin.
       const childSet = lane.childLaneSet as ModdleElement | undefined;
-      if (childSet) hydrateLaneSet(childSet, lane.id, { x: absX, y: absY });
+      if (childSet) hydrateLaneSet(childSet, lane.id, { x: absX, y: absY }, nodeById, claimedRefs);
     }
   }
 

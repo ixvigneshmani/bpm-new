@@ -96,6 +96,71 @@ describe("P6.3 lanes + flowNodeRef", () => {
     expect(inner.parentId).toBe("SP");
   });
 
+  it("empty lane round-trips (lane element + shape present, no flowNodeRef)", async () => {
+    const nodes: Node[] = [
+      mkNode({ id: "P1", type: "pool", data: { label: "P", bpmnType: "pool" } }),
+      mkNode({ id: "L1", type: "lane", parentId: "P1", data: { label: "EmptyLane", bpmnType: "lane", width: 770, height: 120 } }),
+    ];
+    const { xml } = await serializeCanvasToBpmn(nodes, []);
+    expect(xml).toMatch(/<bpmn:lane[^>]*id="L1"[^>]*name="EmptyLane"/);
+    // No flowNodeRef element at all when the lane is empty.
+    expect(xml).not.toMatch(/<bpmn:flowNodeRef>/);
+    const result = await parseBpmnToCanvas(xml);
+    const lane = result.nodes.find((n) => n.id === "L1");
+    expect(lane).toBeTruthy();
+    expect(lane!.parentId).toBe("P1");
+  });
+
+  it("unknown flowNodeRef on import: warned and dropped", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" id="D" targetNamespace="http://flowpro.io/bpmn">
+  <bpmn:process id="Process_P1" isExecutable="true">
+    <bpmn:laneSet id="LaneSet_P1">
+      <bpmn:lane id="L1" name="L">
+        <bpmn:flowNodeRef>nonexistent</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+  </bpmn:process>
+  <bpmn:collaboration id="C1">
+    <bpmn:participant id="P1" name="P" processRef="Process_P1"/>
+  </bpmn:collaboration>
+  <bpmndi:BPMNDiagram id="D1"><bpmndi:BPMNPlane id="Plane1" bpmnElement="C1">
+    <bpmndi:BPMNShape id="s_P1" bpmnElement="P1" isHorizontal="true"><dc:Bounds x="0" y="0" width="800" height="240"/></bpmndi:BPMNShape>
+    <bpmndi:BPMNShape id="s_L1" bpmnElement="L1" isHorizontal="true"><dc:Bounds x="30" y="0" width="770" height="120"/></bpmndi:BPMNShape>
+  </bpmndi:BPMNPlane></bpmndi:BPMNDiagram>
+</bpmn:definitions>`;
+    const result = await parseBpmnToCanvas(xml);
+    // bpmn-moddle drops unresolved IDREFs at parse time and emits its
+    // own "unresolved reference" warning. We surface that directly.
+    expect(result.warnings.some((w) => /unresolved reference.*nonexistent/i.test(w))).toBe(true);
+  });
+
+  it("duplicate flowNodeRef across lanes: first-writer wins + warning", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" id="D" targetNamespace="http://flowpro.io/bpmn">
+  <bpmn:process id="Process_P1" isExecutable="true">
+    <bpmn:userTask id="t1" name="T"/>
+    <bpmn:laneSet id="LaneSet_P1">
+      <bpmn:lane id="L1" name="First"><bpmn:flowNodeRef>t1</bpmn:flowNodeRef></bpmn:lane>
+      <bpmn:lane id="L2" name="Second"><bpmn:flowNodeRef>t1</bpmn:flowNodeRef></bpmn:lane>
+    </bpmn:laneSet>
+  </bpmn:process>
+  <bpmn:collaboration id="C1">
+    <bpmn:participant id="P1" name="P" processRef="Process_P1"/>
+  </bpmn:collaboration>
+  <bpmndi:BPMNDiagram id="D1"><bpmndi:BPMNPlane id="Plane1" bpmnElement="C1">
+    <bpmndi:BPMNShape id="s_P1" bpmnElement="P1" isHorizontal="true"><dc:Bounds x="0" y="0" width="800" height="240"/></bpmndi:BPMNShape>
+    <bpmndi:BPMNShape id="s_L1" bpmnElement="L1" isHorizontal="true"><dc:Bounds x="30" y="0" width="770" height="60"/></bpmndi:BPMNShape>
+    <bpmndi:BPMNShape id="s_L2" bpmnElement="L2" isHorizontal="true"><dc:Bounds x="30" y="60" width="770" height="60"/></bpmndi:BPMNShape>
+    <bpmndi:BPMNShape id="s_t1" bpmnElement="t1"><dc:Bounds x="100" y="20" width="120" height="80"/></bpmndi:BPMNShape>
+  </bpmndi:BPMNPlane></bpmndi:BPMNDiagram>
+</bpmn:definitions>`;
+    const result = await parseBpmnToCanvas(xml);
+    const task = result.nodes.find((n) => n.id === "t1")!;
+    expect(task.parentId).toBe("L1");
+    expect(result.warnings.some((w) => /referenced by both lane "L1" and lane "L2"/.test(w))).toBe(true);
+  });
+
   it("sequence flow between two flow nodes in the same pool (different lanes) lands in the Process", async () => {
     const nodes: Node[] = [
       mkNode({ id: "P1", type: "pool", data: { label: "P", bpmnType: "pool" } }),
