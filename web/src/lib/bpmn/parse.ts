@@ -54,7 +54,12 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
   const warnings: string[] = [];
 
   const { rootElement, warnings: parseWarnings } = await moddle.fromXML(xml);
-  for (const w of parseWarnings || []) warnings.push(String(w));
+  // bpmn-moddle emits warning objects ({message, error, ...}). `String(obj)`
+  // produces "[object Object]" — pull the readable message instead.
+  for (const w of parseWarnings || []) {
+    const msg = (w as { message?: string })?.message;
+    warnings.push(msg || String(w));
+  }
 
   const def = rootElement as unknown as ModdleElement;
   const rootElements = (def.rootElements as ModdleElement[] | undefined) || [];
@@ -179,7 +184,7 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
         internalType === "intermediateThrowEvent" ||
         internalType === "boundaryEvent"
       ) {
-        baseData.eventDefinition = readEventDefinition(el, resolvedDecls);
+        baseData.eventDefinition = readEventDefinition(el, resolvedDecls, warnings);
       }
 
       if (internalType === "boundaryEvent") {
@@ -207,7 +212,33 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
       }
 
       const rich = unpackRichData(el);
-      for (const [k, v] of Object.entries(rich)) baseData[k] = v;
+      for (const [k, v] of Object.entries(rich)) {
+        // eventDefinition merge: rich payload was the source of truth
+        // before root declarations landed (P6.1), so some files still
+        // carry it. If the rich form has an empty name/code but the
+        // BPMN ref resolved to one, keep the resolved value — the
+        // alternative silently wipes names on re-import.
+        if (k === "eventDefinition" && v && typeof v === "object") {
+          const resolved = baseData.eventDefinition as Record<string, unknown> | undefined;
+          const richDef = v as Record<string, unknown>;
+          if (resolved && resolved.kind === richDef.kind) {
+            const pickNonEmpty = (key: string) => {
+              const rv = richDef[key];
+              const sv = resolved[key];
+              return typeof rv === "string" && rv.length > 0 ? rv : sv;
+            };
+            baseData.eventDefinition = {
+              ...resolved,
+              ...richDef,
+              messageName: pickNonEmpty("messageName"),
+              signalName: pickNonEmpty("signalName"),
+              errorCode: pickNonEmpty("errorCode"),
+            };
+            continue;
+          }
+        }
+        baseData[k] = v;
+      }
 
       const node: Node = {
         id: el.id,

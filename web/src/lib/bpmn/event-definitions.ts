@@ -23,16 +23,44 @@ export type RootDeclarations = {
   errors: Map<string, ModdleElement>;
 };
 
-/** Stable, XML-safe id from a user-typed name. Collisions within a kind
- *  are impossible because the map is keyed by the same normalized key. */
-function declId(prefix: "Message" | "Signal" | "Error", name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
-  return `${prefix}_${safe}`;
+/** Stable, XML-safe id from a user-typed name. Because the normalizer
+ *  is lossy (every non-alphanumeric collapses to `_`), distinct names
+ *  like "Foo Bar" and "Foo_Bar" produce the same base id — caller must
+ *  disambiguate via `usedIds` to prevent duplicate xsd:ID in the XML. */
+function declId(
+  prefix: "Message" | "Signal" | "Error",
+  name: string,
+  usedIds: Set<string>,
+): string {
+  const base = `${prefix}_${name.replace(/[^A-Za-z0-9_]/g, "_") || "unnamed"}`;
+  if (!usedIds.has(base)) {
+    usedIds.add(base);
+    return base;
+  }
+  let i = 2;
+  while (usedIds.has(`${base}_${i}`)) i++;
+  const out = `${base}_${i}`;
+  usedIds.add(out);
+  return out;
 }
 
 /** Build an empty registry. Populate via `collectRootDeclarationNames`. */
 export function emptyRootDeclarations(): RootDeclarations {
   return { messages: new Map(), signals: new Map(), errors: new Map() };
+}
+
+/** Shared id pool per serialize invocation — message/signal/error
+ *  namespaces are separate in BPMN but we still dedup per-kind (and
+ *  across kinds for safety, since xsd:ID is globally unique). */
+function rootIdPool(registry: RootDeclarations): Set<string> {
+  const pool = new Set<string>();
+  for (const m of [registry.messages, registry.signals, registry.errors]) {
+    for (const el of m.values()) {
+      const id = (el as { id?: string }).id;
+      if (id) pool.add(id);
+    }
+  }
+  return pool;
 }
 
 /** Walk a list of data blobs and record every referenced
@@ -43,6 +71,7 @@ export function collectRootDeclarationNames(
   registry: RootDeclarations,
   dataList: Array<Record<string, unknown> | undefined>,
 ): void {
+  const usedIds = rootIdPool(registry);
   for (const data of dataList) {
     if (!data) continue;
     const def = data.eventDefinition as EventDefinition | undefined;
@@ -51,7 +80,7 @@ export function collectRootDeclarationNames(
       registry.messages.set(
         def.messageName,
         moddle.create("bpmn:Message", {
-          id: declId("Message", def.messageName),
+          id: declId("Message", def.messageName, usedIds),
           name: def.messageName,
         }) as unknown as ModdleElement,
       );
@@ -60,7 +89,7 @@ export function collectRootDeclarationNames(
       registry.signals.set(
         def.signalName,
         moddle.create("bpmn:Signal", {
-          id: declId("Signal", def.signalName),
+          id: declId("Signal", def.signalName, usedIds),
           name: def.signalName,
         }) as unknown as ModdleElement,
       );
@@ -69,7 +98,7 @@ export function collectRootDeclarationNames(
       registry.errors.set(
         def.errorCode,
         moddle.create("bpmn:Error", {
-          id: declId("Error", def.errorCode),
+          id: declId("Error", def.errorCode, usedIds),
           name: def.errorCode,
           errorCode: def.errorCode,
         }) as unknown as ModdleElement,
@@ -192,24 +221,35 @@ export function resolveRootDeclarations(
   return out;
 }
 
+/** Hoisted: extract an id from either a moddle object ref or a bare
+ *  string, matching the shapes bpmn-moddle produces. */
+function refId(v: unknown): string | undefined {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object" && typeof (v as ModdleElement).id === "string") {
+    return (v as ModdleElement).id;
+  }
+  return undefined;
+}
+
 /** Inverse: read the first `eventDefinitions` entry off a parsed flow-node
  *  moddle element and map back to our EventDefinition union. Returns
  *  `{ kind: "none" }` when none present. When `resolved` is provided,
- *  messageRef/signalRef/errorRef resolve to the declared name/code. */
+ *  messageRef/signalRef/errorRef resolve to the declared name/code.
+ *  When `warnings` is provided, pushes an entry for any ref that
+ *  points at an id we don't have a declaration for. */
 export function readEventDefinition(
   el: ModdleElement,
   resolved?: ResolvedRootDeclarations,
+  warnings?: string[],
 ): EventDefinition {
   const defs = el.eventDefinitions as ModdleElement[] | undefined;
   if (!defs || defs.length === 0) return { kind: "none" };
   const d = defs[0];
 
-  const refId = (v: unknown): string | undefined => {
-    if (typeof v === "string") return v;
-    if (v && typeof v === "object" && typeof (v as ModdleElement).id === "string") {
-      return (v as ModdleElement).id;
-    }
-    return undefined;
+  const danglingWarn = (kind: string, id: string) => {
+    warnings?.push(
+      `${kind} event ${el.id ?? "(no id)"} references undeclared root "${id}" — name dropped.`,
+    );
   };
 
   switch (d.$type) {
@@ -223,18 +263,21 @@ export function readEventDefinition(
     }
     case "bpmn:MessageEventDefinition": {
       const id = refId(d.messageRef);
-      const name = (id && resolved?.messageNameById.get(id)) || "";
-      return { kind: "message", messageName: name };
+      const name = id ? resolved?.messageNameById.get(id) : undefined;
+      if (id && !name) danglingWarn("Message", id);
+      return { kind: "message", messageName: name || "" };
     }
     case "bpmn:SignalEventDefinition": {
       const id = refId(d.signalRef);
-      const name = (id && resolved?.signalNameById.get(id)) || "";
-      return { kind: "signal", signalName: name };
+      const name = id ? resolved?.signalNameById.get(id) : undefined;
+      if (id && !name) danglingWarn("Signal", id);
+      return { kind: "signal", signalName: name || "" };
     }
     case "bpmn:ErrorEventDefinition": {
       const id = refId(d.errorRef);
-      const code = (id && resolved?.errorCodeById.get(id)) || "";
-      return { kind: "error", errorCode: code };
+      const code = id ? resolved?.errorCodeById.get(id) : undefined;
+      if (id && !code) danglingWarn("Error", id);
+      return { kind: "error", errorCode: code || "" };
     }
     case "bpmn:EscalationEventDefinition":
       return { kind: "escalation", escalationCode: "" };
