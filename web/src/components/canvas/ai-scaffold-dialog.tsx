@@ -234,6 +234,9 @@ export default function AiScaffoldDialog({ onClose }: Props) {
       setProcessMeta({ name: result.processName, description: result.processDescription || "" });
     }
     setDocumentDirty(true);
+    // Invalidate cached history so the next History-tab open refetches
+    // and includes the row we just persisted.
+    setHistory(null);
     onClose();
     // Auto-fit the new graph so Claude's layout guesses never leave
     // the canvas blank at the old viewport.
@@ -271,7 +274,16 @@ export default function AiScaffoldDialog({ onClose }: Props) {
   }, [tab, history, historyLoading, loadHistory]);
 
   async function reapply(id: string) {
+    // Confirm before we spend a network round-trip fetching a ~20 KB
+    // payload only to discard it.
+    if (existingNodeCount > 0) {
+      const ok = window.confirm(
+        `Replace the ${existingNodeCount} element(s) currently on the canvas with this saved scaffold? This cannot be undone.`,
+      );
+      if (!ok) return;
+    }
     setReapplyingId(id);
+    setHistoryError(null);
     try {
       const token = localStorage.getItem("flowpro_token");
       const res = await fetch(`${API_BASE}/ai/interactions/${id}`, {
@@ -279,16 +291,19 @@ export default function AiScaffoldDialog({ onClose }: Props) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const detail: InteractionDetail = await res.json();
-      if (!detail.responseJson || detail.responseJson.nodes.length === 0) {
-        throw new Error("Scaffold is empty.");
-      }
-      if (existingNodeCount > 0) {
-        const ok = window.confirm(
-          `Replace the ${existingNodeCount} element(s) currently on the canvas with this saved scaffold? This cannot be undone.`,
-        );
-        if (!ok) return;
-      }
+      if (!mountedRef.current) return;
       const payload = detail.responseJson;
+      // Defensive structural check: server already guards, but the
+      // type is `any`-adjacent across the JSON boundary and a bad
+      // payload would otherwise crash the canvas loader.
+      if (
+        !payload
+        || !Array.isArray(payload.nodes)
+        || !Array.isArray(payload.edges)
+        || payload.nodes.length === 0
+      ) {
+        throw new Error("This saved scaffold is empty or unavailable.");
+      }
       loadCanvasData(payload.nodes, payload.edges);
       if (payload.processName) {
         setProcessMeta({ name: payload.processName, description: payload.processDescription || "" });
@@ -615,8 +630,18 @@ function HistoryRow({
         <div style={{ fontSize: 10, color: "#667085", display: "flex", gap: 12 }}>
           <span>{row.model}</span>
           <span>{(row.durationMs / 1000).toFixed(1)}s</span>
-          {row.tokensIn !== null && <span>{row.tokensIn}↓</span>}
-          {row.tokensOut !== null && <span>{row.tokensOut}↑</span>}
+          {row.tokensIn !== null && (
+            <span aria-label={`${row.tokensIn} input tokens`}>
+              {row.tokensIn}
+              <span aria-hidden>↓</span>
+            </span>
+          )}
+          {row.tokensOut !== null && (
+            <span aria-label={`${row.tokensOut} output tokens`}>
+              {row.tokensOut}
+              <span aria-hidden>↑</span>
+            </span>
+          )}
         </div>
         {isSuccess && (
           <button

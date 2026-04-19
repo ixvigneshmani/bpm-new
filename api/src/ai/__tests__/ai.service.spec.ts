@@ -554,13 +554,45 @@ describe("AiService.listInteractions", () => {
     expect(out[0].status).toBe("success");
   });
 
-  it("clamps limit to the [1, 50] range", async () => {
+  it("clamps limit to the [1, 50] range before it reaches the query", async () => {
     const db = makeFakeDb();
     const service = makeService({ db });
-    // Just verifying the service doesn't throw on out-of-range values —
-    // the actual limit clause is validated by integration tests later.
-    await expect(service.listInteractions("t", { limit: 9999 })).resolves.toEqual([]);
-    await expect(service.listInteractions("t", { limit: 0 })).resolves.toEqual([]);
+    // The fake returns the same chain object from every select() call,
+    // so we can introspect what .limit() was invoked with last.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const chain = (db.select as unknown as { (): any })();
+    await service.listInteractions("t", { limit: 9999 });
+    expect(chain.limit).toHaveBeenLastCalledWith(50);
+    await service.listInteractions("t", { limit: 0 });
+    expect(chain.limit).toHaveBeenLastCalledWith(1);
+    await service.listInteractions("t");
+    expect(chain.limit).toHaveBeenLastCalledWith(20);
+  });
+});
+
+describe("AiService shape guard", () => {
+  it("getInteraction nulls responseJson when the persisted payload is malformed", async () => {
+    const db = makeFakeDb();
+    db.selectResult = [
+      {
+        id: "33333333-3333-3333-3333-333333333333",
+        tenantId: "t",
+        userId: "u",
+        kind: "scaffold-process",
+        status: "success",
+        description: "d",
+        model: "claude-sonnet-4-6",
+        errorMessage: null,
+        tokensIn: 1,
+        tokensOut: 1,
+        durationMs: 10,
+        createdAt: new Date(),
+        responseJson: { not: "a scaffold" },
+      },
+    ];
+    const service = makeService({ db });
+    const out = await service.getInteraction("t", "33333333-3333-3333-3333-333333333333");
+    expect(out.responseJson).toBeNull();
   });
 });
 

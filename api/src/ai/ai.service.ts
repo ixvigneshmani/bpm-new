@@ -471,6 +471,9 @@ export class AiService {
           lt(aiInteractions.createdAt, opts.before),
         )
       : eq(aiInteractions.tenantId, tenantId);
+    // Secondary sort on `id` gives a stable total order even when two
+    // rows share a createdAt millisecond — prevents duplicates/drops on
+    // keyset pagination boundaries.
     const rows = await this.db
       .select({
         id: aiInteractions.id,
@@ -486,7 +489,7 @@ export class AiService {
       })
       .from(aiInteractions)
       .where(whereClause)
-      .orderBy(desc(aiInteractions.createdAt))
+      .orderBy(desc(aiInteractions.createdAt), desc(aiInteractions.id))
       .limit(limit);
     return rows.map((r) => ({
       ...r,
@@ -502,10 +505,20 @@ export class AiService {
     if (!this.db) {
       throw new NotFoundException("AI interaction not found.");
     }
+    // Filter by kind so a future interaction type with a different
+    // `responseJson` shape can't flow through the scaffold re-apply
+    // endpoint. When we grow beyond one kind, route per-kind detail
+    // through dedicated endpoints with their own types.
     const rows = await this.db
       .select()
       .from(aiInteractions)
-      .where(and(eq(aiInteractions.id, id), eq(aiInteractions.tenantId, tenantId)))
+      .where(
+        and(
+          eq(aiInteractions.id, id),
+          eq(aiInteractions.tenantId, tenantId),
+          eq(aiInteractions.kind, "scaffold-process"),
+        ),
+      )
       .limit(1);
     const row = rows[0];
     if (!row) throw new NotFoundException("AI interaction not found.");
@@ -520,7 +533,13 @@ export class AiService {
       tokensOut: row.tokensOut,
       durationMs: row.durationMs,
       createdAt: row.createdAt.toISOString(),
-      responseJson: (row.responseJson ?? null) as ScaffoldResult | null,
+      // The jsonb column has no shape enforcement at the DB layer, so
+      // defend the re-apply path: a row with a malformed `responseJson`
+      // is treated the same as a deleted/missing payload rather than
+      // crashing the canvas loader.
+      responseJson: isValidScaffoldPayload(row.responseJson)
+        ? (row.responseJson as ScaffoldResult)
+        : null,
     };
   }
 
@@ -765,4 +784,14 @@ export class AiService {
       notes,
     };
   }
+}
+
+/** Structural guard on a persisted scaffold payload. The jsonb column
+ *  has no DB-level shape enforcement, so a corrupted row (or one
+ *  migrated from a future format) must not crash the canvas loader —
+ *  return false and let the caller surface "scaffold unavailable". */
+function isValidScaffoldPayload(value: unknown): value is ScaffoldResult {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return Array.isArray(v.nodes) && Array.isArray(v.edges);
 }
