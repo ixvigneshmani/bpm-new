@@ -120,8 +120,10 @@ export default function PropertiesPanel() {
         edgeId={selectedEdge.id}
         label={(selectedEdge.label as string) || ""}
         flowType={(selectedEdge.data as { flowType?: string } | undefined)?.flowType === "message" ? "message" : "sequence"}
+        condition={(selectedEdge.data as { condition?: string } | undefined)?.condition ?? ""}
         onLabelChange={(v) => updateEdgeLabel(selectedEdge.id, v)}
         onFlowTypeChange={(v) => setEdgeFlowType(selectedEdge.id, v)}
+        onConditionChange={(v) => setEdgeCondition(selectedEdge.id, v)}
       />
     );
   }
@@ -675,14 +677,18 @@ function EdgeProperties({
   edgeId,
   label,
   flowType,
+  condition,
   onLabelChange,
   onFlowTypeChange,
+  onConditionChange,
 }: {
   edgeId: string;
   label: string;
   flowType: "sequence" | "message";
+  condition: string;
   onLabelChange: (v: string) => void;
   onFlowTypeChange: (v: "sequence" | "message") => void;
+  onConditionChange: (v: string) => void;
 }) {
   return (
     <div style={{
@@ -763,6 +769,29 @@ function EdgeProperties({
             BPMN 2.0 §8.3.3: sequence flows must stay inside one pool; message flows must cross a pool boundary.
           </div>
         </div>
+
+        {flowType === "sequence" && (
+          <div>
+            <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+              Condition (FEEL)
+            </label>
+            <textarea
+              value={condition}
+              onChange={(e) => onConditionChange(e.target.value)}
+              placeholder="e.g. amount > 1000"
+              rows={3}
+              style={{
+                width: "100%", padding: "6px 10px",
+                borderRadius: 6, border: "1px solid #E5E7EB",
+                fontSize: 12, fontFamily: "ui-monospace, monospace", color: "#101828",
+                outline: "none", resize: "vertical",
+              }}
+            />
+            <div style={{ marginTop: 6, fontSize: 10, color: "#98a2b3" }}>
+              Evaluated when this edge is the outgoing flow from an exclusive or inclusive gateway.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -133,9 +133,13 @@ export default function BpmnSequenceEdge({
                 minWidth: 60,
               }}
             />
-          ) : (label || selected) ? (
+          ) : (label || (selected && !editing)) ? (
+            // When the edge is selected the side panel hosts the
+            // authoritative label input — don't show the inline
+            // double-click editor UI on top, it just confuses the user
+            // and their two edits can race.
             <div
-              onDoubleClick={() => setEditing(true)}
+              onDoubleClick={() => { if (!selected) setEditing(true); }}
               style={{
                 fontSize: 11,
                 fontWeight: 500,

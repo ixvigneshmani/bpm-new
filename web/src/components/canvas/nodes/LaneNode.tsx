@@ -10,6 +10,7 @@ import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import useCanvasStore from "../../../store/canvas-store";
 import { resizeHandleStyle } from "./base/BaseTaskNode";
+import { minContainerBounds } from "./base/containerGeometry";
 import { NODE_THEMES } from "../../../types/bpmn-node-data";
 
 const theme = NODE_THEMES.lane;
@@ -78,17 +79,11 @@ const LaneNode = memo((props: NodeProps) => {
         handleStyle={resizeHandleStyle(theme.color)}
         lineStyle={{ border: "none" }}
         onResize={(_, params) => {
-          // Same shrink clamp as PoolNode — children must stay inside.
-          const store = useCanvasStore.getState();
-          const kids = store.nodes.filter((n) => n.parentId === id);
-          let minW = 0, minH = 0;
-          for (const k of kids) {
-            const kd = (k.data || {}) as { width?: number; height?: number };
-            const kw = kd.width ?? k.width ?? 120;
-            const kh = kd.height ?? k.height ?? 80;
-            minW = Math.max(minW, (k.position?.x ?? 0) + kw);
-            minH = Math.max(minH, (k.position?.y ?? 0) + kh);
-          }
+          // Same shrink clamp as PoolNode — descendants stay inside.
+          const { width: minW, height: minH } = minContainerBounds(
+            id,
+            useCanvasStore.getState().nodes,
+          );
           const w = Math.max(params.width, minW);
           const h = Math.max(params.height, minH);
           updateNodeData(id, { width: w, height: h });
