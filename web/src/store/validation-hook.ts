@@ -16,7 +16,13 @@ import type { CanvasState } from "./canvas-store";
 /** Small, stable signature that changes iff structure / connectivity /
  *  labels change. Positions, sizes, and selection flags are excluded. */
 function connectivityDigest(nodes: Node[], edges: Edge[]): string {
-  const n = nodes.map((x) => `${x.id}:${x.type}:${(x.data as { label?: string })?.label ?? ""}`).join("|");
+  // parentId is part of the digest because scope-aware validation rules
+  // (P5) change their output when a node is re-parented — without this,
+  // moving a start event into or out of a subprocess wouldn't re-run
+  // validation until an unrelated structural change happened.
+  const n = nodes
+    .map((x) => `${x.id}:${x.type}:${x.parentId ?? ""}:${(x.data as { label?: string })?.label ?? ""}`)
+    .join("|");
   const e = edges.map((x) => `${x.id}:${x.source}>${x.target}`).join("|");
   return `${n}##${e}`;
 }

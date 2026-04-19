@@ -6,12 +6,14 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import { useMemo } from "react";
+import { useReactFlow } from "@xyflow/react";
 import useCanvasStore from "../../store/canvas-store";
 
 export default function BreadcrumbBar() {
   const nodes = useCanvasStore((s) => s.nodes);
   const selectedNodeId = useCanvasStore((s) => s.selectedNodeId);
   const setSelectedNode = useCanvasStore((s) => s.setSelectedNode);
+  const { fitView } = useReactFlow();
 
   const trail = useMemo(() => {
     if (!selectedNodeId) return [];
@@ -56,7 +58,13 @@ export default function BreadcrumbBar() {
       }}
     >
       <button
-        onClick={() => setSelectedNode(null)}
+        onClick={() => {
+          setSelectedNode(null);
+          // Pan/zoom to fit the root scope so a user working deep in a
+          // subprocess actually sees the shift instead of staring at the
+          // same viewport with nothing visibly changed.
+          fitView({ padding: 0.2, duration: 250 });
+        }}
         style={{
           background: "none",
           border: "none",
@@ -75,7 +83,10 @@ export default function BreadcrumbBar() {
             <polyline points="9 6 15 12 9 18" />
           </svg>
           <button
-            onClick={() => setSelectedNode(crumb.id)}
+            onClick={() => {
+              setSelectedNode(crumb.id);
+              fitView({ nodes: [{ id: crumb.id }], padding: 0.3, duration: 250 });
+            }}
             style={{
               background: "none",
               border: "none",

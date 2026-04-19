@@ -90,6 +90,37 @@ export type CanvasState = {
   resetCanvas: () => void;
 };
 
+/** Re-order nodes so every parent appears before its children. Siblings
+ *  keep their original relative order. Orphans (parentId pointing at a
+ *  non-existent node) are treated as roots. React Flow renders in array
+ *  order and a child before its parent results in incorrect positioning. */
+function topoSortByParent(nodes: Node[]): Node[] {
+  const ids = new Set(nodes.map((n) => n.id));
+  const effectiveParent = (n: Node): string | null =>
+    n.parentId && ids.has(n.parentId) ? n.parentId : null;
+  const childrenByParent = new Map<string | null, Node[]>();
+  for (const n of nodes) {
+    const key = effectiveParent(n);
+    const arr = childrenByParent.get(key) || [];
+    arr.push(n);
+    childrenByParent.set(key, arr);
+  }
+  const out: Node[] = [];
+  const walk = (parentKey: string | null) => {
+    for (const n of childrenByParent.get(parentKey) || []) {
+      out.push(n);
+      walk(n.id);
+    }
+  };
+  walk(null);
+  // If we somehow missed any (cycle or bug), append them so we never lose nodes.
+  if (out.length < nodes.length) {
+    const emitted = new Set(out.map((n) => n.id));
+    for (const n of nodes) if (!emitted.has(n.id)) out.push(n);
+  }
+  return out;
+}
+
 const DEFAULT_EDGE_VISUAL = {
   type: "smoothstep",
   animated: false,
@@ -212,22 +243,27 @@ const useCanvasStore = create<CanvasState>()(
 
         const newParentAbs = parentId ? absOf(parentId) : { x: 0, y: 0 };
 
-        set({
-          nodes: nodes.map((n) => {
-            if (n.id === nodeId || boundaryIds.has(n.id)) {
-              const myAbs = absOf(n.id);
-              const relative = { x: myAbs.x - newParentAbs.x, y: myAbs.y - newParentAbs.y };
-              return {
-                ...n,
-                position: relative,
-                ...(parentId
-                  ? { parentId, extent: "parent" as const }
-                  : { parentId: undefined, extent: undefined }),
-              };
-            }
-            return n;
-          }),
+        const rewritten = nodes.map((n) => {
+          if (n.id === nodeId || boundaryIds.has(n.id)) {
+            const myAbs = absOf(n.id);
+            const relative = { x: myAbs.x - newParentAbs.x, y: myAbs.y - newParentAbs.y };
+            return {
+              ...n,
+              position: relative,
+              ...(parentId
+                ? { parentId, extent: "parent" as const }
+                : { parentId: undefined, extent: undefined }),
+            };
+          }
+          return n;
         });
+
+        // React Flow requires a parent node to appear before its children
+        // in the nodes array — otherwise the child's relative coords are
+        // applied against the (as-yet-unknown) parent and render at 0,0.
+        // Topological sort ensures correctness after any reparent; nodes
+        // with no parent come first in original order.
+        set({ nodes: topoSortByParent(rewritten) });
       },
 
       setSelectedNode: (id) => set({ selectedNodeId: id }),
@@ -440,12 +476,14 @@ const useCanvasStore = create<CanvasState>()(
           selected: false,
         }));
 
-        // 5. Deselect all existing then select the pasted nodes
+        // 5. Deselect all existing then select the pasted nodes. Topo-sort
+        //    the result so any pasted child ends up after its pasted parent
+        //    in the array (React Flow renders in array order).
         set({
-          nodes: [
+          nodes: topoSortByParent([
             ...nodes.map((n) => ({ ...n, selected: false })),
             ...newNodes,
-          ],
+          ]),
           edges: [...edges, ...newEdges],
         });
       },
@@ -474,7 +512,8 @@ const useCanvasStore = create<CanvasState>()(
 
       setDocumentDirty: (dirty) => set({ documentDirty: dirty }),
 
-      loadCanvasData: (nodes, edges) => set({ nodes, edges }),
+      loadCanvasData: (nodes, edges) =>
+        set({ nodes: topoSortByParent(nodes), edges }),
 
       resetCanvas: () => set({
         processId: null,

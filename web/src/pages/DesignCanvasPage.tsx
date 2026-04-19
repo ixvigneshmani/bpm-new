@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useCallback, useState, type DragEvent } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ReactFlow,
@@ -83,7 +83,11 @@ function CanvasInner() {
   // rendering them and their edges. Without this, `extent: 'parent'`
   // clamps children into the collapsed 120×80 box, so expanding again
   // would show a jammed pile.
-  const hiddenIds = (() => {
+  // Descendants of a collapsed subprocess are `hidden:true` so React Flow
+  // skips rendering them and `extent:'parent'` can't clamp them into the
+  // shrunken 120×80 box. Memoized on rawNodes — pan/hover re-renders reuse
+  // the result instead of rebuilding the maps.
+  const hiddenIds = useMemo<Set<string> | null>(() => {
     const byId = new Map(rawNodes.map((n) => [n.id, n]));
     const collapsed = new Set<string>();
     for (const n of rawNodes) {
@@ -103,9 +107,9 @@ function CanvasInner() {
       }
     }
     return hidden;
-  })();
+  }, [rawNodes]);
 
-  const nodes = (() => {
+  const nodes = useMemo(() => {
     const base = selectedNodeId
       ? rawNodes.map((n) =>
           n.selected === (n.id === selectedNodeId)
@@ -115,16 +119,16 @@ function CanvasInner() {
       : rawNodes;
     if (!hiddenIds || hiddenIds.size === 0) return base;
     return base.map((n) => (hiddenIds.has(n.id) ? { ...n, hidden: true } : n));
-  })();
+  }, [rawNodes, selectedNodeId, hiddenIds]);
 
-  const visibleEdges = (() => {
+  const visibleEdges = useMemo(() => {
     if (!hiddenIds || hiddenIds.size === 0) return edges;
     return edges.map((e) =>
       hiddenIds.has(e.source) || hiddenIds.has(e.target)
         ? { ...e, hidden: true }
         : e,
     );
-  })();
+  }, [edges, hiddenIds]);
 
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {

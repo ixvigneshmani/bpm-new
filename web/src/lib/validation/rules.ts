@@ -8,6 +8,13 @@ import type { ValidationRule, ValidationIssue } from "./types";
 import { EVENT_BASED_VALID_TARGETS } from "../bpmn/capabilities";
 import { isSubprocessType } from "../bpmn/element-map";
 
+/** Node types valid as boundary-event hosts per BPMN 2.0 §10.5.5. */
+const BOUNDARY_VALID_HOSTS = new Set([
+  "userTask", "serviceTask", "scriptTask", "sendTask", "receiveTask",
+  "manualTask", "businessRuleTask", "callActivity",
+  "subProcess", "eventSubProcess", "transaction", "adHocSubProcess",
+]);
+
 const labelOf = (n: { data: Record<string, unknown>; id: string }) =>
   (n.data?.label as string) || n.id;
 
@@ -255,7 +262,8 @@ export const boundaryAttachmentRule: ValidationRule = {
         });
         continue;
       }
-      if (!byId.has(data.attachedToRef)) {
+      const host = byId.get(data.attachedToRef);
+      if (!host) {
         issues.push({
           id: `boundary-dangling-attachment:${n.id}`,
           severity: "error",
@@ -263,7 +271,44 @@ export const boundaryAttachmentRule: ValidationRule = {
           nodeId: n.id,
           message: `Boundary event "${labelOf(n as { id: string; data: Record<string, unknown> })}" references a deleted activity "${data.attachedToRef}".`,
         });
+        continue;
       }
+      // Per BPMN 2.0 §10.5.5 a boundary event may only attach to an
+      // Activity (task family or subprocess). The PropertiesPanel
+      // dropdown filters to these types, but XML import or direct data
+      // mutation could slip through — cover it here.
+      if (host.type && !BOUNDARY_VALID_HOSTS.has(host.type)) {
+        issues.push({
+          id: `boundary-invalid-host:${n.id}`,
+          severity: "error",
+          ruleId: "boundary-invalid-host",
+          nodeId: n.id,
+          message: `Boundary event "${labelOf(n as { id: string; data: Record<string, unknown> })}" is attached to "${labelOf(host as { id: string; data: Record<string, unknown> })}" (${host.type}). Boundary events must attach to an activity (task or subprocess).`,
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+/** Event subprocesses must live inside a parent process or subprocess
+ *  per BPMN 2.0 §10.11 — a root-level event subprocess is structurally
+ *  invalid (it has no parent whose death it can observe). */
+export const eventSubprocessNestingRule: ValidationRule = {
+  id: "event-subprocess-nesting",
+  name: "Event subprocess nesting",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "eventSubProcess") continue;
+      if (n.parentId) continue;
+      issues.push({
+        id: `event-subprocess-nesting:${n.id}`,
+        severity: "error",
+        ruleId: "event-subprocess-nesting",
+        nodeId: n.id,
+        message: `Event subprocess "${labelOf(n as { id: string; data: Record<string, unknown> })}" must be nested inside a parent subprocess. Drag it onto an expanded subprocess frame.`,
+      });
     }
     return issues;
   },
@@ -277,4 +322,5 @@ export const DEFAULT_RULES: ValidationRule[] = [
   eventBasedTargetRule,
   boundaryAttachmentRule,
   eventSubprocessTriggerRule,
+  eventSubprocessNestingRule,
 ];
