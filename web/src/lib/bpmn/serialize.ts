@@ -301,14 +301,92 @@ export async function serializeCanvasToBpmn(
     return out;
   };
 
-  const processFlowElements = assembleScope(null);
+  // ─── Pools / Collaboration wrap ────────────────────────────────────
+  // When no pool is on the canvas we keep the flat single-Process output
+  // byte-identical to P1–P5 exports (critical for backwards-compat —
+  // existing saved processes must re-export the same way). Only once a
+  // pool exists do we wrap in a Collaboration with one Process per pool.
+  const pools = nodes.filter((n) => n.type === "pool");
+  const hasPools = pools.length > 0;
 
-  const processEl = moddle.create("bpmn:Process", {
-    id: processId,
-    name: processName,
-    isExecutable: true,
-    flowElements: processFlowElements,
-  });
+  let processesForDefinitions: ModdleElement[];
+  let collaborationEl: ModdleElement | null = null;
+  let diPlaneTarget: ModdleElement;
+
+  if (!hasPools) {
+    const processFlowElements = assembleScope(null);
+    const processEl = moddle.create("bpmn:Process", {
+      id: processId,
+      name: processName,
+      isExecutable: true,
+      flowElements: processFlowElements,
+    }) as unknown as ModdleElement;
+    processesForDefinitions = [processEl];
+    diPlaneTarget = processEl;
+  } else {
+    // Orphan flow nodes (no pool ancestor) need a home. Rather than drop
+    // them silently, host them inside the first pool's Process and warn.
+    const orphans = nodes.filter((n) => {
+      if (n.type === "pool") return false;
+      if (!n.type || !INTERNAL_TO_BPMN[n.type]) return false;
+      // Walk up; if we never hit a pool, it's an orphan.
+      let cur: Node | undefined = n;
+      while (cur) {
+        if (cur.type === "pool") return false;
+        cur = cur.parentId ? nodeById.get(cur.parentId) : undefined;
+      }
+      return true;
+    });
+    if (orphans.length > 0) {
+      warnings.push(
+        `${orphans.length} flow node(s) outside any pool were placed in "${((pools[0].data as { label?: string })?.label) || pools[0].id}" on export. Drag them into a pool to control placement.`,
+      );
+    }
+
+    // Adopt orphans into the first pool *in the scope map only* (no data
+    // mutation) so assembleScope sees them as children.
+    const firstPoolId = pools[0].id;
+    if (orphans.length > 0) {
+      const adopted = childrenByParent.get(firstPoolId) || [];
+      const adoptedIds = new Set(adopted.map((n) => n.id));
+      for (const n of orphans) if (!adoptedIds.has(n.id)) adopted.push(n);
+      childrenByParent.set(firstPoolId, adopted);
+      // Orphan flows (scope=null) also move under the first pool.
+      const rootFlows = flowsByScope.get(null) || [];
+      if (rootFlows.length > 0) {
+        const existing = flowsByScope.get(firstPoolId) || [];
+        flowsByScope.set(firstPoolId, [...existing, ...rootFlows]);
+        flowsByScope.set(null, []);
+      }
+    }
+
+    processesForDefinitions = [];
+    const participantEls: ModdleElement[] = [];
+    for (const pool of pools) {
+      const poolData = (pool.data || {}) as { label?: string; participantName?: string; processId?: string };
+      const derivedProcessId = poolData.processId || `Process_${pool.id}`;
+      const processEl = moddle.create("bpmn:Process", {
+        id: derivedProcessId,
+        name: poolData.label || poolData.participantName || "Process",
+        isExecutable: true,
+        flowElements: assembleScope(pool.id),
+      }) as unknown as ModdleElement;
+      processesForDefinitions.push(processEl);
+
+      const participantEl = moddle.create("bpmn:Participant", {
+        id: pool.id,
+        name: poolData.participantName || poolData.label || "Pool",
+        processRef: processEl,
+      }) as unknown as ModdleElement;
+      participantEls.push(participantEl);
+    }
+
+    collaborationEl = moddle.create("bpmn:Collaboration", {
+      id: `Collaboration_${processId}`,
+      participants: participantEls,
+    }) as unknown as ModdleElement;
+    diPlaneTarget = collaborationEl;
+  }
 
   // ─── Diagram Interchange (DI) — positions + waypoints ──────────────
   // DI bounds are absolute per BPMN 2.0 §A.1 (BPMNDI on a single Plane).
@@ -344,6 +422,38 @@ export async function serializeCanvasToBpmn(
   };
 
   const planeElements: ModdleElement[] = [];
+
+  // Pool shapes first — they sit behind the flow-node shapes in z-order.
+  // Build id→Participant lookup so we can point each pool's BPMNShape at
+  // the moddle Participant object (bpmn-moddle expects the reference, not
+  // a bare id string, and serializes it back to an IDREF).
+  const participantByPoolId = new Map<string, ModdleElement>();
+  if (collaborationEl) {
+    const participants = (collaborationEl.participants as ModdleElement[]) || [];
+    for (const p of participants) if (p.id) participantByPoolId.set(p.id as string, p);
+  }
+  if (hasPools) {
+    for (const pool of pools) {
+      const participant = participantByPoolId.get(pool.id);
+      if (!participant) continue;
+      const { x, y } = absPos(pool);
+      const size = effectiveSize(pool);
+      const bounds = moddle.create("dc:Bounds", {
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(size.width),
+        height: Math.round(size.height),
+      });
+      const poolData = (pool.data || {}) as { isHorizontal?: boolean };
+      const poolShape = moddle.create("bpmndi:BPMNShape", {
+        id: `${pool.id}_di`,
+        bpmnElement: participant,
+        bounds,
+        isHorizontal: poolData.isHorizontal !== false,
+      }) as unknown as ModdleElement;
+      planeElements.push(poolShape);
+    }
+  }
 
   for (const n of nodes) {
     if (!n.type || !INTERNAL_TO_BPMN[n.type]) continue;
@@ -401,7 +511,7 @@ export async function serializeCanvasToBpmn(
 
   const plane = moddle.create("bpmndi:BPMNPlane", {
     id: "BPMNPlane_1",
-    bpmnElement: processEl,
+    bpmnElement: diPlaneTarget,
     planeElement: planeElements,
   });
 
@@ -410,13 +520,20 @@ export async function serializeCanvasToBpmn(
     plane,
   });
 
-  // Process must come AFTER Message/Signal/Error in rootElements — some
-  // importers resolve refs positionally and complain if the declaration
-  // appears after its first reference.
+  // Process(es) must come AFTER Message/Signal/Error in rootElements —
+  // some importers resolve refs positionally and complain if the
+  // declaration appears after its first reference. Collaboration (when
+  // present) sits at the end, again to keep refs resolvable forward.
+  const rootElements: ModdleElement[] = [
+    ...rootDeclarationsAsArray(rootDecls),
+    ...processesForDefinitions,
+  ];
+  if (collaborationEl) rootElements.push(collaborationEl);
+
   const definitions = moddle.create("bpmn:Definitions", {
     id: definitionsId,
     targetNamespace: "http://flowpro.io/bpmn",
-    rootElements: [...rootDeclarationsAsArray(rootDecls), processEl],
+    rootElements,
     diagrams: [diagram],
   });
 

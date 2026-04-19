@@ -28,6 +28,8 @@ export const DEFAULT_SIZE: Record<string, { width: number; height: number }> = {
   eventSubProcess: { width: 360, height: 200 },
   transaction: { width: 360, height: 200 },
   adHocSubProcess: { width: 360, height: 200 },
+  pool: { width: 800, height: 240 },
+  lane: { width: 770, height: 120 },
 };
 
 /** Collapsed subprocess shapes render as task-sized boxes; use this when
@@ -41,6 +43,20 @@ export function isSubprocessType(type: string | undefined): boolean {
     type === "transaction" ||
     type === "adHocSubProcess"
   );
+}
+
+/** Pools and lanes aren't flow nodes — they're `bpmn:Participant` and
+ *  `bpmn:Lane` respectively, emitted outside the flowElements list.
+ *  `INTERNAL_TO_BPMN` intentionally omits them; callers branch on this
+ *  helper before walking the flow-node path. */
+export function isSwimlaneType(type: string | undefined): boolean {
+  return type === "pool" || type === "lane";
+}
+
+/** Any node that acts as a container for others (influences parentId
+ *  semantics + containment UX). Combination of subprocess + swimlane. */
+export function isContainerType(type: string | undefined): boolean {
+  return isSubprocessType(type) || isSwimlaneType(type);
 }
 
 /** Internal React Flow node type → bpmn-moddle $type. */

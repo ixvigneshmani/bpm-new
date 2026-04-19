@@ -22,7 +22,7 @@ import { normalizeCanvasPayload, toCanvasPayload } from "../store/canvas-schema"
 import { apiGet, apiPut } from "../lib/api";
 import { STEP_MAP, DOC_SOURCE_MAP } from "../lib/constants";
 import { nodeTypes } from "../components/canvas/nodes";
-import { isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "../lib/bpmn/element-map";
+import { isSubprocessType, isSwimlaneType, isContainerType, COLLAPSED_SUBPROCESS_SIZE } from "../lib/bpmn/element-map";
 import { getSize } from "../lib/bpmn/element-map";
 import { edgeTypes } from "../components/canvas/edges";
 import ElementPalette from "../components/canvas/element-palette";
@@ -162,19 +162,20 @@ function CanvasInner() {
     [rawNodes],
   );
 
-  /** Deepest expanded subprocess whose bounding box contains the given
-   *  absolute flow-space position. Returns null when the drop is on the
-   *  root pane. */
+  /** Deepest expanded container (subprocess or pool) whose bounding box
+   *  contains the given absolute flow-space position. Returns null when
+   *  the drop is on the root pane. */
   const findSubprocessAt = useCallback(
     (pos: { x: number; y: number }, ignoreId?: string): string | null => {
       const allNodes = rawNodes;
       let best: { id: string; depth: number } | null = null;
       const byId = new Map(allNodes.map((n) => [n.id, n]));
       for (const n of allNodes) {
-        if (!isSubprocessType(n.type)) continue;
+        if (!isContainerType(n.type)) continue;
         if (ignoreId && n.id === ignoreId) continue;
         const d = n.data as { isExpanded?: boolean; width?: number; height?: number };
-        if (d.isExpanded === false) continue;
+        // Pools don't collapse; subprocesses do.
+        if (isSubprocessType(n.type) && d.isExpanded === false) continue;
         const origin = absOriginOf(n.id, allNodes);
         const size = getSize(n.type);
         const w = d.width ?? n.width ?? size.width;
@@ -212,13 +213,16 @@ function CanvasInner() {
       });
 
       // Auto-parent tasks / events / gateways dropped onto an expanded
-      // subprocess frame. Generic subprocess drops stay at root (user
-      // can drag in afterward) — *except* for eventSubProcess, which
-      // per BPMN 2.0 §10.11 must be nested inside a parent process or
-      // subprocess. Auto-parenting it matches that constraint.
+      // container (subprocess or pool). Container drops stay at root
+      // (user can drag in afterward) — *except* for eventSubProcess,
+      // which per BPMN 2.0 §10.11 must be nested. Pools are always
+      // root-only and never auto-nest.
+      const isSubprocess = isSubprocessType(type);
+      const isPool = type === "pool";
       const canAutoNestSubprocess = type === "eventSubProcess";
-      const parentId =
-        isSubprocessType(type) && !canAutoNestSubprocess
+      const parentId = isPool
+        ? null
+        : (isSubprocess && !canAutoNestSubprocess)
           ? null
           : findSubprocessAt(position);
       addNode(type, position, label, parentId || undefined);
@@ -233,10 +237,11 @@ function CanvasInner() {
       const allNodes = useCanvasStore.getState().nodes;
       const n = allNodes.find((m) => m.id === node.id);
       if (!n || !n.type) return;
-      // Subprocess nodes themselves don't auto-reparent on drag — that's
-      // a structural move users should do deliberately via keyboard or
-      // future UX. This also avoids nesting cycles from fast drags.
-      if (isSubprocessType(n.type)) return;
+      // Subprocess + pool nodes themselves don't auto-reparent on drag.
+      // Pools are root-only by rule; subprocesses avoid nesting cycles
+      // from fast drags. Structural reparenting is deliberate via future
+      // UX, not an accident of pointer travel.
+      if (isSubprocessType(n.type) || isSwimlaneType(n.type)) return;
       const origin = absOriginOf(n.id, allNodes);
       const size = getSize(n.type);
       const d = n.data as { width?: number; height?: number; isExpanded?: boolean };

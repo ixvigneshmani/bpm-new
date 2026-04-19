@@ -63,9 +63,23 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
 
   const def = rootElement as unknown as ModdleElement;
   const rootElements = (def.rootElements as ModdleElement[] | undefined) || [];
-  const process = rootElements.find((r) => r.$type === "bpmn:Process");
-  if (!process) {
+  const processes = rootElements.filter((r) => r.$type === "bpmn:Process");
+  if (processes.length === 0) {
     return { nodes: [], edges: [], processId: null, processName: null, warnings: [...warnings, "No bpmn:Process found in XML"] };
+  }
+
+  // Collaboration + Participant → pool nodes. Each Participant owns one
+  // Process (via processRef); we walk those Processes as nested scopes,
+  // giving every flow node inside a parentId pointing at its pool.
+  const collaboration = rootElements.find((r) => r.$type === "bpmn:Collaboration");
+  const participantByProcessId = new Map<string, ModdleElement>();
+  if (collaboration) {
+    const participants = (collaboration.participants as ModdleElement[]) || [];
+    for (const p of participants) {
+      const procRef = p.processRef as ModdleElement | string | undefined;
+      const procId = typeof procRef === "string" ? procRef : procRef?.id;
+      if (procId) participantByProcessId.set(procId, p);
+    }
   }
 
   // Resolve root Message/Signal/Error declarations so event definitions
@@ -262,8 +276,50 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     }
   };
 
-  const rootFlowElements = (process.flowElements as ModdleElement[] | undefined) || [];
-  walkScope(rootFlowElements, null, { x: 0, y: 0 });
+  // Build pool nodes from Participants (if any). Each Participant gets a
+  // matching React Flow node; flow elements inside the pool's Process
+  // become its children via parentId. Pool DI bounds come from the
+  // BPMNShape whose bpmnElement references the Participant id.
+  const poolAbsById = new Map<string, { x: number; y: number }>();
+  if (collaboration) {
+    const participants = (collaboration.participants as ModdleElement[]) || [];
+    for (const p of participants) {
+      if (!p.id) continue;
+      const shape = shapeByRef.get(p.id);
+      const bounds = shape?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
+      const absX = bounds?.x ?? 0;
+      const absY = bounds?.y ?? 0;
+      const baseData = createDefaultNodeData("pool", (p.name as string) || undefined) as Record<string, unknown>;
+      baseData.participantName = (p.name as string) || "";
+      const procRef = p.processRef as ModdleElement | string | undefined;
+      baseData.processId = typeof procRef === "string" ? procRef : procRef?.id;
+      const isHorizontal = shape?.isHorizontal;
+      baseData.isHorizontal = isHorizontal !== false;
+      if (bounds?.width) baseData.width = bounds.width;
+      if (bounds?.height) baseData.height = bounds.height;
+      nodes.push({
+        id: p.id,
+        type: "pool",
+        position: { x: absX, y: absY },
+        data: baseData,
+      });
+      poolAbsById.set(p.id, { x: absX, y: absY });
+    }
+  }
+
+  // Walk each Process: if it belongs to a Participant, its flowElements
+  // root is the Participant node (relative positions computed from the
+  // pool's absolute origin). Otherwise — a Process with no Participant,
+  // or the single-Process (no Collaboration) case — walk from root.
+  for (const process of processes) {
+    const owningParticipant = process.id ? participantByProcessId.get(process.id) : undefined;
+    const rootFlowElements = (process.flowElements as ModdleElement[] | undefined) || [];
+    if (owningParticipant?.id) {
+      walkScope(rootFlowElements, owningParticipant.id, poolAbsById.get(owningParticipant.id) || { x: 0, y: 0 });
+    } else {
+      walkScope(rootFlowElements, null, { x: 0, y: 0 });
+    }
+  }
 
   // Mirror isDefault onto each edge whose source gateway marks it default.
   for (const n of nodes) {
@@ -276,11 +332,16 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     }
   }
 
+  // processId/processName report the *primary* process. When there's a
+  // Collaboration, pick the first Process without a Participant (the
+  // "host" process) or fall back to the first Process.
+  const primaryProcess =
+    processes.find((p) => !p.id || !participantByProcessId.has(p.id)) || processes[0];
   return {
     nodes,
     edges,
-    processId: process.id || null,
-    processName: (process.name as string) || null,
+    processId: primaryProcess.id || null,
+    processName: (primaryProcess.name as string) || null,
     warnings,
   };
 }

@@ -206,6 +206,11 @@ const useCanvasStore = create<CanvasState>()(
         if (!node) return;
         if ((node.parentId || null) === parentId) return;
 
+        // Pools are root-only in BPMN 2.0 — a Participant cannot nest
+        // inside another Participant. Reject silently so the UI doesn't
+        // need a special-case.
+        if (node.type === "pool" && parentId !== null) return;
+
         // No self-parenting, no creating cycles (can't drop a subprocess
         // into one of its own descendants).
         if (parentId === nodeId) return;

@@ -451,6 +451,25 @@ export type AdHocSubProcessData = BaseNodeData & ActivityCommon & {
   ordering?: "Parallel" | "Sequential";
 };
 
+/* ─── Swimlanes (pool + lane) ─── */
+
+export type PoolData = BaseNodeData & {
+  bpmnType: "pool";
+  /** Participant name — shown in the vertical header band. Defaults to `label`. */
+  participantName?: string;
+  /** BPMN `bpmn:Participant.processRef.id`. When undefined the pool is
+   *  still emitted but its Process id is auto-generated at serialize. */
+  processId?: string;
+  /** Horizontal orientation per BPMN DI. v1 supports horizontal only. */
+  isHorizontal?: boolean;
+};
+
+export type LaneData = BaseNodeData & {
+  bpmnType: "lane";
+  /** Horizontal orientation mirrors the parent pool. */
+  isHorizontal?: boolean;
+};
+
 /* ─── Discriminated union ─── */
 
 export type BpmnNodeData =
@@ -471,6 +490,8 @@ export type BpmnNodeData =
   | EventSubProcessData
   | TransactionData
   | AdHocSubProcessData
+  | PoolData
+  | LaneData
   | ExclusiveGatewayData
   | ParallelGatewayData
   | InclusiveGatewayData
@@ -502,6 +523,8 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     eventSubProcess: "Event Subprocess",
     transaction: "Transaction",
     adHocSubProcess: "Ad-hoc Subprocess",
+    pool: "Pool",
+    lane: "Lane",
   };
 
   const base: BaseNodeData = {
@@ -581,6 +604,14 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
         ...base, ...activityBase, bpmnType: "adHocSubProcess",
         isExpanded: true, ordering: "Parallel",
       } as AdHocSubProcessData;
+    case "pool":
+      return {
+        ...base, bpmnType: "pool",
+        participantName: label || "Pool",
+        isHorizontal: true,
+      } as PoolData;
+    case "lane":
+      return { ...base, bpmnType: "lane", isHorizontal: true } as LaneData;
     default:
       return base;
   }
@@ -619,4 +650,6 @@ export const NODE_THEMES: Record<string, NodeTheme> = {
   eventSubProcess:  { color: "#7C3AED", bgLight: "#F5F3FF", bgSelected: "#EDE9FE", borderLight: "#C4B5FD", label: "Event Subprocess",    iconBg: "#EDE9FE" },
   transaction:      { color: "#0F766E", bgLight: "#F0FDFA", bgSelected: "#CCFBF1", borderLight: "#5EEAD4", label: "Transaction",         iconBg: "#CCFBF1" },
   adHocSubProcess:  { color: "#B45309", bgLight: "#FFFBEB", bgSelected: "#FEF3C7", borderLight: "#FCD34D", label: "Ad-hoc Subprocess",   iconBg: "#FEF3C7" },
+  pool:             { color: "#1D4ED8", bgLight: "#EFF6FF", bgSelected: "#DBEAFE", borderLight: "#93C5FD", label: "Pool",                iconBg: "#DBEAFE" },
+  lane:             { color: "#1D4ED8", bgLight: "#F8FAFC", bgSelected: "#F1F5F9", borderLight: "#CBD5E1", label: "Lane",                iconBg: "#F1F5F9" },
 };
