@@ -16,13 +16,18 @@
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useReactFlow, type Node, type Edge } from "@xyflow/react";
-import useCanvasStore from "../../store/canvas-store";
+import useCanvasStore, { type RefineOp } from "../../store/canvas-store";
 
 type ScaffoldResponse = {
   processName: string;
   processDescription: string;
   nodes: Node[];
   edges: Edge[];
+  notes: string;
+};
+
+type RefineResponse = {
+  ops: RefineOp[];
   notes: string;
 };
 
@@ -81,15 +86,22 @@ function humanizeError(status: number | null, raw: string): string {
 
 export default function AiScaffoldDialog({ onClose }: Props) {
   const loadCanvasData = useCanvasStore((s) => s.loadCanvasData);
+  const applyRefineOps = useCanvasStore((s) => s.applyRefineOps);
   const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
   const setDocumentDirty = useCanvasStore((s) => s.setDocumentDirty);
   const businessDoc = useCanvasStore((s) => s.processMeta.businessDoc);
   const existingNodeCount = useCanvasStore((s) => s.nodes.length);
   const { fitView } = useReactFlow();
 
+  // Mode defaults to "refine" when the canvas isn't empty — iterating
+  // is the overwhelmingly common case once a scaffold has landed.
+  const initialMode: "scaffold" | "refine" = existingNodeCount > 0 ? "refine" : "scaffold";
+
   const [tab, setTab] = useState<"create" | "history">("create");
+  const [mode, setMode] = useState<"scaffold" | "refine">(initialMode);
   const [description, setDescription] = useState("");
   const [result, setResult] = useState<ScaffoldResponse | null>(null);
+  const [refineResult, setRefineResult] = useState<RefineResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ charsOut: number; elapsedMs: number } | null>(null);
@@ -150,15 +162,41 @@ export default function AiScaffoldDialog({ onClose }: Props) {
     setBusy(true);
     setError(null);
     setResult(null);
+    setRefineResult(null);
     setProgress(null);
 
     const token = localStorage.getItem("flowpro_token");
     const body: Record<string, unknown> = { description };
     if (hasSchema) body.businessDocSchema = businessDoc;
+    if (mode === "refine") {
+      // Minimal snapshot — the canvas store carries React Flow-specific
+      // fields (selected, dragging) the AI shouldn't see.
+      const { nodes, edges } = useCanvasStore.getState();
+      body.currentCanvas = {
+        nodes: nodes.map((n) => ({
+          id: n.id,
+          type: n.type,
+          position: n.position,
+          parentId: n.parentId,
+          data: n.data,
+        })),
+        edges: edges.map((e) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          label: e.label,
+          data: e.data,
+        })),
+      };
+    }
+
+    const endpoint = mode === "refine"
+      ? "/ai/refine-process-stream"
+      : "/ai/scaffold-process-stream";
 
     let status: number | null = null;
     try {
-      const res = await fetch(`${API_BASE}/ai/scaffold-process-stream`, {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -193,7 +231,11 @@ export default function AiScaffoldDialog({ onClose }: Props) {
         onComplete: (payload) => {
           terminal = "complete";
           if (!mountedRef.current || controller.signal.aborted) return;
-          setResult(payload);
+          if (mode === "refine") {
+            setRefineResult(payload as RefineResponse);
+          } else {
+            setResult(payload as ScaffoldResponse);
+          }
         },
         onError: (evt) => {
           terminal = "error";
@@ -240,6 +282,14 @@ export default function AiScaffoldDialog({ onClose }: Props) {
     onClose();
     // Auto-fit the new graph so Claude's layout guesses never leave
     // the canvas blank at the old viewport.
+    setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
+  }
+
+  function applyRefine() {
+    if (!refineResult || refineResult.ops.length === 0) return;
+    applyRefineOps(refineResult.ops);
+    setHistory(null);
+    onClose();
     setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
   }
 
@@ -342,7 +392,9 @@ export default function AiScaffoldDialog({ onClose }: Props) {
               <span aria-hidden>✨</span> AI Process Scaffold
             </div>
             <div style={{ fontSize: 12, color: "#667085", marginTop: 2 }}>
-              Describe the process in plain language — Claude drafts the nodes, flows, and gateways.
+              {mode === "refine"
+                ? "Describe how to refine the current canvas — Claude proposes targeted add/modify/remove ops."
+                : "Describe the process in plain language — Claude drafts the nodes, flows, and gateways."}
             </div>
           </div>
           <button
@@ -367,6 +419,24 @@ export default function AiScaffoldDialog({ onClose }: Props) {
 
         {/* Body */}
         <div style={{ flex: 1, padding: "18px 28px", overflowY: "auto", display: tab === "create" ? "flex" : "none", flexDirection: "column", gap: 14 }}>
+          {existingNodeCount > 0 && (
+            <div
+              role="radiogroup"
+              aria-label="Generation mode"
+              style={{
+                display: "flex", gap: 0,
+                background: "#F3F4F6", borderRadius: 8, padding: 3,
+                alignSelf: "flex-start",
+              }}
+            >
+              <ModeSegment active={mode === "refine"} onClick={() => setMode("refine")}>
+                Refine existing
+              </ModeSegment>
+              <ModeSegment active={mode === "scaffold"} onClick={() => setMode("scaffold")}>
+                Replace with new
+              </ModeSegment>
+            </div>
+          )}
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", display: "flex", justifyContent: "space-between" }}>
               <span>Description</span>
@@ -378,7 +448,9 @@ export default function AiScaffoldDialog({ onClose }: Props) {
               ref={textareaRef}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Example: 3-step invoice approval with manager review, finance check for amounts over $1000, and director sign-off. Escalate if no response in 48h."
+              placeholder={mode === "refine"
+                ? "Example: Add a rejection path from the approval gateway that notifies the submitter and ends the process."
+                : "Example: 3-step invoice approval with manager review, finance check for amounts over $1000, and director sign-off. Escalate if no response in 48h."}
               rows={5}
               style={{
                 width: "100%", padding: "10px 12px",
@@ -466,6 +538,26 @@ export default function AiScaffoldDialog({ onClose }: Props) {
               </div>
             </div>
           )}
+
+          {refineResult && (
+            <div style={{
+              padding: "12px 14px", borderRadius: 8,
+              background: "#F8FAFC", border: "1px solid #E5E7EB",
+              display: "flex", flexDirection: "column", gap: 8,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#101828" }}>
+                {refineResult.ops.length === 0
+                  ? "No changes proposed"
+                  : `${refineResult.ops.length} operation(s) proposed`}
+              </div>
+              {refineResult.notes && (
+                <div style={{ fontSize: 11, color: "#475467", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                  {refineResult.notes}
+                </div>
+              )}
+              <OpsBreakdown ops={refineResult.ops} />
+            </div>
+          )}
         </div>
 
         {/* History body */}
@@ -517,7 +609,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
             >
               {busy ? "Cancel" : "Close"}
             </button>
-            {tab === "create" && (!result ? (
+            {tab === "create" && (!(result || refineResult) ? (
               <button
                 type="button"
                 onClick={generate}
@@ -531,14 +623,25 @@ export default function AiScaffoldDialog({ onClose }: Props) {
                 <button type="button" onClick={generate} disabled={busy} style={btnStyle("ghost", busy)}>
                   Regenerate
                 </button>
-                <button
-                  type="button"
-                  onClick={apply}
-                  disabled={emptyResult}
-                  style={btnStyle("primary", emptyResult)}
-                >
-                  Apply to canvas
-                </button>
+                {mode === "refine" ? (
+                  <button
+                    type="button"
+                    onClick={applyRefine}
+                    disabled={!refineResult || refineResult.ops.length === 0}
+                    style={btnStyle("primary", !refineResult || refineResult.ops.length === 0)}
+                  >
+                    Apply {refineResult?.ops.length ?? 0} change(s)
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={apply}
+                    disabled={emptyResult}
+                    style={btnStyle("primary", emptyResult)}
+                  >
+                    Apply to canvas
+                  </button>
+                )}
               </>
             ))}
             {tab === "history" && (
@@ -554,6 +657,62 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ModeSegment({
+  active, onClick, children,
+}: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      style={{
+        padding: "6px 12px",
+        borderRadius: 6,
+        border: "none",
+        background: active ? "#fff" : "transparent",
+        color: active ? "#101828" : "#667085",
+        fontSize: 11,
+        fontWeight: 600,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        boxShadow: active ? "0 1px 2px rgba(16, 24, 40, 0.1)" : "none",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function OpsBreakdown({ ops }: { ops: RefineOp[] }) {
+  const counts: Record<RefineOp["op"], number> = {
+    "add-node": 0, "modify-node": 0, "remove-node": 0, "add-edge": 0, "remove-edge": 0,
+  };
+  for (const op of ops) counts[op.op]++;
+  const spec: Array<{ key: RefineOp["op"]; label: string; color: string }> = [
+    { key: "add-node", label: "Added nodes", color: "#166534" },
+    { key: "modify-node", label: "Modified nodes", color: "#1E40AF" },
+    { key: "remove-node", label: "Removed nodes", color: "#B42318" },
+    { key: "add-edge", label: "Added edges", color: "#166534" },
+    { key: "remove-edge", label: "Removed edges", color: "#B42318" },
+  ];
+  const rows = spec.filter((r) => counts[r.key] > 0);
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 10 }}>
+      {rows.map((r) => (
+        <span key={r.key} style={{
+          padding: "2px 8px", borderRadius: 10,
+          background: "#fff", border: `1px solid ${r.color}33`,
+          color: r.color, fontWeight: 600,
+        }}>
+          {r.label}: {counts[r.key]}
+        </span>
+      ))}
     </div>
   );
 }
@@ -674,7 +833,7 @@ async function consumeSseStream(
   signal: AbortSignal,
   handlers: {
     onProgress: (p: { charsOut: number; elapsedMs: number }) => void;
-    onComplete: (payload: ScaffoldResponse) => void;
+    onComplete: (payload: unknown) => void;
     onError: (evt: { status: number; message: string }) => void;
   },
 ): Promise<void> {

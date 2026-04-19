@@ -17,6 +17,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { AiService, SCAFFOLD_MODEL } from "./ai.service";
 import { ListInteractionsDto } from "./dto/list-interactions.dto";
+import { RefineProcessDto } from "./dto/refine-process.dto";
 import { ScaffoldProcessDto } from "./dto/scaffold-process.dto";
 
 /** Minimal structural type over the Fastify reply: we only touch `.raw`
@@ -100,21 +101,68 @@ export class AiController {
    *  ValidationPipe) still produce normal JSON responses before any
    *  SSE headers go out, which is what the client expects. */
   @Post("scaffold-process-stream")
-  async scaffoldStream(
+  scaffoldStream(
     @Req() req: AuthenticatedRequest,
     @Body() dto: ScaffoldProcessDto,
     @Res() reply: StreamingReply,
   ): Promise<void> {
+    return this.runSseStream(reply, (abortSignal, onProgress) =>
+      this.ai.scaffoldProcessStream({
+        description: dto.description,
+        businessDocSchema: dto.businessDocSchema,
+        tenantId: req.user.tenantId,
+        userId: req.user.sub,
+        abortSignal,
+        onProgress,
+      }),
+    );
+  }
+
+  /** POST /ai/refine-process-stream
+   *  Iterative companion to /scaffold-process-stream: the user provides
+   *  a description *plus* the current canvas snapshot, and Claude emits
+   *  an ordered list of add/modify/remove ops rather than a wholesale
+   *  scaffold. Same SSE framing as the scaffold endpoint. */
+  @Post("refine-process-stream")
+  refineStream(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: RefineProcessDto,
+    @Res() reply: StreamingReply,
+  ): Promise<void> {
+    return this.runSseStream(reply, (abortSignal, onProgress) =>
+      this.ai.refineProcessStream({
+        description: dto.description,
+        currentCanvas: dto.currentCanvas,
+        businessDocSchema: dto.businessDocSchema,
+        tenantId: req.user.tenantId,
+        userId: req.user.sub,
+        abortSignal,
+        onProgress,
+      }),
+    );
+  }
+
+  /** Shared SSE driver for both streaming AI endpoints.
+   *
+   *  Handles: headers + flush, destroyed-socket guard, client-disconnect
+   *  detection (gated on writableEnded so normal completion doesn't fire
+   *  a spurious abort), 15s heartbeat, 200ms progress throttle, and
+   *  inline error mapping to SSE frames (pre-handler layers like
+   *  JwtAuthGuard + ValidationPipe still produce normal JSON error
+   *  responses before any SSE header goes out). */
+  private async runSseStream<T>(
+    reply: StreamingReply,
+    run: (
+      abortSignal: AbortSignal,
+      onProgress: (p: { charsOut: number; elapsedMs: number }) => void,
+    ) => Promise<T>,
+  ): Promise<void> {
     reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
     reply.raw.setHeader("Connection", "keep-alive");
-    // Disable proxy buffering (nginx, Cloudflare) so events flush immediately.
     reply.raw.setHeader("X-Accel-Buffering", "no");
     reply.raw.flushHeaders?.();
 
-    // Prevent a destroyed-socket error from crashing the worker. Any
-    // write() after the client bails can emit ERR_STREAM_WRITE_AFTER_END;
-    // we treat that as a signal to stop, not to throw.
     reply.raw.on("error", (err) => {
       this.logger.debug?.(`stream socket error: ${(err as Error).message}`);
     });
@@ -132,9 +180,6 @@ export class AiController {
       writeRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
-    // Detect *real* client disconnect — Node emits `close` on every
-    // socket teardown including successful completion, so gate the
-    // abort on a flag we clear right before we end the response.
     let clientDisconnected = false;
     const abortController = new AbortController();
     const onClientClose = () => {
@@ -144,40 +189,28 @@ export class AiController {
     };
     reply.raw.on("close", onClientClose);
 
-    // Comment-frame heartbeat so proxies don't cut us off during a slow
-    // generation. Cleared in finally whether we finish cleanly or not.
-    const heartbeat = setInterval(() => {
-      writeRaw(`: ping\n\n`);
-    }, HEARTBEAT_MS);
+    const heartbeat = setInterval(() => writeRaw(`: ping\n\n`), HEARTBEAT_MS);
 
     write("start", { model: SCAFFOLD_MODEL });
 
     let lastProgressAt = 0;
+    const throttledProgress = (p: { charsOut: number; elapsedMs: number }) => {
+      const now = Date.now();
+      if (now - lastProgressAt < PROGRESS_THROTTLE_MS) return;
+      lastProgressAt = now;
+      write("progress", p);
+    };
 
     try {
-      const result = await this.ai.scaffoldProcessStream({
-        description: dto.description,
-        businessDocSchema: dto.businessDocSchema,
-        tenantId: req.user.tenantId,
-        userId: req.user.sub,
-        abortSignal: abortController.signal,
-        onProgress: (p) => {
-          const now = Date.now();
-          if (now - lastProgressAt < PROGRESS_THROTTLE_MS) return;
-          lastProgressAt = now;
-          write("progress", p);
-        },
-      });
+      const result = await run(abortController.signal, throttledProgress);
       write("complete", result);
     } catch (err) {
-      // Client bailed — no point writing to a dead socket, and the
-      // service has already suppressed persistence for user-aborts.
       if (clientDisconnected) {
-        // Swallow silently; socket is gone.
+        // Socket is gone; the service already skipped persistence.
       } else if (err instanceof HttpException) {
         write("error", { status: err.getStatus(), message: err.message });
       } else {
-        this.logger.error("Unexpected error in scaffoldStream", (err as Error)?.stack);
+        this.logger.error("Unexpected error in SSE stream", (err as Error)?.stack);
         write("error", { status: 500, message: "Unexpected error." });
       }
     } finally {

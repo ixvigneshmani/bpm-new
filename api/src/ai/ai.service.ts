@@ -64,6 +64,11 @@ const SUBPROCESS_TYPES = new Set([
  *  any real analyst workflow. */
 const MAX_SCHEMA_BYTES = 32 * 1024;
 
+/** Soft cap on current-canvas JSON for the refine flow. Bigger than
+ *  the schema cap because real processes routinely have 50+ nodes;
+ *  beyond 64 KB we refuse and the UI falls back to full-scaffold. */
+const MAX_CANVAS_BYTES = 64 * 1024;
+
 /** Max label length we'll accept from the model — prevents a runaway
  *  model from emitting a label that overflows the canvas shape. */
 const MAX_LABEL_LENGTH = 200;
@@ -87,6 +92,51 @@ export type AiInteractionSummary = {
  *  which loads a past scaffold back into the canvas. */
 export type AiInteractionDetail = AiInteractionSummary & {
   responseJson: ScaffoldResult | null;
+};
+
+/** One atomic operation emitted by the refine flow. The frontend
+ *  applies these in order against the existing canvas. Keep this
+ *  narrow — every op must be something the canvas store can perform
+ *  without user disambiguation. */
+export type RefineOp =
+  | {
+      op: "add-node";
+      node: {
+        id: string;
+        type: string;
+        label: string;
+        position: { x: number; y: number };
+        parentId?: string;
+        data?: Record<string, unknown>;
+      };
+    }
+  | {
+      op: "modify-node";
+      id: string;
+      changes: {
+        label?: string;
+        position?: { x: number; y: number };
+        data?: Record<string, unknown>;
+      };
+    }
+  | { op: "remove-node"; id: string }
+  | {
+      op: "add-edge";
+      edge: {
+        id: string;
+        source: string;
+        target: string;
+        label?: string;
+        data?: { flowType?: "message"; condition?: string };
+      };
+    }
+  | { op: "remove-edge"; id: string };
+
+/** Result of a refine call. `ops` is executed in order; `notes` shows
+ *  a short human summary in the dialog. */
+export type RefineResult = {
+  ops: RefineOp[];
+  notes: string;
 };
 
 export type ScaffoldResult = {
@@ -404,6 +454,419 @@ export class AiService {
     }
   }
 
+  /** Refine flow: the user already has a canvas and wants Claude to
+   *  propose incremental changes (add/modify/remove) rather than a
+   *  wholesale replacement. Shape mirrors `scaffoldProcessStream` so
+   *  the SSE controller can use the same framing; the tool + prompt
+   *  + result type differ. */
+  async refineProcessStream(args: {
+    description: string;
+    currentCanvas: {
+      nodes: Array<Record<string, unknown>>;
+      edges: Array<Record<string, unknown>>;
+    };
+    businessDocSchema?: Record<string, unknown>;
+    tenantId: string;
+    userId: string;
+    onProgress?: (p: { charsOut: number; elapsedMs: number }) => void;
+    abortSignal?: AbortSignal;
+  }): Promise<RefineResult> {
+    if (!this.client) {
+      throw new ServiceUnavailableException(
+        "AI scaffolding is not configured on this server.",
+      );
+    }
+
+    const requestStart = Date.now();
+
+    try {
+      this.enforceRateLimit(args.tenantId);
+    } catch (err) {
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        kind: "refine-process",
+        status: "error",
+        errorMessage: this.formatErrorMessage(err as HttpException),
+        durationMs: Date.now() - requestStart,
+      });
+      throw err;
+    }
+
+    const canvasJson = JSON.stringify(args.currentCanvas);
+    if (canvasJson.length > MAX_CANVAS_BYTES) {
+      const err = new PayloadTooLargeException(
+        `Current canvas exceeds ${MAX_CANVAS_BYTES} bytes when serialized.`,
+      );
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        kind: "refine-process",
+        status: "error",
+        errorMessage: this.formatErrorMessage(err),
+        durationMs: Date.now() - requestStart,
+      });
+      throw err;
+    }
+
+    let schemaJson: string | undefined;
+    if (args.businessDocSchema && Object.keys(args.businessDocSchema).length > 0) {
+      schemaJson = JSON.stringify(args.businessDocSchema, null, 2);
+      if (schemaJson.length > MAX_SCHEMA_BYTES) {
+        const err = new PayloadTooLargeException(
+          `Business document schema exceeds ${MAX_SCHEMA_BYTES} bytes when serialized.`,
+        );
+        this.recordInteractionAsync({
+          tenantId: args.tenantId,
+          userId: args.userId,
+          description: args.description,
+          kind: "refine-process",
+          status: "error",
+          errorMessage: this.formatErrorMessage(err),
+          durationMs: Date.now() - requestStart,
+        });
+        throw err;
+      }
+    }
+
+    this.logger.log({
+      event: "ai.refine.stream.request",
+      tenantId: args.tenantId,
+      userId: args.userId,
+      descriptionLength: args.description.length,
+      canvasBytes: canvasJson.length,
+      schemaBytes: schemaJson?.length ?? 0,
+    });
+
+    const systemBlocks = [
+      {
+        type: "text" as const,
+        text: this.refineSystemPrompt(),
+        cache_control: { type: "ephemeral" as const },
+      },
+    ];
+    const userMessage = this.refineUserMessage(args.description, canvasJson, schemaJson);
+
+    const stream = this.client.messages.stream({
+      model: MODEL,
+      max_tokens: 4096,
+      system: systemBlocks,
+      tools: [this.refineTool()],
+      tool_choice: { type: "tool", name: "emit_process_diff" },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const onAbort = () => stream.abort();
+    if (args.abortSignal) {
+      if (args.abortSignal.aborted) stream.abort();
+      else args.abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    try {
+      if (args.onProgress) {
+        stream.on("inputJson", (_partial, snapshot) => {
+          const charsOut =
+            typeof snapshot === "string"
+              ? snapshot.length
+              : JSON.stringify(snapshot ?? "").length;
+          args.onProgress!({ charsOut, elapsedMs: Date.now() - requestStart });
+        });
+      }
+
+      const final = await stream.finalMessage();
+      const toolUse = final.content.find((b) => b.type === "tool_use");
+      if (!toolUse || toolUse.type !== "tool_use") {
+        this.logger.error("Claude returned no tool_use block for refine");
+        throw new BadGatewayException("AI did not return structured diff ops.");
+      }
+      const parsed = toolUse.input as RefineResult;
+      const sanitized = this.sanitizeRefine(parsed, args.currentCanvas);
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        kind: "refine-process",
+        status: "success",
+        responseJson: sanitized as unknown as Record<string, unknown>,
+        tokensIn: final.usage?.input_tokens ?? null,
+        tokensOut: final.usage?.output_tokens ?? null,
+        durationMs: Date.now() - requestStart,
+      });
+      return sanitized;
+    } catch (err) {
+      const mapped = err instanceof HttpException ? err : this.mapAnthropicError(err);
+      if (!args.abortSignal?.aborted) {
+        this.recordInteractionAsync({
+          tenantId: args.tenantId,
+          userId: args.userId,
+          description: args.description,
+          kind: "refine-process",
+          status: "error",
+          errorMessage: this.formatErrorMessage(mapped),
+          durationMs: Date.now() - requestStart,
+        });
+      }
+      throw mapped;
+    } finally {
+      if (args.abortSignal) {
+        args.abortSignal.removeEventListener("abort", onAbort);
+      }
+    }
+  }
+
+  private refineSystemPrompt(): string {
+    return [
+      "You are an expert BPMN 2.0 modeler refining an existing FlowPro process.",
+      "The user gives you: (a) the current canvas state (nodes + edges in JSON) and (b) a natural-language refinement request.",
+      "Your job is to emit the SMALLEST sequence of add/modify/remove operations that satisfies the request while preserving all existing structure the user didn't ask you to change.",
+      "",
+      "OUTPUT CONTRACT",
+      "Call the `emit_process_diff` tool exactly once. Do not reply in plain text.",
+      "",
+      "OPERATION TYPES",
+      "- `add-node` for a new flow element. Use a fresh id that doesn't clash with existing ones.",
+      "- `modify-node` to change `label`, `position`, or `data` on an existing node. Reference the existing id exactly.",
+      "- `remove-node` to delete an existing node by id. Edges attached to it must also be removed explicitly.",
+      "- `add-edge` to wire two nodes. `source` and `target` must resolve to an id that exists after your ops run.",
+      "- `remove-edge` to delete an existing edge by id.",
+      "",
+      "SUPPORTED NODE TYPES (exact strings — nothing else will render):",
+      SUPPORTED_NODE_TYPES.join(", "),
+      "",
+      "RULES",
+      "- Prefer `modify-node` over remove+add when you're only changing a label.",
+      "- New node ids: short lowerCamelCase slugs. Never reuse an existing id for a different node.",
+      "- Layout: place new nodes near their anchor — 180px downstream of the referenced upstream node, or 140px vertically for branch alternatives.",
+      "- Don't touch nodes or edges the user didn't ask you to modify.",
+      "- If the request is already satisfied by the current canvas, return an empty `ops` array with a `notes` field explaining why.",
+      "- Labels under " + MAX_LABEL_LENGTH + " characters.",
+    ].join("\n");
+  }
+
+  private refineUserMessage(
+    description: string,
+    canvasJson: string,
+    schemaJson?: string,
+  ): string {
+    const schemaPart = schemaJson
+      ? `\n\nBusiness document schema (use these variable names):\n\`\`\`json\n${schemaJson}\n\`\`\``
+      : "";
+    return [
+      "Current canvas state:",
+      "```json",
+      canvasJson,
+      "```",
+      "",
+      "Refinement request:",
+      description + schemaPart,
+    ].join("\n");
+  }
+
+  private refineTool() {
+    const nodeSchema = {
+      type: "object" as const,
+      required: ["id", "type", "label", "position"],
+      properties: {
+        id: { type: "string" },
+        type: { type: "string", enum: [...SUPPORTED_NODE_TYPES] },
+        label: { type: "string" },
+        position: {
+          type: "object",
+          required: ["x", "y"],
+          properties: { x: { type: "number" }, y: { type: "number" } },
+        },
+        parentId: { type: "string" },
+        data: { type: "object" },
+      },
+    };
+    const edgeSchema = {
+      type: "object" as const,
+      required: ["id", "source", "target"],
+      properties: {
+        id: { type: "string" },
+        source: { type: "string" },
+        target: { type: "string" },
+        label: { type: "string" },
+        data: {
+          type: "object",
+          properties: {
+            flowType: { type: "string", enum: ["message"] },
+            condition: { type: "string" },
+          },
+        },
+      },
+    };
+    return {
+      name: "emit_process_diff",
+      description: "Emit an ordered list of add/modify/remove operations against the current canvas.",
+      input_schema: {
+        type: "object" as const,
+        required: ["ops", "notes"],
+        properties: {
+          ops: {
+            type: "array",
+            items: {
+              oneOf: [
+                {
+                  type: "object",
+                  required: ["op", "node"],
+                  properties: {
+                    op: { const: "add-node" },
+                    node: nodeSchema,
+                  },
+                },
+                {
+                  type: "object",
+                  required: ["op", "id", "changes"],
+                  properties: {
+                    op: { const: "modify-node" },
+                    id: { type: "string" },
+                    changes: {
+                      type: "object",
+                      properties: {
+                        label: { type: "string" },
+                        position: {
+                          type: "object",
+                          required: ["x", "y"],
+                          properties: { x: { type: "number" }, y: { type: "number" } },
+                        },
+                        data: { type: "object" },
+                      },
+                    },
+                  },
+                },
+                {
+                  type: "object",
+                  required: ["op", "id"],
+                  properties: {
+                    op: { const: "remove-node" },
+                    id: { type: "string" },
+                  },
+                },
+                {
+                  type: "object",
+                  required: ["op", "edge"],
+                  properties: {
+                    op: { const: "add-edge" },
+                    edge: edgeSchema,
+                  },
+                },
+                {
+                  type: "object",
+                  required: ["op", "id"],
+                  properties: {
+                    op: { const: "remove-edge" },
+                    id: { type: "string" },
+                  },
+                },
+              ],
+            },
+          },
+          notes: { type: "string" },
+        },
+      },
+    };
+  }
+
+  /** Defensive pass over AI-emitted diff ops. Drops ops that reference
+   *  non-existent node types, strip ops pointing at ids not in the
+   *  current canvas (for modify/remove) — leaving garbage in would let
+   *  the client no-op silently or throw. Logs cleanup into `notes`. */
+  sanitizeRefine(
+    r: RefineResult,
+    current: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> },
+  ): RefineResult {
+    const allowed = new Set<string>(SUPPORTED_NODE_TYPES);
+    const existingNodeIds = new Set(
+      current.nodes.map((n) => String(n.id)).filter(Boolean),
+    );
+    const existingEdgeIds = new Set(
+      current.edges.map((e) => String(e.id)).filter(Boolean),
+    );
+    const added = new Set<string>();
+    const removed = new Set<string>();
+    const dropped: string[] = [];
+
+    const keep: RefineOp[] = [];
+    for (const op of r.ops ?? []) {
+      if (!op || typeof op !== "object") {
+        dropped.push("malformed op");
+        continue;
+      }
+      switch (op.op) {
+        case "add-node": {
+          if (!op.node || !allowed.has(op.node.type)) {
+            dropped.push(`add-node unsupported type ${op.node?.type ?? "?"}`);
+            break;
+          }
+          if (existingNodeIds.has(op.node.id) || added.has(op.node.id)) {
+            dropped.push(`add-node id collision ${op.node.id}`);
+            break;
+          }
+          let label = op.node.label;
+          if (typeof label === "string" && label.length > MAX_LABEL_LENGTH) {
+            label = label.slice(0, MAX_LABEL_LENGTH - 1) + "…";
+          }
+          added.add(op.node.id);
+          keep.push({ ...op, node: { ...op.node, label } });
+          break;
+        }
+        case "modify-node": {
+          if (!existingNodeIds.has(op.id) || removed.has(op.id)) {
+            dropped.push(`modify-node missing target ${op.id}`);
+            break;
+          }
+          keep.push(op);
+          break;
+        }
+        case "remove-node": {
+          if (!existingNodeIds.has(op.id) || removed.has(op.id)) {
+            dropped.push(`remove-node missing target ${op.id}`);
+            break;
+          }
+          removed.add(op.id);
+          keep.push(op);
+          break;
+        }
+        case "add-edge": {
+          if (!op.edge) {
+            dropped.push("add-edge missing edge");
+            break;
+          }
+          const srcOk = (existingNodeIds.has(op.edge.source) && !removed.has(op.edge.source))
+            || added.has(op.edge.source);
+          const tgtOk = (existingNodeIds.has(op.edge.target) && !removed.has(op.edge.target))
+            || added.has(op.edge.target);
+          if (!srcOk || !tgtOk) {
+            dropped.push(`add-edge dangling ${op.edge.id}`);
+            break;
+          }
+          keep.push(op);
+          break;
+        }
+        case "remove-edge": {
+          if (!existingEdgeIds.has(op.id)) {
+            dropped.push(`remove-edge missing target ${op.id}`);
+            break;
+          }
+          keep.push(op);
+          break;
+        }
+        default:
+          dropped.push(`unknown op`);
+      }
+    }
+
+    const cleanup = dropped.length > 0
+      ? [r.notes || "", "", "Cleanup:", ...dropped.map((d) => `  • ${d}`)]
+          .filter(Boolean)
+          .join("\n")
+      : r.notes || "";
+    return { ops: keep, notes: cleanup };
+  }
+
   /** Build the DB `errorMessage` from a NestJS HttpException. Only the
    *  status + our own sanitized client-facing message are stored — raw
    *  provider detail (request IDs, keys, stack) never reaches this path
@@ -431,6 +894,7 @@ export class AiService {
     tenantId: string;
     userId: string;
     description: string;
+    kind?: string;
     status: "success" | "error";
     responseJson?: Record<string, unknown>;
     errorMessage?: string;
@@ -442,7 +906,7 @@ export class AiService {
     await this.db.insert(aiInteractions).values({
       tenantId: row.tenantId,
       userId: row.userId,
-      kind: "scaffold-process",
+      kind: row.kind ?? "scaffold-process",
       description: row.description,
       model: MODEL,
       status: row.status,

@@ -7,7 +7,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConfigService } from "@nestjs/config";
-import { AiService, type ScaffoldResult } from "../ai.service";
+import { AiService, type RefineResult, type ScaffoldResult } from "../ai.service";
 
 type FakeDb = {
   insert: ReturnType<typeof vi.fn>;
@@ -567,6 +567,89 @@ describe("AiService.listInteractions", () => {
     expect(chain.limit).toHaveBeenLastCalledWith(1);
     await service.listInteractions("t");
     expect(chain.limit).toHaveBeenLastCalledWith(20);
+  });
+});
+
+describe("AiService.sanitizeRefine", () => {
+  const service = makeService();
+  const current = {
+    nodes: [
+      { id: "n1", type: "userTask", label: "One", position: { x: 0, y: 0 } },
+      { id: "n2", type: "userTask", label: "Two", position: { x: 100, y: 0 } },
+    ],
+    edges: [{ id: "e1", source: "n1", target: "n2" }],
+  };
+
+  const refine = (ops: unknown[], notes = ""): RefineResult => ({
+    ops: ops as RefineResult["ops"],
+    notes,
+  });
+
+  it("drops add-node ops with unsupported types", () => {
+    const out = service.sanitizeRefine(
+      refine([
+        { op: "add-node", node: { id: "n3", type: "nonsense", label: "X", position: { x: 0, y: 0 } } },
+        { op: "add-node", node: { id: "n4", type: "userTask", label: "OK", position: { x: 0, y: 0 } } },
+      ]),
+      current,
+    );
+    expect(out.ops).toHaveLength(1);
+    expect(out.notes).toMatch(/unsupported type/);
+  });
+
+  it("drops modify-node and remove-node ops that reference missing ids", () => {
+    const out = service.sanitizeRefine(
+      refine([
+        { op: "modify-node", id: "missing", changes: { label: "X" } },
+        { op: "remove-node", id: "also-missing" },
+        { op: "modify-node", id: "n1", changes: { label: "Real" } },
+      ]),
+      current,
+    );
+    expect(out.ops).toHaveLength(1);
+    expect((out.ops[0] as { op: string }).op).toBe("modify-node");
+  });
+
+  it("drops add-edge ops whose endpoints don't resolve (including removed-in-same-batch)", () => {
+    const out = service.sanitizeRefine(
+      refine([
+        { op: "remove-node", id: "n1" },
+        { op: "add-edge", edge: { id: "e2", source: "n1", target: "n2" } }, // source was just removed
+        { op: "add-edge", edge: { id: "e3", source: "n2", target: "ghost" } }, // target missing
+        {
+          op: "add-node",
+          node: { id: "n3", type: "userTask", label: "New", position: { x: 200, y: 0 } },
+        },
+        { op: "add-edge", edge: { id: "e4", source: "n2", target: "n3" } }, // OK — n3 added in-batch
+      ]),
+      current,
+    );
+    const kinds = out.ops.map((o) => o.op);
+    expect(kinds).toEqual(["remove-node", "add-node", "add-edge"]);
+  });
+
+  it("drops add-node with id collision against the existing canvas", () => {
+    const out = service.sanitizeRefine(
+      refine([
+        { op: "add-node", node: { id: "n1", type: "userTask", label: "dupe", position: { x: 0, y: 0 } } },
+      ]),
+      current,
+    );
+    expect(out.ops).toHaveLength(0);
+    expect(out.notes).toMatch(/id collision/);
+  });
+
+  it("truncates over-long add-node labels", () => {
+    const longLabel = "x".repeat(500);
+    const out = service.sanitizeRefine(
+      refine([
+        { op: "add-node", node: { id: "n3", type: "userTask", label: longLabel, position: { x: 0, y: 0 } } },
+      ]),
+      current,
+    );
+    const added = out.ops[0] as { node: { label: string } };
+    expect(added.node.label.length).toBeLessThanOrEqual(200);
+    expect(added.node.label.endsWith("…")).toBe(true);
   });
 });
 

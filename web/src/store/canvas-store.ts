@@ -104,8 +104,49 @@ export type CanvasState = {
   setWizardOrigin: (origin: "list" | "canvas") => void;
   setDocumentDirty: (dirty: boolean) => void;
   loadCanvasData: (nodes: Node[], edges: Edge[]) => void;
+  /** Apply a sequence of AI refine ops in order (add/modify/remove
+   *  node + edge). All ops land as one store update so undo sees the
+   *  whole batch as a single entry. */
+  applyRefineOps: (ops: RefineOp[]) => void;
   resetCanvas: () => void;
 };
+
+/** Narrow shape of the AI refine ops the canvas can apply. Must stay
+ *  compatible with `RefineOp` from the API — if the server tool adds
+ *  a new op type, extend this union and the reducer below. */
+export type RefineOp =
+  | {
+      op: "add-node";
+      node: {
+        id: string;
+        type: string;
+        label: string;
+        position: { x: number; y: number };
+        parentId?: string;
+        data?: Record<string, unknown>;
+      };
+    }
+  | {
+      op: "modify-node";
+      id: string;
+      changes: {
+        label?: string;
+        position?: { x: number; y: number };
+        data?: Record<string, unknown>;
+      };
+    }
+  | { op: "remove-node"; id: string }
+  | {
+      op: "add-edge";
+      edge: {
+        id: string;
+        source: string;
+        target: string;
+        label?: string;
+        data?: { flowType?: "message"; condition?: string };
+      };
+    }
+  | { op: "remove-edge"; id: string };
 
 /** Re-order nodes so every parent appears before its children. Siblings
  *  keep their original relative order. Orphans (parentId pointing at a
@@ -569,6 +610,103 @@ const useCanvasStore = create<CanvasState>()(
 
       loadCanvasData: (nodes, edges) =>
         set({ nodes: topoSortByParent(nodes), edges }),
+
+      applyRefineOps: (ops) => {
+        const state = get();
+        let nodes = [...state.nodes];
+        let edges = [...state.edges];
+        const nodeIndex = new Map(nodes.map((n, i) => [n.id, i]));
+        const edgeIndex = new Map(edges.map((e, i) => [e.id, i]));
+
+        for (const op of ops) {
+          switch (op.op) {
+            case "add-node": {
+              if (nodeIndex.has(op.node.id)) continue;
+              const payloadData = (op.node.data ?? {}) as Partial<BpmnNodeData>;
+              // Start from the type's default data so renderers don't
+              // hit `undefined` on fields they assume exist, then
+              // overlay whatever the AI supplied.
+              const data = {
+                ...createDefaultNodeData(op.node.type, op.node.label),
+                ...payloadData,
+                label: op.node.label,
+              };
+              const newNode: Node = {
+                id: op.node.id,
+                type: op.node.type,
+                position: op.node.position,
+                data: data as unknown as Record<string, unknown>,
+                ...(op.node.parentId ? { parentId: op.node.parentId, extent: "parent" as const } : {}),
+              };
+              nodeIndex.set(newNode.id, nodes.length);
+              nodes.push(newNode);
+              break;
+            }
+            case "modify-node": {
+              const idx = nodeIndex.get(op.id);
+              if (idx === undefined) continue;
+              const existing = nodes[idx];
+              const mergedData = op.changes.data
+                ? { ...(existing.data ?? {}), ...op.changes.data }
+                : existing.data;
+              const patched: Node = {
+                ...existing,
+                ...(op.changes.position ? { position: op.changes.position } : {}),
+                data: {
+                  ...(mergedData as object),
+                  ...(op.changes.label !== undefined ? { label: op.changes.label } : {}),
+                } as Record<string, unknown>,
+              };
+              nodes[idx] = patched;
+              break;
+            }
+            case "remove-node": {
+              const idx = nodeIndex.get(op.id);
+              if (idx === undefined) continue;
+              nodes = nodes.filter((n) => n.id !== op.id);
+              // Cascade: drop any edges attached to the removed node
+              // so we don't leave dangling refs (parser would warn on
+              // next export otherwise).
+              edges = edges.filter((e) => e.source !== op.id && e.target !== op.id);
+              nodeIndex.clear();
+              nodes.forEach((n, i) => nodeIndex.set(n.id, i));
+              edgeIndex.clear();
+              edges.forEach((e, i) => edgeIndex.set(e.id, i));
+              break;
+            }
+            case "add-edge": {
+              if (edgeIndex.has(op.edge.id)) continue;
+              const isMessage = op.edge.data?.flowType === "message";
+              const newEdge: Edge = {
+                id: op.edge.id,
+                source: op.edge.source,
+                target: op.edge.target,
+                ...(op.edge.label ? { label: op.edge.label } : {}),
+                ...(op.edge.data ? { data: op.edge.data } : {}),
+                markerEnd: { type: MarkerType.ArrowClosed },
+                ...(isMessage ? { style: { strokeDasharray: "4 3" } } : {}),
+              };
+              edgeIndex.set(newEdge.id, edges.length);
+              edges.push(newEdge);
+              break;
+            }
+            case "remove-edge": {
+              const idx = edgeIndex.get(op.id);
+              if (idx === undefined) continue;
+              edges = edges.filter((e) => e.id !== op.id);
+              edgeIndex.clear();
+              edges.forEach((e, i) => edgeIndex.set(e.id, i));
+              break;
+            }
+          }
+        }
+
+        set({
+          nodes: topoSortByParent(nodes),
+          edges,
+          documentDirty: true,
+        });
+      },
 
       resetCanvas: () => set({
         processId: null,
