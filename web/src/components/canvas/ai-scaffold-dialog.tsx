@@ -74,6 +74,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
   const [result, setResult] = useState<ScaffoldResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ charsOut: number; elapsedMs: number } | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -126,6 +127,8 @@ export default function AiScaffoldDialog({ onClose }: Props) {
 
     setBusy(true);
     setError(null);
+    setResult(null);
+    setProgress(null);
 
     const token = localStorage.getItem("flowpro_token");
     const body: Record<string, unknown> = { description };
@@ -133,10 +136,11 @@ export default function AiScaffoldDialog({ onClose }: Props) {
 
     let status: number | null = null;
     try {
-      const res = await fetch(`${API_BASE}/ai/scaffold-process`, {
+      const res = await fetch(`${API_BASE}/ai/scaffold-process-stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "text/event-stream",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(body),
@@ -144,18 +148,34 @@ export default function AiScaffoldDialog({ onClose }: Props) {
       });
       status = res.status;
       if (!res.ok) {
+        // Pre-stream failures (auth, 400 body-validation) — come back as
+        // a regular JSON response, never reach SSE framing.
         const errBody = await res.json().catch(() => ({ message: "Request failed" }));
         throw new Error(errBody.message || `HTTP ${res.status}`);
       }
-      const payload: ScaffoldResponse = await res.json();
-      if (!mountedRef.current || controller.signal.aborted) return;
-      setResult(payload);
+      if (!res.body) throw new Error("Response body is not readable.");
+
+      await consumeSseStream(res.body, controller.signal, {
+        onProgress: (p) => {
+          if (!mountedRef.current || controller.signal.aborted) return;
+          setProgress(p);
+        },
+        onComplete: (payload) => {
+          if (!mountedRef.current || controller.signal.aborted) return;
+          setResult(payload);
+        },
+        onError: (evt) => {
+          if (!mountedRef.current || controller.signal.aborted) return;
+          setError(humanizeError(evt.status, evt.message));
+        },
+      });
     } catch (e) {
       if (!mountedRef.current || controller.signal.aborted) return;
       setError(humanizeError(status, (e as Error).message));
     } finally {
       if (mountedRef.current && abortRef.current === controller) {
         setBusy(false);
+        setProgress(null);
       }
     }
   }
@@ -261,7 +281,9 @@ export default function AiScaffoldDialog({ onClose }: Props) {
             >
               <Spinner />
               <span>
-                Generating scaffold… this usually takes 5–20 seconds.
+                {progress
+                  ? `Generating… ${progress.charsOut.toLocaleString()} chars received (${(progress.elapsedMs / 1000).toFixed(1)}s).`
+                  : "Generating scaffold… this usually takes 5–20 seconds."}
                 {" "}
                 <button
                   type="button"
@@ -367,6 +389,77 @@ export default function AiScaffoldDialog({ onClose }: Props) {
       </div>
     </div>
   );
+}
+
+/** Parse an SSE ReadableStream and dispatch by event name. The server
+ *  emits `start`, `progress`, `complete`, and `error` events; we only
+ *  surface the three with side-effects. AbortSignal lets the caller
+ *  short-circuit without waiting for the next chunk. */
+async function consumeSseStream(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+  handlers: {
+    onProgress: (p: { charsOut: number; elapsedMs: number }) => void;
+    onComplete: (payload: ScaffoldResponse) => void;
+    onError: (evt: { status: number; message: string }) => void;
+  },
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const onAbort = () => reader.cancel().catch(() => {});
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    while (true) {
+      if (signal.aborted) return;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line. Emit each whole frame
+      // and keep the trailing partial for the next read.
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        dispatchFrame(frame, handlers);
+      }
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function dispatchFrame(
+  frame: string,
+  handlers: {
+    onProgress: (p: { charsOut: number; elapsedMs: number }) => void;
+    onComplete: (payload: ScaffoldResponse) => void;
+    onError: (evt: { status: number; message: string }) => void;
+  },
+): void {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+  }
+  if (dataLines.length === 0) return;
+  let data: unknown;
+  try {
+    data = JSON.parse(dataLines.join("\n"));
+  } catch {
+    return;
+  }
+  if (event === "progress") {
+    handlers.onProgress(data as { charsOut: number; elapsedMs: number });
+  } else if (event === "complete") {
+    handlers.onComplete(data as ScaffoldResponse);
+  } else if (event === "error") {
+    handlers.onError(data as { status: number; message: string });
+  }
 }
 
 function Spinner() {

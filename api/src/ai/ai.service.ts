@@ -233,6 +233,147 @@ export class AiService {
     }
   }
 
+  /** Streaming variant: drives the Anthropic streaming API and forwards
+   *  progress (chars of tool-input JSON received so far) via the
+   *  `onProgress` callback. Returns the same sanitized `ScaffoldResult`
+   *  as `scaffoldProcess`, so the controller can reuse the existing
+   *  persistence + error mapping on the final value.
+   *
+   *  Progress callbacks are throttled by the caller (the controller) —
+   *  this method fires on every input-json delta. */
+  async scaffoldProcessStream(args: {
+    description: string;
+    businessDocSchema?: Record<string, unknown>;
+    tenantId: string;
+    userId: string;
+    onProgress?: (p: { charsOut: number; elapsedMs: number }) => void;
+    abortSignal?: AbortSignal;
+  }): Promise<ScaffoldResult> {
+    if (!this.client) {
+      throw new ServiceUnavailableException(
+        "AI scaffolding is not configured on this server.",
+      );
+    }
+
+    const requestStart = Date.now();
+
+    try {
+      this.enforceRateLimit(args.tenantId);
+    } catch (err) {
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        status: "error",
+        errorMessage: this.formatErrorMessage(err as HttpException),
+        durationMs: Date.now() - requestStart,
+      });
+      throw err;
+    }
+
+    let schemaJson: string | undefined;
+    if (args.businessDocSchema && Object.keys(args.businessDocSchema).length > 0) {
+      schemaJson = JSON.stringify(args.businessDocSchema, null, 2);
+      if (schemaJson.length > MAX_SCHEMA_BYTES) {
+        const err = new PayloadTooLargeException(
+          `Business document schema exceeds ${MAX_SCHEMA_BYTES} bytes when serialized.`,
+        );
+        this.recordInteractionAsync({
+          tenantId: args.tenantId,
+          userId: args.userId,
+          description: args.description,
+          status: "error",
+          errorMessage: this.formatErrorMessage(err),
+          durationMs: Date.now() - requestStart,
+        });
+        throw err;
+      }
+    }
+
+    this.logger.log({
+      event: "ai.scaffold.stream.request",
+      tenantId: args.tenantId,
+      userId: args.userId,
+      descriptionLength: args.description.length,
+      schemaBytes: schemaJson?.length ?? 0,
+    });
+
+    const systemBlocks = [
+      {
+        type: "text" as const,
+        text: this.systemPrompt(),
+        cache_control: { type: "ephemeral" as const },
+      },
+    ];
+
+    const userMessage = this.userMessage(args.description, schemaJson);
+
+    const stream = this.client.messages.stream({
+      model: MODEL,
+      max_tokens: 4096,
+      system: systemBlocks,
+      tools: [this.tool()],
+      tool_choice: { type: "tool", name: "emit_process_scaffold" },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    // Client disconnect (controller forwards the request's AbortSignal)
+    // aborts the Anthropic call so we don't keep burning tokens on a
+    // response nobody is reading.
+    const onAbort = () => stream.abort();
+    if (args.abortSignal) {
+      if (args.abortSignal.aborted) stream.abort();
+      else args.abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    try {
+      if (args.onProgress) {
+        stream.on("inputJson", (_partial, snapshot) => {
+          const charsOut =
+            typeof snapshot === "string"
+              ? snapshot.length
+              : JSON.stringify(snapshot ?? "").length;
+          args.onProgress!({ charsOut, elapsedMs: Date.now() - requestStart });
+        });
+      }
+
+      const final = await stream.finalMessage();
+      const toolUse = final.content.find((b) => b.type === "tool_use");
+      if (!toolUse || toolUse.type !== "tool_use") {
+        this.logger.error("Claude returned no tool_use block");
+        throw new BadGatewayException("AI did not return a structured scaffold.");
+      }
+      const parsed = toolUse.input as ScaffoldResult;
+      const sanitized = this.sanitize(parsed);
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        status: "success",
+        responseJson: sanitized as unknown as Record<string, unknown>,
+        tokensIn: final.usage?.input_tokens ?? null,
+        tokensOut: final.usage?.output_tokens ?? null,
+        durationMs: Date.now() - requestStart,
+      });
+      return sanitized;
+    } catch (err) {
+      const mapped = err instanceof HttpException ? err : this.mapAnthropicError(err);
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        status: "error",
+        errorMessage: this.formatErrorMessage(mapped),
+        durationMs: Date.now() - requestStart,
+      });
+      throw mapped;
+    } finally {
+      if (args.abortSignal) {
+        args.abortSignal.removeEventListener("abort", onAbort);
+      }
+    }
+  }
+
   /** Build the DB `errorMessage` from a NestJS HttpException. Only the
    *  status + our own sanitized client-facing message are stored — raw
    *  provider detail (request IDs, keys, stack) never reaches this path

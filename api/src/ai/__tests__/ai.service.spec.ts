@@ -368,6 +368,96 @@ describe("AiService.scaffoldProcess — input guards", () => {
     expect(row.errorMessage).toMatch(/^413:/);
   });
 
+  it("scaffoldProcessStream delivers progress, returns sanitized result, persists success row", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
+
+    type InputJsonListener = (partial: string, snapshot: unknown) => void;
+    const listeners: InputJsonListener[] = [];
+    const finalMessage = {
+      content: [
+        {
+          type: "tool_use",
+          input: {
+            processName: "Streamed",
+            processDescription: "",
+            nodes: [
+              { id: "s", type: "startEvent", label: "Start", position: { x: 0, y: 0 } },
+              { id: "e", type: "endEvent", label: "End", position: { x: 200, y: 0 } },
+            ],
+            edges: [{ id: "e1", source: "s", target: "e" }],
+            notes: "ok",
+          },
+        },
+      ],
+      usage: { input_tokens: 100, output_tokens: 50 },
+    };
+    const fakeStream = {
+      on: vi.fn((event: string, fn: InputJsonListener) => {
+        if (event === "inputJson") listeners.push(fn);
+        return fakeStream;
+      }),
+      abort: vi.fn(),
+      finalMessage: vi.fn(async () => {
+        // Drive two progress callbacks before returning the final payload.
+        listeners.forEach((fn) => fn("{", "{"));
+        listeners.forEach((fn) => fn('"x":1', '{"x":1}'));
+        return finalMessage;
+      }),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).client = { messages: { stream: vi.fn(() => fakeStream) } };
+
+    const progressCalls: Array<{ charsOut: number; elapsedMs: number }> = [];
+    const out = await service.scaffoldProcessStream({
+      description: "long enough description",
+      tenantId: "tenant-S1",
+      userId: "u1",
+      onProgress: (p) => progressCalls.push(p),
+    });
+
+    expect(out.nodes).toHaveLength(2);
+    expect(out.edges).toHaveLength(1);
+    expect(progressCalls.length).toBeGreaterThanOrEqual(1);
+    expect(progressCalls[progressCalls.length - 1].charsOut).toBeGreaterThan(0);
+
+    await flushPersistence();
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const row = db.values.mock.calls[0][0];
+    expect(row).toMatchObject({
+      tenantId: "tenant-S1",
+      status: "success",
+      tokensIn: 100,
+      tokensOut: 50,
+    });
+  });
+
+  it("scaffoldProcessStream aborts the Anthropic stream when the abortSignal fires", async () => {
+    const service = makeService();
+    const abort = vi.fn();
+    const fakeStream = {
+      on: vi.fn(() => fakeStream),
+      abort,
+      finalMessage: vi.fn(() => new Promise(() => { /* never resolves */ })),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).client = { messages: { stream: vi.fn(() => fakeStream) } };
+
+    const controller = new AbortController();
+    const pending = service.scaffoldProcessStream({
+      description: "long enough description",
+      tenantId: "tenant-A1",
+      userId: "u1",
+      abortSignal: controller.signal,
+    });
+    // Give the stream machinery a microtask to attach the abort listener.
+    await new Promise((r) => setImmediate(r));
+    controller.abort();
+    expect(abort).toHaveBeenCalled();
+    // Swallow the dangling rejection so vitest doesn't flag it.
+    pending.catch(() => {});
+  });
+
   it("slow DB insert does not block the HTTP response", async () => {
     let resolveInsert!: () => void;
     const slowValues = vi.fn(
