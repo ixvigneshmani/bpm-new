@@ -24,7 +24,24 @@ export const DEFAULT_SIZE: Record<string, { width: number; height: number }> = {
   parallelGateway: { width: 50, height: 50 },
   inclusiveGateway: { width: 50, height: 50 },
   eventBasedGateway: { width: 50, height: 50 },
+  subProcess: { width: 360, height: 200 },
+  eventSubProcess: { width: 360, height: 200 },
+  transaction: { width: 360, height: 200 },
+  adHocSubProcess: { width: 360, height: 200 },
 };
+
+/** Collapsed subprocess shapes render as task-sized boxes; use this when
+ *  a subProcess/transaction/etc. has `isExpanded=false`. */
+export const COLLAPSED_SUBPROCESS_SIZE = { width: 120, height: 80 };
+
+export function isSubprocessType(type: string | undefined): boolean {
+  return (
+    type === "subProcess" ||
+    type === "eventSubProcess" ||
+    type === "transaction" ||
+    type === "adHocSubProcess"
+  );
+}
 
 /** Internal React Flow node type → bpmn-moddle $type. */
 export const INTERNAL_TO_BPMN: Record<string, string> = {
@@ -45,11 +62,23 @@ export const INTERNAL_TO_BPMN: Record<string, string> = {
   parallelGateway: "bpmn:ParallelGateway",
   inclusiveGateway: "bpmn:InclusiveGateway",
   eventBasedGateway: "bpmn:EventBasedGateway",
+  subProcess: "bpmn:SubProcess",
+  // Event subprocesses are a bpmn:SubProcess with triggeredByEvent=true.
+  // On serialize we emit bpmn:SubProcess; on parse we re-discriminate
+  // below based on the triggeredByEvent attribute.
+  eventSubProcess: "bpmn:SubProcess",
+  transaction: "bpmn:Transaction",
+  adHocSubProcess: "bpmn:AdHocSubProcess",
 };
 
-/** Inverse: bpmn-moddle $type → our internal type. Built at module load. */
+/** Inverse: bpmn-moddle $type → our internal type. Built at module load.
+ *  Note: bpmn:SubProcess collides between `subProcess` and `eventSubProcess`
+ *  here — the inverse returns `subProcess` by last-write-wins. Callers
+ *  discriminate via `triggeredByEvent` on the moddle element (see parse.ts). */
 export const BPMN_TO_INTERNAL: Record<string, string> = Object.fromEntries(
-  Object.entries(INTERNAL_TO_BPMN).map(([k, v]) => [v, k]),
+  Object.entries(INTERNAL_TO_BPMN)
+    .filter(([k]) => k !== "eventSubProcess")
+    .map(([k, v]) => [v, k]),
 );
 
 export function getSize(type: string | undefined): { width: number; height: number } {

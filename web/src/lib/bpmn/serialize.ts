@@ -9,11 +9,17 @@
  * retries, etc.) are not yet mapped to BPMN extensionElements — they
  * survive the round-trip via our own JSON persistence, but don't show
  * up in exported .bpmn files.
+ *
+ * Subprocesses nest: children of a subProcess live in its `flowElements`
+ * (not at the process level), recursively. React Flow stores child
+ * positions relative to the parent via `node.parentId`; DI bounds are
+ * always absolute, so we walk the parent chain to compute each shape's
+ * absolute origin before writing `dc:Bounds`.
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { Node, Edge } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
-import { INTERNAL_TO_BPMN, getSize } from "./element-map";
+import { INTERNAL_TO_BPMN, getSize, isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "./element-map";
 import { flowproDescriptor } from "./flowpro-descriptor";
 import { buildEventDefinitionElements } from "./event-definitions";
 import { packRichData } from "./extensions";
@@ -47,10 +53,7 @@ export async function serializeCanvasToBpmn(
   const processName = opts.processName || "Process";
   const definitionsId = opts.definitionsId || `Definitions_${Date.now()}`;
 
-  // ─── Flow elements (tasks / events / gateways) ─────────────────────
-  const flowElements: ModdleElement[] = [];
-
-  // Index outgoing/incoming edges per node for BPMN connectivity refs
+  // ─── Index edges per endpoint ──────────────────────────────────────
   const outgoingByNode = new Map<string, string[]>();
   const incomingByNode = new Map<string, string[]>();
   for (const e of edges) {
@@ -58,18 +61,85 @@ export async function serializeCanvasToBpmn(
     incomingByNode.set(e.target, [...(incomingByNode.get(e.target) || []), e.id]);
   }
 
+  // ─── Containment index: parentId → children ────────────────────────
+  // `null` parent = root process scope. Nodes with an unknown parentId
+  // are promoted to root (the alternative — silently dropping them —
+  // would lose user work on a data glitch).
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const childrenByParent = new Map<string | null, Node[]>();
   for (const n of nodes) {
-    const bpmnType = n.type && INTERNAL_TO_BPMN[n.type];
-    if (!bpmnType) continue; // unregistered type — skip rather than emit invalid XML
+    const pid = n.parentId && nodeById.has(n.parentId) ? n.parentId : null;
+    const arr = childrenByParent.get(pid) || [];
+    arr.push(n);
+    childrenByParent.set(pid, arr);
+  }
 
+  /** Walk the parent chain to find the scope (parentId, or null for root)
+   *  that a node belongs to. */
+  const scopeOf = (nodeId: string): string | null => {
+    const n = nodeById.get(nodeId);
+    if (!n) return null;
+    return n.parentId && nodeById.has(n.parentId) ? n.parentId : null;
+  };
+
+  /** Deepest shared parent for two node ids. Returns null for root. */
+  const commonScope = (aId: string, bId: string): string | null => {
+    const ancestors = new Set<string | null>();
+    let cur: string | null = aId;
+    while (cur) {
+      ancestors.add(scopeOf(cur));
+      const p: string | undefined = nodeById.get(cur)?.parentId;
+      cur = p && nodeById.has(p) ? p : null;
+    }
+    ancestors.add(null);
+    cur = bId;
+    while (cur) {
+      const s = scopeOf(cur);
+      if (ancestors.has(s)) return s;
+      const p: string | undefined = nodeById.get(cur)?.parentId;
+      cur = p && nodeById.has(p) ? p : null;
+    }
+    return null;
+  };
+
+  // ─── Assign sequence flows to their hosting scope ──────────────────
+  // Edges live in the nearest common ancestor of their endpoints.
+  // Message flows are deferred until Collaboration (P6) lands.
+  const flowsByScope = new Map<string | null, Edge[]>();
+  let skippedMessageFlows = 0;
+  for (const e of edges) {
+    const flowType = (e.data as Record<string, unknown> | undefined)?.flowType;
+    if (flowType === "message") {
+      skippedMessageFlows++;
+      continue;
+    }
+    if (!nodeById.has(e.source) || !nodeById.has(e.target)) continue;
+    const scope = commonScope(e.source, e.target);
+    const arr = flowsByScope.get(scope) || [];
+    arr.push(e);
+    flowsByScope.set(scope, arr);
+  }
+  if (skippedMessageFlows > 0) {
+    warnings.push(
+      `Skipped ${skippedMessageFlows} message flow(s). BPMN 2.0 requires message flows inside a Collaboration (Pools), which is not yet supported.`,
+    );
+  }
+
+  // ─── Build moddle elements for every flow node and sequence flow ──
+  // These get stitched into their scope's `flowElements` list below.
+  const nodeElById = new Map<string, ModdleElement>();
+  const flowElById = new Map<string, ModdleElement>();
+
+  const buildFlowNode = (n: Node): ModdleElement | null => {
+    const bpmnType = n.type && INTERNAL_TO_BPMN[n.type];
+    if (!bpmnType) return null;
     const data = (n.data || {}) as Record<string, unknown>;
     const el = moddle.create(bpmnType, {
       id: n.id,
       name: (data.label as string) || undefined,
     }) as unknown as ModdleElement;
 
-    // Default flow on exclusive / inclusive gateways — resolved below once
-    // sequence flow elements exist (they're declared after flow nodes).
+    // Default flow — deferred until sequence flows resolved in a second pass.
     if (
       (bpmnType === "bpmn:ExclusiveGateway" || bpmnType === "bpmn:InclusiveGateway") &&
       typeof data.defaultFlowId === "string"
@@ -77,13 +147,11 @@ export async function serializeCanvasToBpmn(
       el._pendingDefaultFlowId = data.defaultFlowId;
     }
 
-    // Event-based gateway instantiate flag
     if (bpmnType === "bpmn:EventBasedGateway" && data.instantiate) {
       el.instantiate = true;
     }
 
-    // Event definitions on any event element (start, end, intermediate
-    // catch/throw, boundary).
+    // Event definitions on any event element.
     if (
       bpmnType === "bpmn:StartEvent" ||
       bpmnType === "bpmn:EndEvent" ||
@@ -98,47 +166,43 @@ export async function serializeCanvasToBpmn(
       if (defs.length > 0) el.eventDefinitions = defs;
     }
 
-    // Boundary event: attachedToRef + cancelActivity.
     if (bpmnType === "bpmn:BoundaryEvent") {
       const attachedToRef = data.attachedToRef;
       if (typeof attachedToRef === "string" && attachedToRef.length > 0) {
         el._pendingAttachedToRef = attachedToRef;
       }
-      // Default per spec is true (interrupting). Only emit when explicitly
-      // non-interrupting to keep the XML minimal.
       if (data.cancelActivity === false) el.cancelActivity = false;
     }
 
-    // Rich node data → bpmn:extensionElements / flowpro:Data
+    // Subprocess-family attributes.
+    if (isSubprocessType(n.type)) {
+      if (data.isExpanded !== false) el.isExpanded = true;
+      else el.isExpanded = false;
+      if (n.type === "eventSubProcess") el.triggeredByEvent = true;
+      if (n.type === "adHocSubProcess") {
+        const ordering = data.ordering === "Sequential" ? "Sequential" : "Parallel";
+        el.ordering = ordering;
+      }
+      if (n.type === "transaction" && typeof data.method === "string") {
+        el.method = data.method;
+      }
+    }
+
     const ext = packRichData(moddle, data);
     if (ext) el.extensionElements = ext;
 
-    flowElements.push(el);
+    return el;
+  };
+
+  for (const n of nodes) {
+    const el = buildFlowNode(n);
+    if (el) nodeElById.set(n.id, el);
   }
 
-  // Index flow elements by ID so we can resolve sourceRef/targetRef to the
-  // actual moddle objects — bpmn-moddle stores IDREFs as the referenced
-  // element, not as a { $ref } wrapper or bare string.
-  const nodeElById = new Map<string, ModdleElement>();
-  for (const el of flowElements) if (el.id) nodeElById.set(el.id as string, el);
-
-  // ─── Sequence flows ─────────────────────────────────────────────────
-  const sequenceFlowEls: ModdleElement[] = [];
-  let skippedMessageFlows = 0;
-  for (const e of edges) {
-    const flowType = (e.data as Record<string, unknown> | undefined)?.flowType;
-    const isMessage = flowType === "message";
-    // BPMN 2.0 only permits bpmn:MessageFlow inside a bpmn:Collaboration,
-    // not directly in a bpmn:Process. Until pools/collaboration land (P6),
-    // skip message flows rather than emit schema-invalid XML.
-    if (isMessage) {
-      skippedMessageFlows++;
-      continue;
-    }
+  const buildSequenceFlow = (e: Edge): ModdleElement | null => {
     const sourceEl = nodeElById.get(e.source);
     const targetEl = nodeElById.get(e.target);
-    if (!sourceEl || !targetEl) continue; // orphan edge — skip
-
+    if (!sourceEl || !targetEl) return null;
     const attrs: Record<string, unknown> = {
       id: e.id,
       sourceRef: sourceEl,
@@ -146,37 +210,23 @@ export async function serializeCanvasToBpmn(
     };
     const name = (e.label as string) || ((e.data as Record<string, unknown> | undefined)?.label as string);
     if (name) attrs.name = name;
-
-    const flow = moddle.create(
-      "bpmn:SequenceFlow",
-      attrs,
-    ) as unknown as ModdleElement;
-
-    // Condition expression on sequence flows
+    const flow = moddle.create("bpmn:SequenceFlow", attrs) as unknown as ModdleElement;
     const condition = (e.data as Record<string, unknown> | undefined)?.condition;
-    if (!isMessage && typeof condition === "string" && condition.length > 0) {
-      flow.conditionExpression = moddle.create("bpmn:FormalExpression", {
-        body: condition,
-      });
+    if (typeof condition === "string" && condition.length > 0) {
+      flow.conditionExpression = moddle.create("bpmn:FormalExpression", { body: condition });
     }
-    sequenceFlowEls.push(flow);
+    return flow;
+  };
+
+  for (const [, scopedEdges] of flowsByScope) {
+    for (const e of scopedEdges) {
+      const flow = buildSequenceFlow(e);
+      if (flow) flowElById.set(e.id, flow);
+    }
   }
 
-  if (skippedMessageFlows > 0) {
-    warnings.push(
-      `Skipped ${skippedMessageFlows} message flow(s). BPMN 2.0 requires message flows inside a Collaboration (Pools), which is not yet supported.`,
-    );
-  }
-
-  // Index the sequence flows by id for incoming/outgoing resolution
-  const flowElById = new Map<string, ModdleElement>();
-  for (const el of sequenceFlowEls) if (el.id) flowElById.set(el.id as string, el);
-
-  // Wire incoming/outgoing refs onto flow-node elements. BPMN 2.0 schema
-  // requires these lists to be IDREFs to SequenceFlow elements — we pass the
-  // resolved moddle objects so bpmn-moddle serializes them as ID strings.
-  for (const el of flowElements) {
-    const id = el.id as string;
+  // Wire incoming/outgoing onto every flow node now that flows exist.
+  for (const [id, el] of nodeElById) {
     const incoming = (incomingByNode.get(id) || [])
       .map((fid) => flowElById.get(fid))
       .filter(Boolean) as ModdleElement[];
@@ -187,8 +237,8 @@ export async function serializeCanvasToBpmn(
     if (outgoing.length) el.outgoing = outgoing;
   }
 
-  // Resolve pending gateway default-flow refs now that sequence flows exist.
-  for (const el of flowElements) {
+  // Resolve pending default-flow refs.
+  for (const el of nodeElById.values()) {
     const pending = el._pendingDefaultFlowId as string | undefined;
     if (pending) {
       const target = flowElById.get(pending);
@@ -197,8 +247,8 @@ export async function serializeCanvasToBpmn(
     }
   }
 
-  // Resolve boundary-event attachedToRef now that host activity elements exist.
-  for (const el of flowElements) {
+  // Resolve pending boundary attachedToRef.
+  for (const el of nodeElById.values()) {
     const pending = el._pendingAttachedToRef as string | undefined;
     if (!pending) continue;
     const host = nodeElById.get(pending);
@@ -212,29 +262,80 @@ export async function serializeCanvasToBpmn(
     delete el._pendingAttachedToRef;
   }
 
-  // Append sequence/message flows after the flow nodes so references resolve.
-  for (const f of sequenceFlowEls) flowElements.push(f);
+  // ─── Assemble flowElements per scope (recursive into subprocesses) ─
+  const assembleScope = (parentId: string | null): ModdleElement[] => {
+    const out: ModdleElement[] = [];
+    const children = childrenByParent.get(parentId) || [];
+    for (const n of children) {
+      const el = nodeElById.get(n.id);
+      if (!el) continue;
+      if (isSubprocessType(n.type)) {
+        const nested = assembleScope(n.id);
+        if (nested.length > 0) el.flowElements = nested;
+      }
+      out.push(el);
+    }
+    const scopedFlows = flowsByScope.get(parentId) || [];
+    for (const e of scopedFlows) {
+      const flow = flowElById.get(e.id);
+      if (flow) out.push(flow);
+    }
+    return out;
+  };
+
+  const processFlowElements = assembleScope(null);
 
   const processEl = moddle.create("bpmn:Process", {
     id: processId,
     name: processName,
     isExecutable: true,
-    flowElements,
+    flowElements: processFlowElements,
   });
 
   // ─── Diagram Interchange (DI) — positions + waypoints ──────────────
+  // DI bounds are absolute per BPMN 2.0 §A.1 (BPMNDI on a single Plane).
+  // React Flow keeps child positions relative to their parent node, so
+  // we walk the parent chain to compute the absolute origin for each shape.
+  const absPos = (n: Node): { x: number; y: number } => {
+    let x = n.position.x;
+    let y = n.position.y;
+    let cur: Node | undefined = n;
+    while (cur?.parentId) {
+      const p = nodeById.get(cur.parentId);
+      if (!p) break;
+      x += p.position.x;
+      y += p.position.y;
+      cur = p;
+    }
+    return { x, y };
+  };
+
+  const effectiveSize = (n: Node): { width: number; height: number } => {
+    const data = (n.data || {}) as { width?: number; height?: number; isExpanded?: boolean };
+    if (isSubprocessType(n.type) && data.isExpanded === false) {
+      return {
+        width: data.width ?? n.width ?? COLLAPSED_SUBPROCESS_SIZE.width,
+        height: data.height ?? n.height ?? COLLAPSED_SUBPROCESS_SIZE.height,
+      };
+    }
+    const size = getSize(n.type);
+    return {
+      width: data.width ?? n.width ?? size.width,
+      height: data.height ?? n.height ?? size.height,
+    };
+  };
+
   const planeElements: ModdleElement[] = [];
 
   for (const n of nodes) {
     if (!n.type || !INTERNAL_TO_BPMN[n.type]) continue;
     const referenced = nodeElById.get(n.id);
     if (!referenced) continue;
-    const size = getSize(n.type);
-    const width = (n.data as { width?: number } | undefined)?.width ?? n.width ?? size.width;
-    const height = (n.data as { height?: number } | undefined)?.height ?? n.height ?? size.height;
+    const { x, y } = absPos(n);
+    const { width, height } = effectiveSize(n);
     const bounds = moddle.create("dc:Bounds", {
-      x: Math.round(n.position.x),
-      y: Math.round(n.position.y),
+      x: Math.round(x),
+      y: Math.round(y),
       width: Math.round(width),
       height: Math.round(height),
     });
@@ -243,24 +344,31 @@ export async function serializeCanvasToBpmn(
       bpmnElement: referenced,
       bounds,
     }) as unknown as ModdleElement;
+    // Expanded subprocesses must declare isExpanded on their shape for the
+    // DI renderer to expand them; collapsed ones default to collapsed.
+    if (isSubprocessType(n.type)) {
+      const isExpanded = (n.data as { isExpanded?: boolean } | undefined)?.isExpanded !== false;
+      shape.isExpanded = isExpanded;
+    }
     planeElements.push(shape);
   }
 
-  const nodeById = new Map(nodes.map((n) => [n.id, n]));
   for (const e of edges) {
     const src = nodeById.get(e.source);
     const tgt = nodeById.get(e.target);
     if (!src || !tgt) continue;
-    const srcSize = getSize(src.type);
-    const tgtSize = getSize(tgt.type);
+    const srcAbs = absPos(src);
+    const tgtAbs = absPos(tgt);
+    const srcSize = effectiveSize(src);
+    const tgtSize = effectiveSize(tgt);
     const waypoints = [
       moddle.create("dc:Point", {
-        x: Math.round(src.position.x + srcSize.width / 2),
-        y: Math.round(src.position.y + srcSize.height / 2),
+        x: Math.round(srcAbs.x + srcSize.width / 2),
+        y: Math.round(srcAbs.y + srcSize.height / 2),
       }),
       moddle.create("dc:Point", {
-        x: Math.round(tgt.position.x + tgtSize.width / 2),
-        y: Math.round(tgt.position.y + tgtSize.height / 2),
+        x: Math.round(tgtAbs.x + tgtSize.width / 2),
+        y: Math.round(tgtAbs.y + tgtSize.height / 2),
       }),
     ];
     const referencedFlow = flowElById.get(e.id);
@@ -284,7 +392,6 @@ export async function serializeCanvasToBpmn(
     plane,
   });
 
-  // ─── Definitions root ──────────────────────────────────────────────
   const definitions = moddle.create("bpmn:Definitions", {
     id: definitionsId,
     targetNamespace: "http://flowpro.io/bpmn",
