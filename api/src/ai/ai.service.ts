@@ -16,12 +16,14 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
   Optional,
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import Anthropic from "@anthropic-ai/sdk";
+import { and, desc, eq, lt } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import { aiInteractions } from "../database/schema";
 
@@ -65,6 +67,27 @@ const MAX_SCHEMA_BYTES = 32 * 1024;
 /** Max label length we'll accept from the model — prevents a runaway
  *  model from emitting a label that overflows the canvas shape. */
 const MAX_LABEL_LENGTH = 200;
+
+/** History row as returned by the list endpoint. Excludes heavyweight
+ *  `responseJson`; use `AiInteractionDetail` for single-row reads. */
+export type AiInteractionSummary = {
+  id: string;
+  kind: string;
+  status: "success" | "error";
+  description: string;
+  model: string;
+  errorMessage: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  durationMs: number;
+  createdAt: string;
+};
+
+/** Full row incl. `responseJson` — consumed by the "re-apply" action
+ *  which loads a past scaffold back into the canvas. */
+export type AiInteractionDetail = AiInteractionSummary & {
+  responseJson: ScaffoldResult | null;
+};
 
 export type ScaffoldResult = {
   processName: string;
@@ -429,6 +452,76 @@ export class AiService {
       tokensOut: row.tokensOut ?? null,
       durationMs: row.durationMs,
     });
+  }
+
+  /** List the newest `limit` interactions for a tenant. `before` does
+   *  keyset pagination on `createdAt` — caller passes the prior page's
+   *  oldest timestamp to get the next-older slice. `responseJson` is
+   *  intentionally excluded (can be 20KB+); use `getInteraction` for
+   *  the detail view + re-apply flow. */
+  async listInteractions(
+    tenantId: string,
+    opts: { limit?: number; before?: Date } = {},
+  ): Promise<AiInteractionSummary[]> {
+    if (!this.db) return [];
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 50);
+    const whereClause = opts.before
+      ? and(
+          eq(aiInteractions.tenantId, tenantId),
+          lt(aiInteractions.createdAt, opts.before),
+        )
+      : eq(aiInteractions.tenantId, tenantId);
+    const rows = await this.db
+      .select({
+        id: aiInteractions.id,
+        kind: aiInteractions.kind,
+        status: aiInteractions.status,
+        description: aiInteractions.description,
+        model: aiInteractions.model,
+        errorMessage: aiInteractions.errorMessage,
+        tokensIn: aiInteractions.tokensIn,
+        tokensOut: aiInteractions.tokensOut,
+        durationMs: aiInteractions.durationMs,
+        createdAt: aiInteractions.createdAt,
+      })
+      .from(aiInteractions)
+      .where(whereClause)
+      .orderBy(desc(aiInteractions.createdAt))
+      .limit(limit);
+    return rows.map((r) => ({
+      ...r,
+      createdAt: r.createdAt.toISOString(),
+    }));
+  }
+
+  /** Fetch one interaction including its full `responseJson` so the
+   *  dialog can re-apply a past scaffold to the canvas. Tenant scope is
+   *  enforced in the WHERE — a 404 here means "not in your tenant" as
+   *  well as "doesn't exist", which is what we want. */
+  async getInteraction(tenantId: string, id: string): Promise<AiInteractionDetail> {
+    if (!this.db) {
+      throw new NotFoundException("AI interaction not found.");
+    }
+    const rows = await this.db
+      .select()
+      .from(aiInteractions)
+      .where(and(eq(aiInteractions.id, id), eq(aiInteractions.tenantId, tenantId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) throw new NotFoundException("AI interaction not found.");
+    return {
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      description: row.description,
+      model: row.model,
+      errorMessage: row.errorMessage,
+      tokensIn: row.tokensIn,
+      tokensOut: row.tokensOut,
+      durationMs: row.durationMs,
+      createdAt: row.createdAt.toISOString(),
+      responseJson: (row.responseJson ?? null) as ScaffoldResult | null,
+    };
   }
 
   /** Map Anthropic SDK errors to sensible HTTP responses without

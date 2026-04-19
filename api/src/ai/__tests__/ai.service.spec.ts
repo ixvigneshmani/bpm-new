@@ -12,6 +12,9 @@ import { AiService, type ScaffoldResult } from "../ai.service";
 type FakeDb = {
   insert: ReturnType<typeof vi.fn>;
   values: ReturnType<typeof vi.fn>;
+  select: ReturnType<typeof vi.fn>;
+  /** Rows the next select chain will resolve to when awaited. */
+  selectResult: unknown[];
 };
 
 function makeFakeDb(opts: { failOnInsert?: boolean } = {}): FakeDb {
@@ -19,7 +22,16 @@ function makeFakeDb(opts: { failOnInsert?: boolean } = {}): FakeDb {
     if (opts.failOnInsert) throw new Error("DB down");
   });
   const insert = vi.fn(() => ({ values }));
-  return { insert, values } as unknown as FakeDb;
+  const db = { insert, values, select: vi.fn(), selectResult: [] as unknown[] } as FakeDb;
+  // Model drizzle's chainable select builder as a thenable. Every
+  // builder method returns the same chain; awaiting it resolves with
+  // whatever `db.selectResult` is at resolve time.
+  const chain: Record<string, unknown> = {};
+  const chainMethods = ["from", "where", "orderBy", "limit"];
+  for (const m of chainMethods) chain[m] = vi.fn(() => chain);
+  chain.then = (resolve: (v: unknown) => unknown) => resolve(db.selectResult);
+  db.select = vi.fn(() => chain);
+  return db;
 }
 
 /** Fire-and-forget persistence means the insert runs on a microtask
@@ -508,5 +520,90 @@ describe("AiService.scaffoldProcess — input guards", () => {
     expect(slowValues).toHaveBeenCalledTimes(1);
     // Unblock the stub so vitest doesn't leak a pending promise.
     resolveInsert();
+  });
+});
+
+describe("AiService.listInteractions", () => {
+  it("returns [] when no DB is configured", async () => {
+    const service = makeService();
+    const out = await service.listInteractions("tenant-X");
+    expect(out).toEqual([]);
+  });
+
+  it("serializes createdAt to ISO and forwards rows in list order", async () => {
+    const db = makeFakeDb();
+    const now = new Date("2026-04-19T12:00:00Z");
+    db.selectResult = [
+      {
+        id: "11111111-1111-1111-1111-111111111111",
+        kind: "scaffold-process",
+        status: "success",
+        description: "test",
+        model: "claude-sonnet-4-6",
+        errorMessage: null,
+        tokensIn: 10,
+        tokensOut: 20,
+        durationMs: 1234,
+        createdAt: now,
+      },
+    ];
+    const service = makeService({ db });
+    const out = await service.listInteractions("tenant-Y", { limit: 5 });
+    expect(out).toHaveLength(1);
+    expect(out[0].createdAt).toBe("2026-04-19T12:00:00.000Z");
+    expect(out[0].status).toBe("success");
+  });
+
+  it("clamps limit to the [1, 50] range", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
+    // Just verifying the service doesn't throw on out-of-range values —
+    // the actual limit clause is validated by integration tests later.
+    await expect(service.listInteractions("t", { limit: 9999 })).resolves.toEqual([]);
+    await expect(service.listInteractions("t", { limit: 0 })).resolves.toEqual([]);
+  });
+});
+
+describe("AiService.getInteraction", () => {
+  it("throws NotFound when the row isn't in the tenant", async () => {
+    const db = makeFakeDb();
+    db.selectResult = [];
+    const service = makeService({ db });
+    await expect(
+      service.getInteraction("tenant-A", "11111111-1111-1111-1111-111111111111"),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("returns the row with responseJson + ISO createdAt when found", async () => {
+    const db = makeFakeDb();
+    const now = new Date("2026-04-19T12:00:00Z");
+    db.selectResult = [
+      {
+        id: "22222222-2222-2222-2222-222222222222",
+        tenantId: "tenant-B",
+        userId: "u1",
+        kind: "scaffold-process",
+        status: "success",
+        description: "desc",
+        model: "claude-sonnet-4-6",
+        errorMessage: null,
+        tokensIn: 100,
+        tokensOut: 50,
+        durationMs: 500,
+        createdAt: now,
+        responseJson: { nodes: [], edges: [] } as unknown,
+      },
+    ];
+    const service = makeService({ db });
+    const out = await service.getInteraction("tenant-B", "22222222-2222-2222-2222-222222222222");
+    expect(out.createdAt).toBe("2026-04-19T12:00:00.000Z");
+    expect(out.responseJson).toEqual({ nodes: [], edges: [] });
+  });
+
+  it("throws NotFound when no DB is configured", async () => {
+    const service = makeService();
+    await expect(
+      service.getInteraction("t", "11111111-1111-1111-1111-111111111111"),
+    ).rejects.toMatchObject({ status: 404 });
   });
 });

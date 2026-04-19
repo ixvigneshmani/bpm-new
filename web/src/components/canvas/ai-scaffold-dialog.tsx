@@ -14,7 +14,7 @@
  *    the stale request so a late response can't clobber a newer one.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useReactFlow, type Node, type Edge } from "@xyflow/react";
 import useCanvasStore from "../../store/canvas-store";
 
@@ -24,6 +24,23 @@ type ScaffoldResponse = {
   nodes: Node[];
   edges: Edge[];
   notes: string;
+};
+
+type InteractionSummary = {
+  id: string;
+  kind: string;
+  status: "success" | "error";
+  description: string;
+  model: string;
+  errorMessage: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  durationMs: number;
+  createdAt: string;
+};
+
+type InteractionDetail = InteractionSummary & {
+  responseJson: ScaffoldResponse | null;
 };
 
 const API_BASE = "/api";
@@ -70,11 +87,16 @@ export default function AiScaffoldDialog({ onClose }: Props) {
   const existingNodeCount = useCanvasStore((s) => s.nodes.length);
   const { fitView } = useReactFlow();
 
+  const [tab, setTab] = useState<"create" | "history">("create");
   const [description, setDescription] = useState("");
   const [result, setResult] = useState<ScaffoldResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ charsOut: number; elapsedMs: number } | null>(null);
+  const [history, setHistory] = useState<InteractionSummary[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [reapplyingId, setReapplyingId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -218,6 +240,70 @@ export default function AiScaffoldDialog({ onClose }: Props) {
     setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
   }
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const token = localStorage.getItem("flowpro_token");
+      const res = await fetch(`${API_BASE}/ai/interactions?limit=20`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ message: "Failed to load history" }));
+        throw new Error(body.message || `HTTP ${res.status}`);
+      }
+      const items: InteractionSummary[] = await res.json();
+      if (!mountedRef.current) return;
+      setHistory(items);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      setHistoryError((e as Error).message || "Failed to load history");
+    } finally {
+      if (mountedRef.current) setHistoryLoading(false);
+    }
+  }, []);
+
+  // Lazy-load history the first time the tab is shown.
+  useEffect(() => {
+    if (tab === "history" && history === null && !historyLoading) {
+      void loadHistory();
+    }
+  }, [tab, history, historyLoading, loadHistory]);
+
+  async function reapply(id: string) {
+    setReapplyingId(id);
+    try {
+      const token = localStorage.getItem("flowpro_token");
+      const res = await fetch(`${API_BASE}/ai/interactions/${id}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const detail: InteractionDetail = await res.json();
+      if (!detail.responseJson || detail.responseJson.nodes.length === 0) {
+        throw new Error("Scaffold is empty.");
+      }
+      if (existingNodeCount > 0) {
+        const ok = window.confirm(
+          `Replace the ${existingNodeCount} element(s) currently on the canvas with this saved scaffold? This cannot be undone.`,
+        );
+        if (!ok) return;
+      }
+      const payload = detail.responseJson;
+      loadCanvasData(payload.nodes, payload.edges);
+      if (payload.processName) {
+        setProcessMeta({ name: payload.processName, description: payload.processDescription || "" });
+      }
+      setDocumentDirty(true);
+      onClose();
+      setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      setHistoryError((e as Error).message || "Could not re-apply scaffold.");
+    } finally {
+      if (mountedRef.current) setReapplyingId(null);
+    }
+  }
+
   const emptyResult = result !== null && result.nodes.length === 0;
   const charCount = description.length;
 
@@ -254,8 +340,18 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           </button>
         </div>
 
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 4, padding: "10px 20px 0", borderBottom: "1px solid #f2f4f7" }} role="tablist">
+          <TabButton active={tab === "create"} onClick={() => setTab("create")}>
+            New scaffold
+          </TabButton>
+          <TabButton active={tab === "history"} onClick={() => setTab("history")}>
+            History
+          </TabButton>
+        </div>
+
         {/* Body */}
-        <div style={{ flex: 1, padding: "18px 28px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ flex: 1, padding: "18px 28px", overflowY: "auto", display: tab === "create" ? "flex" : "none", flexDirection: "column", gap: 14 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", display: "flex", justifyContent: "space-between" }}>
               <span>Description</span>
@@ -357,6 +453,35 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           )}
         </div>
 
+        {/* History body */}
+        <div style={{ flex: 1, padding: "18px 28px", overflowY: "auto", display: tab === "history" ? "flex" : "none", flexDirection: "column", gap: 10 }}>
+          {historyLoading && history === null && (
+            <div style={{ fontSize: 12, color: "#667085" }}>Loading…</div>
+          )}
+          {historyError && (
+            <div role="alert" style={{
+              padding: "8px 12px", borderRadius: 6,
+              background: "#FEE4E2", color: "#B42318",
+              fontSize: 12, lineHeight: 1.4,
+            }}>
+              {historyError}
+            </div>
+          )}
+          {history !== null && history.length === 0 && !historyError && (
+            <div style={{ fontSize: 12, color: "#98a2b3", textAlign: "center", padding: "24px 0" }}>
+              No past scaffolds yet. Generate one to see it here.
+            </div>
+          )}
+          {history?.map((row) => (
+            <HistoryRow
+              key={row.id}
+              row={row}
+              busy={reapplyingId === row.id}
+              onReapply={() => reapply(row.id)}
+            />
+          ))}
+        </div>
+
         {/* Footer */}
         <div style={{
           padding: "14px 28px",
@@ -377,7 +502,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
             >
               {busy ? "Cancel" : "Close"}
             </button>
-            {!result ? (
+            {tab === "create" && (!result ? (
               <button
                 type="button"
                 onClick={generate}
@@ -400,9 +525,116 @@ export default function AiScaffoldDialog({ onClose }: Props) {
                   Apply to canvas
                 </button>
               </>
+            ))}
+            {tab === "history" && (
+              <button
+                type="button"
+                onClick={() => void loadHistory()}
+                disabled={historyLoading}
+                style={btnStyle("ghost", historyLoading)}
+              >
+                Refresh
+              </button>
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  active, onClick, children,
+}: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      style={{
+        padding: "8px 14px",
+        borderRadius: "6px 6px 0 0",
+        border: "none",
+        borderBottom: active ? "2px solid #4F46E5" : "2px solid transparent",
+        background: "transparent",
+        color: active ? "#4F46E5" : "#667085",
+        fontSize: 12,
+        fontWeight: 600,
+        fontFamily: "inherit",
+        cursor: "pointer",
+        marginBottom: -1,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function HistoryRow({
+  row, busy, onReapply,
+}: {
+  row: InteractionSummary;
+  busy: boolean;
+  onReapply: () => void;
+}) {
+  const isSuccess = row.status === "success";
+  // Use absolute timestamp — relative-time drift is easy to get wrong
+  // and the dialog is too transient for users to care about "3m ago".
+  const when = new Date(row.createdAt).toLocaleString();
+  const excerpt = row.description.length > 140
+    ? row.description.slice(0, 140) + "…"
+    : row.description;
+  return (
+    <div style={{
+      padding: "12px 14px", borderRadius: 8,
+      background: "#F8FAFC", border: "1px solid #E5E7EB",
+      display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 600,
+          padding: "2px 8px", borderRadius: 10,
+          background: isSuccess ? "#DCFCE7" : "#FEE4E2",
+          color: isSuccess ? "#166534" : "#B42318",
+          textTransform: "uppercase", letterSpacing: "0.04em",
+        }}>
+          {row.status}
+        </span>
+        <span style={{ fontSize: 10, color: "#98a2b3" }}>{when}</span>
+      </div>
+      <div style={{ fontSize: 12, color: "#101828", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+        {excerpt}
+      </div>
+      {row.errorMessage && (
+        <div style={{ fontSize: 11, color: "#B42318", lineHeight: 1.4 }}>
+          {row.errorMessage}
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ fontSize: 10, color: "#667085", display: "flex", gap: 12 }}>
+          <span>{row.model}</span>
+          <span>{(row.durationMs / 1000).toFixed(1)}s</span>
+          {row.tokensIn !== null && <span>{row.tokensIn}↓</span>}
+          {row.tokensOut !== null && <span>{row.tokensOut}↑</span>}
+        </div>
+        {isSuccess && (
+          <button
+            type="button"
+            onClick={onReapply}
+            disabled={busy}
+            style={{
+              padding: "6px 10px", borderRadius: 6,
+              border: "1px solid #C7D2FE", background: "#EEF2FF",
+              color: "#4F46E5", fontSize: 11, fontWeight: 600,
+              fontFamily: "inherit",
+              cursor: busy ? "not-allowed" : "pointer",
+              opacity: busy ? 0.6 : 1,
+            }}
+          >
+            {busy ? "Loading…" : "Re-apply"}
+          </button>
+        )}
       </div>
     </div>
   );

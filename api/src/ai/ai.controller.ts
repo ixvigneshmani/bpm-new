@@ -1,9 +1,13 @@
 import {
   Body,
   Controller,
+  Get,
   HttpException,
   Logger,
+  Param,
+  ParseUUIDPipe,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -12,6 +16,7 @@ import type { ServerResponse } from "node:http";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { AiService, SCAFFOLD_MODEL } from "./ai.service";
+import { ListInteractionsDto } from "./dto/list-interactions.dto";
 import { ScaffoldProcessDto } from "./dto/scaffold-process.dto";
 
 /** Minimal structural type over the Fastify reply: we only touch `.raw`
@@ -50,6 +55,32 @@ export class AiController {
       tenantId: req.user.tenantId,
       userId: req.user.sub,
     });
+  }
+
+  /** GET /ai/interactions?limit=20&before=<ISO>
+   *  Tenant-scoped list of past AI interactions, newest first. Keyset
+   *  pagination via `before` (the prior page's oldest createdAt).
+   *  Excludes `responseJson` so the list view stays small. */
+  @Get("interactions")
+  listInteractions(
+    @Req() req: AuthenticatedRequest,
+    @Query() query: ListInteractionsDto,
+  ) {
+    return this.ai.listInteractions(req.user.tenantId, {
+      limit: query.limit,
+      before: query.before ? new Date(query.before) : undefined,
+    });
+  }
+
+  /** GET /ai/interactions/:id
+   *  Single interaction including `responseJson` — used by the dialog's
+   *  "Re-apply" action to hydrate the canvas from a past scaffold. */
+  @Get("interactions/:id")
+  getInteraction(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.ai.getInteraction(req.user.tenantId, id);
   }
 
   /** POST /ai/scaffold-process-stream
