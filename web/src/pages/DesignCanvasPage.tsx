@@ -24,6 +24,7 @@ import { STEP_MAP, DOC_SOURCE_MAP } from "../lib/constants";
 import { nodeTypes } from "../components/canvas/nodes";
 import { isSubprocessType, isSwimlaneType, isContainerType, COLLAPSED_SUBPROCESS_SIZE } from "../lib/bpmn/element-map";
 import { getSize } from "../lib/bpmn/element-map";
+import { absOrigin } from "../lib/bpmn/geometry";
 import { edgeTypes } from "../components/canvas/edges";
 import ElementPalette from "../components/canvas/element-palette";
 import PropertiesPanel from "../components/canvas/properties/PropertiesPanel";
@@ -142,24 +143,15 @@ function CanvasInner() {
     event.dataTransfer.dropEffect = "move";
   }, []);
 
-  /** Absolute origin of a node by walking the parent chain — needed when
-   *  computing whether a drop position falls inside a (possibly nested)
-   *  subprocess frame. Positions on React Flow nodes with `parentId` are
-   *  relative to the parent. */
+  /** Absolute origin of a node — thin wrapper around the shared
+   *  geometry helper so hit-testing and reparenting math come from the
+   *  same source as the serializer's coord conversion. */
   const absOriginOf = useCallback(
     (nodeId: string, allNodes: typeof rawNodes): { x: number; y: number } => {
       const byId = new Map(allNodes.map((n) => [n.id, n]));
-      let cur = byId.get(nodeId);
-      let x = 0;
-      let y = 0;
-      while (cur) {
-        x += cur.position.x;
-        y += cur.position.y;
-        cur = cur.parentId ? byId.get(cur.parentId) : undefined;
-      }
-      return { x, y };
+      return absOrigin(nodeId, byId);
     },
-    [rawNodes],
+    [],
   );
 
   /** Deepest expanded container (subprocess or pool) whose bounding box

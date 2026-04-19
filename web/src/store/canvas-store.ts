@@ -15,6 +15,7 @@ import {
 } from "@xyflow/react";
 import { nanoid } from "nanoid";
 import { createDefaultNodeData, type BpmnNodeData } from "../types/bpmn-node-data";
+import { absOrigin } from "../lib/bpmn/geometry";
 
 export type ProcessMeta = {
   name: string;
@@ -201,20 +202,10 @@ const useCanvasStore = create<CanvasState>()(
         // here so every call-site doesn't have to repeat the math.
         let pos = position;
         if (parentId) {
-          const parent = nodes.find((n) => n.id === parentId);
-          if (parent) {
-            // Walk up to compute parent's absolute origin.
-            let px = parent.position.x;
-            let py = parent.position.y;
-            let cur: Node | undefined = parent;
-            while (cur?.parentId) {
-              const gp = nodes.find((n) => n.id === cur!.parentId);
-              if (!gp) break;
-              px += gp.position.x;
-              py += gp.position.y;
-              cur = gp;
-            }
-            pos = { x: position.x - px, y: position.y - py };
+          const byId = new Map(nodes.map((n) => [n.id, n]));
+          if (byId.has(parentId)) {
+            const origin = absOrigin(parentId, byId);
+            pos = { x: position.x - origin.x, y: position.y - origin.y };
           }
         }
         const newNode: Node = {
@@ -260,17 +251,7 @@ const useCanvasStore = create<CanvasState>()(
           }
         }
 
-        const absOf = (id: string): { x: number; y: number } => {
-          let cur: Node | undefined = byId.get(id);
-          let x = 0;
-          let y = 0;
-          while (cur) {
-            x += cur.position.x;
-            y += cur.position.y;
-            cur = cur.parentId ? byId.get(cur.parentId) : undefined;
-          }
-          return { x, y };
-        };
+        const absOf = (nodeId: string) => absOrigin(nodeId, byId);
 
         // Boundary events attached to the moved node must follow — they're
         // geometrically and semantically tied to their host's scope per
@@ -608,6 +589,25 @@ const useCanvasStore = create<CanvasState>()(
       equality: (past, current) =>
         JSON.stringify(past.nodes) === JSON.stringify(current.nodes) &&
         JSON.stringify(past.edges) === JSON.stringify(current.edges),
+      // Trailing-debounce the push into past-states: drags and
+      // NodeResizer fire dozens of set() calls per gesture, each of
+      // which would land as its own undo entry. 300 ms collapses one
+      // drag into one entry while keeping structural edits responsive.
+      // The `equality` check above is still run — this only affects
+      // *when* the snapshot is taken, not whether.
+      handleSet: (handleSet) => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let pendingArgs: Parameters<typeof handleSet> | null = null;
+        return (...args: Parameters<typeof handleSet>) => {
+          pendingArgs = args;
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            if (pendingArgs) handleSet(...pendingArgs);
+            timer = null;
+            pendingArgs = null;
+          }, 300);
+        };
+      },
     }
   )
 );

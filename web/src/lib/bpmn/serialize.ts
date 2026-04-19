@@ -21,6 +21,7 @@ import type { Node, Edge } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
 import { INTERNAL_TO_BPMN, getSize, isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "./element-map";
 import { poolOf as sharedPoolOf } from "./scope";
+import { absOrigin } from "./geometry";
 import { flowproDescriptor } from "./flowpro-descriptor";
 import {
   buildEventDefinitionElements,
@@ -54,6 +55,12 @@ export async function serializeCanvasToBpmn(
 ): Promise<SerializeResult> {
   const moddle = new BpmnModdle({ flowpro: flowproDescriptor });
   const warnings: string[] = [];
+
+  // bpmn-moddle's `create()` returns a loosely-typed `any`, so every
+  // call site was littered with `as unknown as ModdleElement`. This
+  // typed wrapper casts once here so the rest of the file reads cleanly.
+  const mk = (type: string, attrs?: Record<string, unknown>): ModdleElement =>
+    moddle.create(type, attrs ?? {}) as unknown as ModdleElement;
 
   const processId = opts.processId || "Process_1";
   const processName = opts.processName || "Process";
@@ -154,10 +161,10 @@ export async function serializeCanvasToBpmn(
     const bpmnType = n.type && INTERNAL_TO_BPMN[n.type];
     if (!bpmnType) return null;
     const data = (n.data || {}) as Record<string, unknown>;
-    const el = moddle.create(bpmnType, {
+    const el = mk(bpmnType, {
       id: n.id,
       name: (data.label as string) || undefined,
-    }) as unknown as ModdleElement;
+    });
 
     // Default flow — deferred until sequence flows resolved in a second pass.
     if (
@@ -231,10 +238,10 @@ export async function serializeCanvasToBpmn(
     };
     const name = (e.label as string) || ((e.data as Record<string, unknown> | undefined)?.label as string);
     if (name) attrs.name = name;
-    const flow = moddle.create("bpmn:SequenceFlow", attrs) as unknown as ModdleElement;
+    const flow = mk("bpmn:SequenceFlow", attrs);
     const condition = (e.data as Record<string, unknown> | undefined)?.condition;
     if (typeof condition === "string" && condition.length > 0) {
-      flow.conditionExpression = moddle.create("bpmn:FormalExpression", { body: condition });
+      flow.conditionExpression = mk("bpmn:FormalExpression", { body: condition });
     }
     return flow;
   };
@@ -345,16 +352,16 @@ export async function serializeCanvasToBpmn(
         name: laneData.label || undefined,
       };
       if (directRefs.length > 0) attrs.flowNodeRef = directRefs;
-      const laneEl = moddle.create("bpmn:Lane", attrs) as unknown as ModdleElement;
+      const laneEl = mk("bpmn:Lane", attrs);
       laneElById.set(lane.id, laneEl);
       const nestedSet = buildLaneSet(lane.id);
       if (nestedSet) laneEl.childLaneSet = nestedSet;
       laneEls.push(laneEl);
     }
-    return moddle.create("bpmn:LaneSet", {
+    return mk("bpmn:LaneSet", {
       id: `LaneSet_${scopeId}`,
       lanes: laneEls,
-    }) as unknown as ModdleElement;
+    });
   };
 
   // ─── Pools / Collaboration wrap ────────────────────────────────────
@@ -371,12 +378,12 @@ export async function serializeCanvasToBpmn(
 
   if (!hasPools) {
     const processFlowElements = assembleScope(null);
-    const processEl = moddle.create("bpmn:Process", {
+    const processEl = mk("bpmn:Process", {
       id: processId,
       name: processName,
       isExecutable: true,
       flowElements: processFlowElements,
-    }) as unknown as ModdleElement;
+    });
     processesForDefinitions = [processEl];
     diPlaneTarget = processEl;
   } else {
@@ -469,14 +476,14 @@ export async function serializeCanvasToBpmn(
       };
       const laneSet = buildLaneSet(pool.id);
       if (laneSet) processAttrs.laneSets = [laneSet];
-      const processEl = moddle.create("bpmn:Process", processAttrs) as unknown as ModdleElement;
+      const processEl = mk("bpmn:Process", processAttrs);
       processesForDefinitions.push(processEl);
 
-      const participantEl = moddle.create("bpmn:Participant", {
+      const participantEl = mk("bpmn:Participant", {
         id: pool.id,
         name: poolData.participantName || poolData.label || "Pool",
         processRef: processEl,
-      }) as unknown as ModdleElement;
+      });
       participantEls.push(participantEl);
     }
 
@@ -508,7 +515,7 @@ export async function serializeCanvasToBpmn(
       };
       const name = (e.label as string) || ((e.data as Record<string, unknown> | undefined)?.label as string);
       if (name) attrs.name = name;
-      const mfEl = moddle.create("bpmn:MessageFlow", attrs) as unknown as ModdleElement;
+      const mfEl = mk("bpmn:MessageFlow", attrs);
       messageFlowEls.push(mfEl);
       flowElById.set(e.id, mfEl);
     }
@@ -523,27 +530,16 @@ export async function serializeCanvasToBpmn(
       participants: participantEls,
     };
     if (messageFlowEls.length > 0) collaborationAttrs.messageFlows = messageFlowEls;
-    collaborationEl = moddle.create("bpmn:Collaboration", collaborationAttrs) as unknown as ModdleElement;
+    collaborationEl = mk("bpmn:Collaboration", collaborationAttrs);
     diPlaneTarget = collaborationEl;
   }
 
   // ─── Diagram Interchange (DI) — positions + waypoints ──────────────
   // DI bounds are absolute per BPMN 2.0 §A.1 (BPMNDI on a single Plane).
-  // React Flow keeps child positions relative to their parent node, so
-  // we walk the parent chain to compute the absolute origin for each shape.
-  const absPos = (n: Node): { x: number; y: number } => {
-    let x = n.position.x;
-    let y = n.position.y;
-    let cur: Node | undefined = n;
-    while (cur?.parentId) {
-      const p = nodeById.get(cur.parentId);
-      if (!p) break;
-      x += p.position.x;
-      y += p.position.y;
-      cur = p;
-    }
-    return { x, y };
-  };
+  // React Flow keeps child positions relative to their parent node; the
+  // shared `absOrigin` walker handles the parent-chain sum.
+  const absPos = (n: Node): { x: number; y: number } =>
+    absOrigin(n.id, nodeById as Map<string, { id: string; position: { x: number; y: number }; parentId?: string }>);
 
   const effectiveSize = (n: Node): { width: number; height: number } => {
     const data = (n.data || {}) as { width?: number; height?: number; isExpanded?: boolean };
@@ -577,19 +573,19 @@ export async function serializeCanvasToBpmn(
       if (!participant) continue;
       const { x, y } = absPos(pool);
       const size = effectiveSize(pool);
-      const bounds = moddle.create("dc:Bounds", {
+      const bounds = mk("dc:Bounds", {
         x: Math.round(x),
         y: Math.round(y),
         width: Math.round(size.width),
         height: Math.round(size.height),
       });
       const poolData = (pool.data || {}) as { isHorizontal?: boolean };
-      const poolShape = moddle.create("bpmndi:BPMNShape", {
+      const poolShape = mk("bpmndi:BPMNShape", {
         id: `${pool.id}_di`,
         bpmnElement: participant,
         bounds,
         isHorizontal: poolData.isHorizontal !== false,
-      }) as unknown as ModdleElement;
+      });
       planeElements.push(poolShape);
     }
 
@@ -600,7 +596,7 @@ export async function serializeCanvasToBpmn(
       const laneData = (n.data || {}) as { isHorizontal?: boolean };
       const { x, y } = absPos(n);
       const size = effectiveSize(n);
-      const bounds = moddle.create("dc:Bounds", {
+      const bounds = mk("dc:Bounds", {
         x: Math.round(x),
         y: Math.round(y),
         width: Math.round(size.width),
@@ -608,12 +604,12 @@ export async function serializeCanvasToBpmn(
       });
       const laneModdle = laneElById.get(n.id);
       if (!laneModdle) continue;
-      const laneShape = moddle.create("bpmndi:BPMNShape", {
+      const laneShape = mk("bpmndi:BPMNShape", {
         id: `${n.id}_di`,
         bpmnElement: laneModdle,
         bounds,
         isHorizontal: laneData.isHorizontal !== false,
-      }) as unknown as ModdleElement;
+      });
       planeElements.push(laneShape);
     }
   }
@@ -624,17 +620,17 @@ export async function serializeCanvasToBpmn(
     if (!referenced) continue;
     const { x, y } = absPos(n);
     const { width, height } = effectiveSize(n);
-    const bounds = moddle.create("dc:Bounds", {
+    const bounds = mk("dc:Bounds", {
       x: Math.round(x),
       y: Math.round(y),
       width: Math.round(width),
       height: Math.round(height),
     });
-    const shape = moddle.create("bpmndi:BPMNShape", {
+    const shape = mk("bpmndi:BPMNShape", {
       id: `${n.id}_di`,
       bpmnElement: referenced,
       bounds,
-    }) as unknown as ModdleElement;
+    });
     // Expanded subprocesses must declare isExpanded on their shape for the
     // DI renderer to expand them; collapsed ones default to collapsed.
     if (isSubprocessType(n.type)) {
@@ -653,32 +649,32 @@ export async function serializeCanvasToBpmn(
     const srcSize = effectiveSize(src);
     const tgtSize = effectiveSize(tgt);
     const waypoints = [
-      moddle.create("dc:Point", {
+      mk("dc:Point", {
         x: Math.round(srcAbs.x + srcSize.width / 2),
         y: Math.round(srcAbs.y + srcSize.height / 2),
       }),
-      moddle.create("dc:Point", {
+      mk("dc:Point", {
         x: Math.round(tgtAbs.x + tgtSize.width / 2),
         y: Math.round(tgtAbs.y + tgtSize.height / 2),
       }),
     ];
     const referencedFlow = flowElById.get(e.id);
     if (!referencedFlow) continue;
-    const di = moddle.create("bpmndi:BPMNEdge", {
+    const di = mk("bpmndi:BPMNEdge", {
       id: `${e.id}_di`,
       bpmnElement: referencedFlow,
       waypoint: waypoints,
-    }) as unknown as ModdleElement;
+    });
     planeElements.push(di);
   }
 
-  const plane = moddle.create("bpmndi:BPMNPlane", {
+  const plane = mk("bpmndi:BPMNPlane", {
     id: "BPMNPlane_1",
     bpmnElement: diPlaneTarget,
     planeElement: planeElements,
   });
 
-  const diagram = moddle.create("bpmndi:BPMNDiagram", {
+  const diagram = mk("bpmndi:BPMNDiagram", {
     id: "BPMNDiagram_1",
     plane,
   });
@@ -693,13 +689,14 @@ export async function serializeCanvasToBpmn(
   ];
   if (collaborationEl) rootElements.push(collaborationEl);
 
-  const definitions = moddle.create("bpmn:Definitions", {
+  const definitions = mk("bpmn:Definitions", {
     id: definitionsId,
     targetNamespace: "http://flowpro.io/bpmn",
     rootElements,
     diagrams: [diagram],
   });
 
-  const { xml } = await moddle.toXML(definitions, { format: true });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- moddle.toXML expects the typed Definitions root; our mk() helper returns the generic ModdleElement.
+  const { xml } = await moddle.toXML(definitions as any, { format: true });
   return { xml, warnings };
 }
