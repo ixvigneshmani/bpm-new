@@ -281,14 +281,25 @@ export async function serializeCanvasToBpmn(
   }
 
   // ─── Assemble flowElements per scope (recursive into subprocesses) ─
-  const assembleScope = (parentId: string | null): ModdleElement[] => {
+  // `laneTransparent=true` is used when walking a pool's subtree to
+  // build its Process.flowElements — lanes are containers in our store
+  // but have no flow-element semantics in BPMN, so we walk *through*
+  // them and their contents land directly in the Process flowElements
+  // list. The lane structure is emitted separately as a `LaneSet`.
+  const assembleScope = (parentId: string | null, laneTransparent = false): ModdleElement[] => {
     const out: ModdleElement[] = [];
     const children = childrenByParent.get(parentId) || [];
     for (const n of children) {
+      if (laneTransparent && n.type === "lane") {
+        out.push(...assembleScope(n.id, true));
+        continue;
+      }
       const el = nodeElById.get(n.id);
       if (!el) continue;
       if (isSubprocessType(n.type)) {
-        const nested = assembleScope(n.id);
+        // Subprocess children are NOT lane-transparent — a subprocess
+        // owns its own scope regardless of whether it itself sits in a lane.
+        const nested = assembleScope(n.id, false);
         if (nested.length > 0) el.flowElements = nested;
       }
       out.push(el);
@@ -299,6 +310,48 @@ export async function serializeCanvasToBpmn(
       if (flow) out.push(flow);
     }
     return out;
+  };
+
+  /** Side-effect lookup populated by `buildLaneSet` so we can point
+   *  `bpmndi:BPMNShape.bpmnElement` at the moddle Lane object directly
+   *  rather than by bare id string (bpmn-moddle occasionally declines
+   *  to resolve IDREFs to Lanes nested deep inside LaneSets). */
+  const laneElById = new Map<string, ModdleElement>();
+
+  /** Build a bpmn:LaneSet for a pool (or for a parent lane when the
+   *  LaneSet is nested via `childLaneSet`). Returns null when the
+   *  scope has no lane children. Each Lane's `flowNodeRef` lists the
+   *  direct flow-node children (tasks / events / gateways / subprocess
+   *  variants) of that lane; nested lanes recurse into `childLaneSet`. */
+  const buildLaneSet = (scopeId: string): ModdleElement | null => {
+    const kids = childrenByParent.get(scopeId) || [];
+    const lanes = kids.filter((n) => n.type === "lane");
+    if (lanes.length === 0) return null;
+    const laneEls: ModdleElement[] = [];
+    for (const lane of lanes) {
+      const laneContents = childrenByParent.get(lane.id) || [];
+      const directRefs: ModdleElement[] = [];
+      for (const child of laneContents) {
+        if (child.type === "lane") continue;
+        const el = nodeElById.get(child.id);
+        if (el) directRefs.push(el);
+      }
+      const laneData = (lane.data || {}) as { label?: string };
+      const attrs: Record<string, unknown> = {
+        id: lane.id,
+        name: laneData.label || undefined,
+      };
+      if (directRefs.length > 0) attrs.flowNodeRef = directRefs;
+      const laneEl = moddle.create("bpmn:Lane", attrs) as unknown as ModdleElement;
+      laneElById.set(lane.id, laneEl);
+      const nestedSet = buildLaneSet(lane.id);
+      if (nestedSet) laneEl.childLaneSet = nestedSet;
+      laneEls.push(laneEl);
+    }
+    return moddle.create("bpmn:LaneSet", {
+      id: `LaneSet_${scopeId}`,
+      lanes: laneEls,
+    }) as unknown as ModdleElement;
   };
 
   // ─── Pools / Collaboration wrap ────────────────────────────────────
@@ -410,12 +463,15 @@ export async function serializeCanvasToBpmn(
     for (const pool of pools) {
       const poolData = (pool.data || {}) as { label?: string; participantName?: string; processId?: string };
       const derivedProcessId = poolData.processId || `Process_${pool.id}`;
-      const processEl = moddle.create("bpmn:Process", {
+      const processAttrs: Record<string, unknown> = {
         id: derivedProcessId,
         name: poolData.label || poolData.participantName || "Process",
         isExecutable: true,
-        flowElements: assembleScope(pool.id),
-      }) as unknown as ModdleElement;
+        flowElements: assembleScope(pool.id, true),
+      };
+      const laneSet = buildLaneSet(pool.id);
+      if (laneSet) processAttrs.laneSets = [laneSet];
+      const processEl = moddle.create("bpmn:Process", processAttrs) as unknown as ModdleElement;
       processesForDefinitions.push(processEl);
 
       const participantEl = moddle.create("bpmn:Participant", {
@@ -497,6 +553,30 @@ export async function serializeCanvasToBpmn(
         isHorizontal: poolData.isHorizontal !== false,
       }) as unknown as ModdleElement;
       planeElements.push(poolShape);
+    }
+
+    // Lane shapes — bpmndi:BPMNShape per Lane with isHorizontal +
+    // absolute bounds. Lanes sit in z-order between pool and flow nodes.
+    for (const n of nodes) {
+      if (n.type !== "lane") continue;
+      const laneData = (n.data || {}) as { isHorizontal?: boolean };
+      const { x, y } = absPos(n);
+      const size = effectiveSize(n);
+      const bounds = moddle.create("dc:Bounds", {
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(size.width),
+        height: Math.round(size.height),
+      });
+      const laneModdle = laneElById.get(n.id);
+      if (!laneModdle) continue;
+      const laneShape = moddle.create("bpmndi:BPMNShape", {
+        id: `${n.id}_di`,
+        bpmnElement: laneModdle,
+        bounds,
+        isHorizontal: laneData.isHorizontal !== false,
+      }) as unknown as ModdleElement;
+      planeElements.push(laneShape);
     }
   }
 

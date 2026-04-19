@@ -325,6 +325,72 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     } else {
       walkScope(rootFlowElements, null, { x: 0, y: 0 });
     }
+
+    // Lanes: each LaneSet on the Process declares Lanes with
+    // flowNodeRef. Build lane nodes from their BPMNShape bounds, set
+    // parentId on referenced flow nodes to the lane. Nested lanes
+    // recurse via childLaneSet.
+    const laneSets = (process.laneSets as ModdleElement[] | undefined) || [];
+    if (laneSets.length > 0) {
+      const poolAbs = owningParticipant?.id ? (poolAbsById.get(owningParticipant.id) || { x: 0, y: 0 }) : { x: 0, y: 0 };
+      const poolParent = owningParticipant?.id ?? null;
+      for (const ls of laneSets) hydrateLaneSet(ls, poolParent, poolAbs);
+    }
+  }
+
+  /** Walk a LaneSet, push lane nodes, re-parent flow nodes by flowNodeRef. */
+  function hydrateLaneSet(
+    laneSet: ModdleElement,
+    containerParentId: string | null,
+    containerAbs: { x: number; y: number },
+  ): void {
+    const lanes = (laneSet.lanes as ModdleElement[] | undefined) || [];
+    for (const lane of lanes) {
+      if (!lane.id) continue;
+      const shape = shapeByRef.get(lane.id);
+      const bounds = shape?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
+      const absX = bounds?.x ?? 0;
+      const absY = bounds?.y ?? 0;
+      const baseData = createDefaultNodeData("lane", (lane.name as string) || undefined) as Record<string, unknown>;
+      baseData.isHorizontal = shape?.isHorizontal !== false;
+      if (bounds?.width) baseData.width = bounds.width;
+      if (bounds?.height) baseData.height = bounds.height;
+
+      const laneNode: Node = {
+        id: lane.id,
+        type: "lane",
+        position: { x: absX - containerAbs.x, y: absY - containerAbs.y },
+        data: baseData,
+      };
+      if (containerParentId) {
+        laneNode.parentId = containerParentId;
+        laneNode.extent = "parent";
+      }
+      nodes.push(laneNode);
+
+      // Re-parent referenced flow nodes to this lane. BPMN stores them
+      // flat in Process.flowElements; we've already walked them with
+      // the pool as parentId, so now we just rewrite parentId.
+      const refs = (lane.flowNodeRef as Array<ModdleElement | string> | undefined) || [];
+      for (const ref of refs) {
+        const refId = typeof ref === "string" ? ref : ref?.id;
+        if (!refId) continue;
+        const target = nodes.find((n) => n.id === refId);
+        if (!target) continue;
+        // Recompute position: it was parent-relative to the pool; now it
+        // needs to be relative to the lane. Convert via abs.
+        const targetAbsX = (target.position?.x ?? 0) + containerAbs.x;
+        const targetAbsY = (target.position?.y ?? 0) + containerAbs.y;
+        target.position = { x: targetAbsX - absX, y: targetAbsY - absY };
+        target.parentId = lane.id;
+        target.extent = "parent";
+      }
+
+      // Nested lanes (childLaneSet) — recurse with this lane as the
+      // container and its absolute origin.
+      const childSet = lane.childLaneSet as ModdleElement | undefined;
+      if (childSet) hydrateLaneSet(childSet, lane.id, { x: absX, y: absY });
+    }
   }
 
   // Mirror isDefault onto each edge whose source gateway marks it default.

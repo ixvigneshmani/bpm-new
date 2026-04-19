@@ -25,6 +25,7 @@ import EventSubProcessNode from "./EventSubProcessNode";
 import TransactionNode from "./TransactionNode";
 import AdHocSubProcessNode from "./AdHocSubProcessNode";
 import PoolNode from "./PoolNode";
+import LaneNode from "./LaneNode";
 
 export const nodeTypes = {
   startEvent: StartEventNode,
@@ -49,4 +50,5 @@ export const nodeTypes = {
   transaction: TransactionNode,
   adHocSubProcess: AdHocSubProcessNode,
   pool: PoolNode,
+  lane: LaneNode,
 };
