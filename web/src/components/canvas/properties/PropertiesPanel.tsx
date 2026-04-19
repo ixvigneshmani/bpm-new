@@ -20,6 +20,7 @@ import type {
   TransactionData,
   AdHocSubProcessData,
   TransactionMethod,
+  PoolData,
   ExclusiveGatewayData,
   InclusiveGatewayData,
   EventBasedGatewayData,
@@ -55,6 +56,7 @@ import BusinessRuleSection from "./sections/BusinessRuleSection";
 import CallActivitySection from "./sections/CallActivitySection";
 import MultiInstanceSection from "./sections/MultiInstanceSection";
 import SubprocessConfigSection from "./sections/SubprocessConfigSection";
+import PoolSection from "./sections/PoolSection";
 
 /** BPMN types that support activity markers (loop / multi-instance / compensation).
  *  Subprocess variants are valid boundary-event hosts per BPMN 2.0 §10.5.5 and
@@ -349,6 +351,42 @@ export default function PropertiesPanel() {
           rule={d.rule}
           onChange={(r: BusinessRuleConfig) => update({ rule: r })}
         />
+      ),
+    });
+  }
+
+  if (bpmnType === "pool") {
+    const d = data as unknown as PoolData;
+    sections.push({
+      id: "poolConfig",
+      title: "Pool",
+      icon: <SectionIcon d="M4 5h16M4 5v14h16V5M4 5l4 0" />,
+      defaultOpen: true,
+      content: (
+        <PoolSection
+          participantName={d.participantName || d.label || ""}
+          onParticipantNameChange={(v) => {
+            update({ participantName: v });
+            updateNodeLabel(selectedNode.id, v);
+          }}
+          isHorizontal={d.isHorizontal !== false}
+          onIsHorizontalChange={(v) => update({ isHorizontal: v })}
+        />
+      ),
+    });
+  }
+
+  if (bpmnType === "lane") {
+    sections.push({
+      id: "laneConfig",
+      title: "Lane",
+      icon: <SectionIcon d="M4 5h16v14H4z M4 12h16" />,
+      defaultOpen: true,
+      content: (
+        <div className="text-[11px] text-gray-500">
+          Lane contents are determined by the flow nodes parented to this lane on the canvas.
+          Drag nodes into the lane to add them; drag them out to remove.
+        </div>
       ),
     });
   }

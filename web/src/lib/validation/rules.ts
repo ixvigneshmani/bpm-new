@@ -164,6 +164,9 @@ export const disconnectedNodeRule: ValidationRule = {
       // only contain (fully connected) children — connectivity is
       // evaluated per scope. Skip subprocesses that have children.
       if (isSubprocessType(n.type) && nodes.some((m) => m.parentId === n.id)) continue;
+      // Pools and lanes are containers that don't participate in
+      // sequence-flow connectivity at all.
+      if (n.type === "pool" || n.type === "lane") continue;
       // Start events of event subprocesses intentionally have no
       // incoming flow — they fire on event. Skip.
       if (n.type === "startEvent") {
@@ -314,6 +317,110 @@ export const eventSubprocessNestingRule: ValidationRule = {
   },
 };
 
+/** Walk a node's parentId chain to find the owning pool (if any). */
+function poolOf(
+  nodeId: string,
+  byId: Map<string, { id: string; type?: string; parentId?: string }>,
+): string | null {
+  let cur = byId.get(nodeId);
+  while (cur) {
+    if (cur.type === "pool") return cur.id;
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return null;
+}
+
+/** Sequence flows must stay inside a single pool (BPMN 2.0 §8.3.3).
+ *  Cross-pool connections must be message flows — firing here prevents
+ *  a silent export-time drop. */
+export const sequenceFlowSamePoolRule: ValidationRule = {
+  id: "sequence-flow-same-pool",
+  name: "Sequence flow must stay inside one pool",
+  run: (nodes, edges) => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const hasAnyPool = nodes.some((n) => n.type === "pool");
+    if (!hasAnyPool) return [];
+    const issues: ValidationIssue[] = [];
+    for (const e of edges) {
+      const flowType = (e.data as { flowType?: string } | undefined)?.flowType;
+      if (flowType === "message") continue;
+      const sp = poolOf(e.source, byId);
+      const tp = poolOf(e.target, byId);
+      if (sp && tp && sp !== tp) {
+        issues.push({
+          id: `sequence-flow-same-pool:${e.id}`,
+          severity: "error",
+          ruleId: "sequence-flow-same-pool",
+          edgeId: e.id,
+          message: "Sequence flow crosses a pool boundary. Convert to a message flow, or redraw inside a single pool.",
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+/** Message flows must cross a pool boundary (BPMN 2.0 §8.3.3). */
+export const messageFlowCrossPoolRule: ValidationRule = {
+  id: "message-flow-cross-pool",
+  name: "Message flow must cross a pool boundary",
+  run: (nodes, edges) => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const issues: ValidationIssue[] = [];
+    for (const e of edges) {
+      const flowType = (e.data as { flowType?: string } | undefined)?.flowType;
+      if (flowType !== "message") continue;
+      const sp = poolOf(e.source, byId);
+      const tp = poolOf(e.target, byId);
+      if (!sp || !tp) {
+        issues.push({
+          id: `message-flow-cross-pool:${e.id}`,
+          severity: "error",
+          ruleId: "message-flow-cross-pool",
+          edgeId: e.id,
+          message: "Message flow requires both endpoints to live inside a pool. Add a pool around each endpoint.",
+        });
+        continue;
+      }
+      if (sp === tp) {
+        issues.push({
+          id: `message-flow-cross-pool:${e.id}`,
+          severity: "error",
+          ruleId: "message-flow-cross-pool",
+          edgeId: e.id,
+          message: "Message flow has both endpoints in the same pool. Convert to a sequence flow, or move an endpoint to another pool.",
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+/** A lane is only meaningful inside a pool (or another lane nested in
+ *  a pool). Root-level lanes vanish from the XML on export, so flag
+ *  them explicitly rather than let the silent drop happen. */
+export const laneRequiresPoolRule: ValidationRule = {
+  id: "lane-requires-pool",
+  name: "Lane must live inside a pool",
+  run: (nodes) => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "lane") continue;
+      if (!poolOf(n.id, byId)) {
+        issues.push({
+          id: `lane-requires-pool:${n.id}`,
+          severity: "error",
+          ruleId: "lane-requires-pool",
+          nodeId: n.id,
+          message: `Lane "${labelOf(n as { id: string; data: Record<string, unknown> })}" must be inside a pool.`,
+        });
+      }
+    }
+    return issues;
+  },
+};
+
 export const DEFAULT_RULES: ValidationRule[] = [
   noStartEventRule,
   noEndEventRule,
@@ -323,4 +430,7 @@ export const DEFAULT_RULES: ValidationRule[] = [
   boundaryAttachmentRule,
   eventSubprocessTriggerRule,
   eventSubprocessNestingRule,
+  sequenceFlowSamePoolRule,
+  messageFlowCrossPoolRule,
+  laneRequiresPoolRule,
 ];
