@@ -43,8 +43,8 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
         icon: <circle cx="12" cy="12" r="5" fill="#DC2626" stroke="none" />,
       },
       {
-        type: "intermediateCatchEvent", label: "Catch", color: "#0891B2", shape: "circle",
-        icon: <circle cx="12" cy="12" r="5" fill="none" stroke="#0891B2" strokeWidth="1.5" />,
+        type: "intermediateCatchEvent", label: "Catch", color: "#0D9488", shape: "circle",
+        icon: <circle cx="12" cy="12" r="5" fill="none" stroke="#0D9488" strokeWidth="1.5" />,
       },
       {
         type: "intermediateThrowEvent", label: "Throw", color: "#9333EA", shape: "circle",

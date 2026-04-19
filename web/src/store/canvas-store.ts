@@ -211,6 +211,18 @@ const useCanvasStore = create<CanvasState>()(
         );
         const selectedEdgeIds = new Set(edges.filter((e) => e.selected).map((e) => e.id));
         if (selectedNodeIds.size === 0 && selectedEdgeIds.size === 0) return;
+
+        // Cascade: boundary events attached to a deleted host go with it.
+        // Leaving them orphaned produces ugly validation errors and a
+        // floating circle with no visible relationship to anything.
+        for (const n of nodes) {
+          if (n.type !== "boundaryEvent") continue;
+          const attachedTo = (n.data as { attachedToRef?: string })?.attachedToRef;
+          if (attachedTo && selectedNodeIds.has(attachedTo)) {
+            selectedNodeIds.add(n.id);
+          }
+        }
+
         set({
           nodes: nodes.filter((n) => !selectedNodeIds.has(n.id)),
           edges: edges.filter(
@@ -250,14 +262,17 @@ const useCanvasStore = create<CanvasState>()(
           edgeIdMap.set(e.id, `e-${nanoid(8)}`);
         }
 
-        // 3. Build new nodes with remapped internal refs (e.g. defaultFlowId)
+        // 3. Build new nodes with remapped internal refs (defaultFlowId on
+        //    gateways, attachedToRef on boundary events). When the referenced
+        //    element wasn't copied, drop the ref — a dangling reference is
+        //    worse than none, and the validation engine will surface the gap.
         const newNodes: Node[] = clipboard.nodes.map((n) => {
           const data = { ...(n.data as Record<string, unknown>) };
           if (typeof data.defaultFlowId === "string") {
-            const remapped = edgeIdMap.get(data.defaultFlowId as string);
-            // Drop the ref if the referenced edge wasn't copied — the paste
-            // is a partial selection, so a dangling reference is worse than none.
-            data.defaultFlowId = remapped ?? undefined;
+            data.defaultFlowId = edgeIdMap.get(data.defaultFlowId) ?? undefined;
+          }
+          if (typeof data.attachedToRef === "string") {
+            data.attachedToRef = nodeIdMap.get(data.attachedToRef) ?? undefined;
           }
           return {
             ...n,

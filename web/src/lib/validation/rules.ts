@@ -136,8 +136,8 @@ export const eventBasedTargetRule: ValidationRule = {
 };
 
 export const boundaryAttachmentRule: ValidationRule = {
-  id: "boundary-missing-attachment",
-  name: "Boundary event not attached",
+  id: "boundary-attachment",
+  name: "Boundary event attachment",
   run: (nodes) => {
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const issues: ValidationIssue[] = [];
@@ -158,7 +158,7 @@ export const boundaryAttachmentRule: ValidationRule = {
         issues.push({
           id: `boundary-dangling-attachment:${n.id}`,
           severity: "error",
-          ruleId: "boundary-missing-attachment",
+          ruleId: "boundary-dangling-attachment",
           nodeId: n.id,
           message: `Boundary event "${labelOf(n as { id: string; data: Record<string, unknown> })}" references a deleted activity "${data.attachedToRef}".`,
         });

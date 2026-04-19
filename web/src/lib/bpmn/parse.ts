@@ -165,8 +165,9 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
           ? attached
           : (attached as ModdleElement | undefined)?.id;
       if (attachedId) baseData.attachedToRef = attachedId;
-      // Spec default is true; only persist when explicitly false.
-      if (el.cancelActivity === false) baseData.cancelActivity = false;
+      // Normalize: always set a boolean so node data shape matches the
+      // factory output regardless of import source (spec default is true).
+      baseData.cancelActivity = el.cancelActivity !== false;
     }
 
     // Merge rich data from extensionElements last so our defaults win

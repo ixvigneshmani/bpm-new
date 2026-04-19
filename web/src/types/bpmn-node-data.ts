@@ -536,7 +536,7 @@ export const NODE_THEMES: Record<string, NodeTheme> = {
   startEvent:       { color: "#16A34A", bgLight: "#F0FDF4", bgSelected: "#DCFCE7", borderLight: "#86EFAC", label: "Start Event",        iconBg: "#DCFCE7" },
   endEvent:         { color: "#DC2626", bgLight: "#FEF2F2", bgSelected: "#FEE2E2", borderLight: "#FCA5A5", label: "End Event",          iconBg: "#FEE2E2" },
   intermediateThrowEvent: { color: "#9333EA", bgLight: "#FAF5FF", bgSelected: "#F3E8FF", borderLight: "#D8B4FE", label: "Throw Event",  iconBg: "#F3E8FF" },
-  intermediateCatchEvent: { color: "#0891B2", bgLight: "#ECFEFF", bgSelected: "#CFFAFE", borderLight: "#67E8F9", label: "Catch Event",  iconBg: "#CFFAFE" },
+  intermediateCatchEvent: { color: "#0D9488", bgLight: "#F0FDFA", bgSelected: "#CCFBF1", borderLight: "#5EEAD4", label: "Catch Event",  iconBg: "#CCFBF1" },
   boundaryEvent:    { color: "#C2410C", bgLight: "#FFF7ED", bgSelected: "#FFEDD5", borderLight: "#FDBA74", label: "Boundary Event",    iconBg: "#FFEDD5" },
   userTask:         { color: "#6366F1", bgLight: "#EEF2FF", bgSelected: "#E0E7FF", borderLight: "#C7D2FE", label: "User Task",          iconBg: "#EEF2FF" },
   serviceTask:      { color: "#EA580C", bgLight: "#FFF7ED", bgSelected: "#FFEDD5", borderLight: "#FDBA74", label: "Service Task",       iconBg: "#FFF7ED" },

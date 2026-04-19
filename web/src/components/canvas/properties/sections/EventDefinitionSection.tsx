@@ -5,10 +5,19 @@
 import type { EventDefinition } from "../../../../types/bpmn-node-data";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 
+/** Which event shape is hosting this section. Drives which definition
+ *  kinds are selectable per BPMN 2.0 §10.5 (Event Classification). */
+export type EventVariant =
+  | "start"
+  | "end"
+  | "intermediateCatch"
+  | "intermediateThrow"
+  | "boundary";
+
 type Props = {
   definition: EventDefinition;
   onChange: (def: EventDefinition) => void;
-  isStart: boolean;
+  variant: EventVariant;
 };
 
 const labelStyle: React.CSSProperties = {
@@ -28,26 +37,66 @@ const configBox: React.CSSProperties = {
   padding: 16, display: "flex", flexDirection: "column", gap: 12,
 };
 
-const START_DEFINITIONS = [
-  { kind: "none", label: "None" },
-  { kind: "timer", label: "Timer" },
-  { kind: "message", label: "Message" },
-  { kind: "signal", label: "Signal" },
-  { kind: "conditional", label: "Conditional" },
-] as const;
+type KindOption = { kind: string; label: string };
 
-const END_DEFINITIONS = [
-  { kind: "none", label: "None" },
-  { kind: "error", label: "Error" },
-  { kind: "terminate", label: "Terminate" },
-  { kind: "escalation", label: "Escalation" },
-  { kind: "signal", label: "Signal" },
-  { kind: "message", label: "Message" },
-  { kind: "compensation", label: "Compensation" },
-] as const;
+/** Allowed EventDefinition kinds per host variant, per BPMN 2.0 §10.5.
+ *  Keeping this explicit (rather than subtracting from a superset) makes
+ *  the table scannable as the spec reference it is. */
+const DEFINITIONS_BY_VARIANT: Record<EventVariant, readonly KindOption[]> = {
+  // Start events: triggered externally — timer/message/signal/conditional.
+  start: [
+    { kind: "none", label: "None" },
+    { kind: "timer", label: "Timer" },
+    { kind: "message", label: "Message" },
+    { kind: "signal", label: "Signal" },
+    { kind: "conditional", label: "Conditional" },
+  ],
+  // End events: terminate the path. Error/escalation/cancel/compensation
+  // propagate upward; terminate nukes the whole instance.
+  end: [
+    { kind: "none", label: "None" },
+    { kind: "message", label: "Message" },
+    { kind: "signal", label: "Signal" },
+    { kind: "error", label: "Error" },
+    { kind: "escalation", label: "Escalation" },
+    { kind: "cancel", label: "Cancel" },
+    { kind: "compensation", label: "Compensation" },
+    { kind: "terminate", label: "Terminate" },
+  ],
+  // Intermediate catch: wait for an event mid-process.
+  intermediateCatch: [
+    { kind: "message", label: "Message" },
+    { kind: "timer", label: "Timer" },
+    { kind: "signal", label: "Signal" },
+    { kind: "conditional", label: "Conditional" },
+    { kind: "link", label: "Link" },
+  ],
+  // Intermediate throw: emit an event mid-process.
+  intermediateThrow: [
+    { kind: "none", label: "None" },
+    { kind: "message", label: "Message" },
+    { kind: "signal", label: "Signal" },
+    { kind: "escalation", label: "Escalation" },
+    { kind: "compensation", label: "Compensation" },
+    { kind: "link", label: "Link" },
+  ],
+  // Boundary: attached to an activity, fires on external event.
+  // `cancel` only valid on a transaction subprocess (enforced later in P5).
+  boundary: [
+    { kind: "message", label: "Message" },
+    { kind: "timer", label: "Timer" },
+    { kind: "signal", label: "Signal" },
+    { kind: "conditional", label: "Conditional" },
+    { kind: "error", label: "Error" },
+    { kind: "escalation", label: "Escalation" },
+    { kind: "compensation", label: "Compensation" },
+    { kind: "cancel", label: "Cancel" },
+  ],
+};
 
-export default function EventDefinitionSection({ definition, onChange, isStart }: Props) {
-  const definitions = isStart ? START_DEFINITIONS : END_DEFINITIONS;
+export default function EventDefinitionSection({ definition, onChange, variant }: Props) {
+  const definitions = DEFINITIONS_BY_VARIANT[variant];
+  const isStart = variant === "start";
 
   const handleKindChange = (kind: string) => {
     switch (kind) {
@@ -60,6 +109,8 @@ export default function EventDefinitionSection({ definition, onChange, isStart }
       case "terminate":    onChange({ kind: "terminate" }); break;
       case "escalation":   onChange({ kind: "escalation", escalationCode: "" }); break;
       case "compensation": onChange({ kind: "compensation" }); break;
+      case "cancel":       onChange({ kind: "cancel" }); break;
+      case "link":         onChange({ kind: "link", linkName: "" }); break;
       default:             onChange({ kind: "none" }); break;
     }
   };
@@ -170,6 +221,24 @@ export default function EventDefinitionSection({ definition, onChange, isStart }
             style={inputStyle}
             placeholder="PaymentReceived"
           />
+        </div>
+      )}
+
+      {/* Link */}
+      {definition.kind === "link" && (
+        <div style={configBox}>
+          <div style={labelStyle}>Link Name</div>
+          <input
+            type="text"
+            value={definition.linkName}
+            onChange={(e) => onChange({ ...definition, linkName: e.target.value })}
+            style={inputStyle}
+            placeholder="ContinueHere"
+          />
+          <div style={{ fontSize: 11, color: "#667085", lineHeight: 1.5 }}>
+            Pair a Link throw with a Link catch sharing the same name to jump
+            across the diagram without drawing a sequence flow.
+          </div>
         </div>
       )}
 

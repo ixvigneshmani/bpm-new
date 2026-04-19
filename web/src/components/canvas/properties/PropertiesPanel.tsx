@@ -56,11 +56,15 @@ const ACTIVITY_TYPES = new Set([
   "manualTask", "businessRuleTask", "callActivity",
 ]);
 
-/** All event-kind bpmnTypes that carry an eventDefinition. */
-const EVENT_TYPES = new Set([
-  "startEvent", "endEvent",
-  "intermediateCatchEvent", "intermediateThrowEvent", "boundaryEvent",
-]);
+/** Maps our internal bpmnType for event nodes to the variant the
+ *  EventDefinitionSection uses to filter allowed definition kinds. */
+const EVENT_VARIANT_BY_TYPE: Record<string, "start" | "end" | "intermediateCatch" | "intermediateThrow" | "boundary"> = {
+  startEvent: "start",
+  endEvent: "end",
+  intermediateCatchEvent: "intermediateCatch",
+  intermediateThrowEvent: "intermediateThrow",
+  boundaryEvent: "boundary",
+};
 
 /** Maps a gateway bpmnType to its behavioural kind. */
 const GATEWAY_KIND_BY_TYPE: Record<string, GatewayKind | undefined> = {
@@ -120,7 +124,8 @@ export default function PropertiesPanel() {
   });
 
   // Node-specific sections
-  if (EVENT_TYPES.has(bpmnType)) {
+  const eventVariant = EVENT_VARIANT_BY_TYPE[bpmnType];
+  if (eventVariant) {
     const d = data as unknown as { eventDefinition?: EventDefinition };
     sections.push({
       id: "eventDef",
@@ -131,7 +136,7 @@ export default function PropertiesPanel() {
         <EventDefinitionSection
           definition={d.eventDefinition || { kind: "none" }}
           onChange={(def: EventDefinition) => update({ eventDefinition: def })}
-          isStart={bpmnType === "startEvent"}
+          variant={eventVariant}
         />
       ),
     });
