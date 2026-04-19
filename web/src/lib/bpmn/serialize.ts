@@ -343,22 +343,67 @@ export async function serializeCanvasToBpmn(
       );
     }
 
+    // Walk each node up to its owning pool (if any). Used to detect
+    // cross-pool edges and to route orphan flows correctly.
+    const poolIdSet = new Set(pools.map((p) => p.id));
+    const poolOf = (nodeId: string): string | null => {
+      let cur: Node | undefined = nodeById.get(nodeId);
+      while (cur) {
+        if (cur.type === "pool") return cur.id;
+        cur = cur.parentId ? nodeById.get(cur.parentId) : undefined;
+      }
+      return null;
+    };
+
     // Adopt orphans into the first pool *in the scope map only* (no data
     // mutation) so assembleScope sees them as children.
     const firstPoolId = pools[0].id;
     if (orphans.length > 0) {
-      const adopted = childrenByParent.get(firstPoolId) || [];
+      const adopted = [...(childrenByParent.get(firstPoolId) || [])];
       const adoptedIds = new Set(adopted.map((n) => n.id));
       for (const n of orphans) if (!adoptedIds.has(n.id)) adopted.push(n);
       childrenByParent.set(firstPoolId, adopted);
-      // Orphan flows (scope=null) also move under the first pool.
-      const rootFlows = flowsByScope.get(null) || [];
-      if (rootFlows.length > 0) {
-        const existing = flowsByScope.get(firstPoolId) || [];
-        flowsByScope.set(firstPoolId, [...existing, ...rootFlows]);
-        flowsByScope.set(null, []);
+    }
+
+    // Re-scope sequence flows now that pools are known. Cross-pool
+    // SequenceFlows are invalid per BPMN 2.0 §8.3.3 — in a Collaboration
+    // a cross-pool connector must be a MessageFlow (ships in P6.4). For
+    // P6.2 we drop them with a warning so the XML stays valid. Same-pool
+    // flows stuck at commonScope=null (adopted orphans both) get routed
+    // to the pool that owns them.
+    const rootFlows = flowsByScope.get(null) || [];
+    if (rootFlows.length > 0) {
+      flowsByScope.set(null, []);
+      let crossPoolDropped = 0;
+      for (const e of rootFlows) {
+        const sp = poolOf(e.source);
+        const tp = poolOf(e.target);
+        if (sp && tp && sp === tp) {
+          // Both in the same pool — commonScope climbed too high; route
+          // to that pool directly.
+          const arr = flowsByScope.get(sp) || [];
+          arr.push(e);
+          flowsByScope.set(sp, arr);
+        } else if (sp && tp && sp !== tp) {
+          // Cross-pool — drop with warning.
+          crossPoolDropped++;
+          flowElById.delete(e.id);
+        } else {
+          // At least one endpoint is an orphan — route to the first pool
+          // (same adoption policy as flow nodes).
+          const target = sp || tp || firstPoolId;
+          const arr = flowsByScope.get(target) || [];
+          arr.push(e);
+          flowsByScope.set(target, arr);
+        }
+      }
+      if (crossPoolDropped > 0) {
+        warnings.push(
+          `Dropped ${crossPoolDropped} cross-pool sequence flow(s). BPMN 2.0 requires cross-pool connections to be message flows; change the edge type or redraw inside a single pool.`,
+        );
       }
     }
+    void poolIdSet;
 
     processesForDefinitions = [];
     const participantEls: ModdleElement[] = [];

@@ -78,7 +78,13 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     for (const p of participants) {
       const procRef = p.processRef as ModdleElement | string | undefined;
       const procId = typeof procRef === "string" ? procRef : procRef?.id;
-      if (procId) participantByProcessId.set(procId, p);
+      if (procId) {
+        participantByProcessId.set(procId, p);
+      } else {
+        warnings.push(
+          `Participant "${(p.name as string) || p.id || "(no id)"}" has no processRef — pool will be empty.`,
+        );
+      }
     }
   }
 

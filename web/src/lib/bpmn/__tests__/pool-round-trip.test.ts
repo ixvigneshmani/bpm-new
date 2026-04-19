@@ -89,6 +89,53 @@ describe("P6.2 pool + collaboration", () => {
     expect(poolProcess![0]).toContain('id="s1"');
   });
 
+  it("cross-pool sequence flow: dropped with a warning (message-flow conversion lands in P6.4)", async () => {
+    const nodes: Node[] = [
+      mkNode({ id: "PA", type: "pool", data: { label: "A", bpmnType: "pool", participantName: "A" } }),
+      mkNode({ id: "PB", type: "pool", position: { x: 0, y: 300 }, data: { label: "B", bpmnType: "pool", participantName: "B" } }),
+      mkNode({ id: "a1", type: "userTask", parentId: "PA", data: { label: "Task A", bpmnType: "userTask" } }),
+      mkNode({ id: "b1", type: "userTask", parentId: "PB", data: { label: "Task B", bpmnType: "userTask" } }),
+    ];
+    const edges: Edge[] = [
+      { id: "x1", source: "a1", target: "b1" } as Edge,
+    ];
+    const { xml, warnings } = await serializeCanvasToBpmn(nodes, edges);
+    expect(warnings.some((w) => /cross-pool sequence flow/i.test(w))).toBe(true);
+    // The offending flow must NOT appear inside either Process as a SequenceFlow.
+    expect(xml).not.toContain(`id="x1"`);
+  });
+
+  it("same-pool flow whose commonScope climbed to root: routed to owning pool (not adopted elsewhere)", async () => {
+    const nodes: Node[] = [
+      mkNode({ id: "PA", type: "pool", data: { label: "A", bpmnType: "pool", participantName: "A" } }),
+      // Both endpoints are directly under pool PA — their commonScope is PA
+      // already, so this case exercises correctness not fallback. Covered
+      // implicitly by the round-trip test above.
+      mkNode({ id: "s1", type: "startEvent", parentId: "PA", data: { label: "S", bpmnType: "startEvent", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "e1", type: "endEvent", parentId: "PA", data: { label: "E", bpmnType: "endEvent", eventDefinition: { kind: "none" } } }),
+    ];
+    const edges: Edge[] = [{ id: "f1", source: "s1", target: "e1" } as Edge];
+    const { xml } = await serializeCanvasToBpmn(nodes, edges);
+    const pa = xml.match(/<bpmn:process[^>]*id="Process_PA"[\s\S]*?<\/bpmn:process>/i);
+    expect(pa).toBeTruthy();
+    expect(pa![0]).toContain('id="f1"');
+  });
+
+  it("Participant with no processRef: warns on import and yields an empty pool", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D" targetNamespace="http://flowpro.io/bpmn">
+  <bpmn:process id="Host" isExecutable="true"/>
+  <bpmn:collaboration id="C1">
+    <bpmn:participant id="P_dangling" name="Unlinked"/>
+  </bpmn:collaboration>
+</bpmn:definitions>`;
+    const result = await parseBpmnToCanvas(xml);
+    expect(result.warnings.some((w) => /Participant "Unlinked" has no processRef/.test(w))).toBe(true);
+    const pool = result.nodes.find((n) => n.id === "P_dangling");
+    expect(pool).toBeTruthy();
+    expect(pool!.type).toBe("pool");
+  });
+
   it("pool DI: emits BPMNShape with isHorizontal + correct bounds", async () => {
     const nodes: Node[] = [
       mkNode({

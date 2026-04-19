@@ -453,6 +453,12 @@ const useCanvasStore = create<CanvasState>()(
           if (typeof data.attachedToRef === "string") {
             data.attachedToRef = nodeIdMap.get(data.attachedToRef) ?? undefined;
           }
+          // Pools: drop processId so the next serialize derives it from
+          // the pasted pool's (new) id, avoiding a duplicate bpmn:Process
+          // id when the original pool is still on the canvas.
+          if (n.type === "pool" && "processId" in data) {
+            data.processId = undefined;
+          }
           // Root-level pasted nodes get the +32 offset; children keep
           // their relative position so the subprocess interior doesn't
           // fly apart on paste.
