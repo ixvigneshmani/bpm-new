@@ -46,6 +46,12 @@ export type CanvasState = {
   /* In-memory clipboard (nodes + edges that were copied) */
   clipboard: { nodes: Node[]; edges: Edge[] } | null;
 
+  /* Connect mode — determines what kind of edge a fresh drag produces.
+   * 'sequence' is the default BPMN sequence flow; 'message' draws a
+   * message flow (must cross a pool boundary to be valid, enforced
+   * during export + validation). Toggled via the canvas toolbar. */
+  connectMode: "sequence" | "message";
+
   onNodesChange: OnNodesChange;
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
@@ -78,6 +84,8 @@ export type CanvasState = {
   copySelected: () => void;
   pasteClipboard: () => void;
   duplicateSelected: () => void;
+
+  setConnectMode: (mode: "sequence" | "message") => void;
 
   setSaveStatus: (status: SaveStatus) => void;
 
@@ -147,6 +155,7 @@ const useCanvasStore = create<CanvasState>()(
       saveStatus: "idle" as SaveStatus,
       lastSavedAt: null as number | null,
       clipboard: null,
+      connectMode: "sequence" as const,
 
       onNodesChange: (changes) => {
         set({ nodes: applyNodeChanges(changes, get().nodes) });
@@ -158,9 +167,14 @@ const useCanvasStore = create<CanvasState>()(
 
       onConnect: (connection) => {
         const id = `e-${nanoid(8)}`;
+        const { connectMode } = get();
+        // Message flows get `data.flowType: "message"` so the renderer
+        // picks the dashed open-arrow style and the serializer emits
+        // bpmn:MessageFlow at Collaboration scope.
+        const data = connectMode === "message" ? { flowType: "message" } : undefined;
         set({
           edges: addEdge(
-            { ...connection, id, ...DEFAULT_EDGE_VISUAL },
+            { ...connection, id, ...DEFAULT_EDGE_VISUAL, ...(data ? { data } : {}) },
             get().edges
           ),
         });
@@ -513,6 +527,8 @@ const useCanvasStore = create<CanvasState>()(
         get().copySelected();
         get().pasteClipboard();
       },
+
+      setConnectMode: (mode) => set({ connectMode: mode }),
 
       setSaveStatus: (status) => {
         set({

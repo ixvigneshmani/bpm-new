@@ -282,6 +282,33 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     }
   };
 
+  // bpmn:MessageFlow elements live on the Collaboration, not on any
+  // Process. Walk them here; they become edges with data.flowType.
+  if (collaboration) {
+    const messageFlows = (collaboration.messageFlows as ModdleElement[] | undefined) || [];
+    for (const mf of messageFlows) {
+      const source = mf.sourceRef as ModdleElement | string | undefined;
+      const target = mf.targetRef as ModdleElement | string | undefined;
+      const sourceId = typeof source === "string" ? source : source?.id;
+      const targetId = typeof target === "string" ? target : target?.id;
+      if (!mf.id || !sourceId || !targetId) {
+        warnings.push(`Skipped message flow with missing id/source/target: ${mf.id ?? "(no id)"}`);
+        continue;
+      }
+      edges.push({
+        id: mf.id,
+        source: sourceId,
+        target: targetId,
+        label: (mf.name as string) || undefined,
+        ...DEFAULT_EDGE_VISUAL,
+        data: {
+          flowType: "message",
+          ...((mf.name as string) ? { label: mf.name as string } : {}),
+        },
+      });
+    }
+  }
+
   // Build pool nodes from Participants (if any). Each Participant gets a
   // matching React Flow node; flow elements inside the pool's Process
   // become its children via parentId. Pool DI bounds come from the

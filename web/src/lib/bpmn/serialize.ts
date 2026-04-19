@@ -119,27 +119,29 @@ export async function serializeCanvasToBpmn(
     return null;
   };
 
-  // ─── Assign sequence flows to their hosting scope ──────────────────
-  // Edges live in the nearest common ancestor of their endpoints.
-  // Message flows are deferred until Collaboration (P6) lands.
+  // ─── Partition edges: sequence flows go to the nearest common
+  //     scope, message flows are held aside for the Collaboration. ────
   const flowsByScope = new Map<string | null, Edge[]>();
-  let skippedMessageFlows = 0;
+  const messageFlowEdges: Edge[] = [];
   for (const e of edges) {
+    if (!nodeById.has(e.source) || !nodeById.has(e.target)) continue;
     const flowType = (e.data as Record<string, unknown> | undefined)?.flowType;
     if (flowType === "message") {
-      skippedMessageFlows++;
+      messageFlowEdges.push(e);
       continue;
     }
-    if (!nodeById.has(e.source) || !nodeById.has(e.target)) continue;
     const scope = commonScope(e.source, e.target);
     const arr = flowsByScope.get(scope) || [];
     arr.push(e);
     flowsByScope.set(scope, arr);
   }
-  if (skippedMessageFlows > 0) {
+  if (messageFlowEdges.length > 0 && nodes.every((n) => n.type !== "pool")) {
+    // Message flows require a Collaboration (i.e. at least one pool).
+    // Without pools they can't be emitted — warn and drop.
     warnings.push(
-      `Skipped ${skippedMessageFlows} message flow(s). BPMN 2.0 requires message flows inside a Collaboration (Pools), which is not yet supported.`,
+      `Dropped ${messageFlowEdges.length} message flow(s): message flows require at least one pool (Collaboration). Add a pool or change the edge type.`,
     );
+    messageFlowEdges.length = 0;
   }
 
   // ─── Build moddle elements for every flow node and sequence flow ──
@@ -482,10 +484,32 @@ export async function serializeCanvasToBpmn(
       participantEls.push(participantEl);
     }
 
-    collaborationEl = moddle.create("bpmn:Collaboration", {
+    // bpmn:MessageFlow lives on the Collaboration. Each one references
+    // the flow-node moddle object at each endpoint (NOT wrapped in a
+    // Process — Collaboration is an independent scope).
+    const messageFlowEls: ModdleElement[] = [];
+    for (const e of messageFlowEdges) {
+      const sourceEl = nodeElById.get(e.source);
+      const targetEl = nodeElById.get(e.target);
+      if (!sourceEl || !targetEl) continue;
+      const attrs: Record<string, unknown> = {
+        id: e.id,
+        sourceRef: sourceEl,
+        targetRef: targetEl,
+      };
+      const name = (e.label as string) || ((e.data as Record<string, unknown> | undefined)?.label as string);
+      if (name) attrs.name = name;
+      const mfEl = moddle.create("bpmn:MessageFlow", attrs) as unknown as ModdleElement;
+      messageFlowEls.push(mfEl);
+      flowElById.set(e.id, mfEl);
+    }
+
+    const collaborationAttrs: Record<string, unknown> = {
       id: `Collaboration_${processId}`,
       participants: participantEls,
-    }) as unknown as ModdleElement;
+    };
+    if (messageFlowEls.length > 0) collaborationAttrs.messageFlows = messageFlowEls;
+    collaborationEl = moddle.create("bpmn:Collaboration", collaborationAttrs) as unknown as ModdleElement;
     diPlaneTarget = collaborationEl;
   }
 

@@ -9,6 +9,8 @@ export default function CanvasToolbar() {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const deleteSelected = useCanvasStore((s) => s.deleteSelected);
   const selectedNodeId = useCanvasStore((s) => s.selectedNodeId);
+  const connectMode = useCanvasStore((s) => s.connectMode);
+  const setConnectMode = useCanvasStore((s) => s.setConnectMode);
   const { undo, redo } = useCanvasStore.temporal.getState();
   const pastStates = useStore(useCanvasStore.temporal, (state) => state.pastStates);
   const futureStates = useStore(useCanvasStore.temporal, (state) => state.futureStates);
@@ -151,6 +153,46 @@ export default function CanvasToolbar() {
           <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.13-9.36L23 10" />
         </svg>
       </button>
+
+      {divider}
+
+      {/* Connect mode toggle: Sequence | Message */}
+      <div
+        style={{
+          display: "flex", alignItems: "center", gap: 0,
+          background: "#F3F4F6", borderRadius: 6, padding: 2,
+        }}
+        title="Drag from a node edge to connect. Toggle whether new edges are sequence flows or message flows."
+      >
+        <button
+          onClick={() => setConnectMode("sequence")}
+          style={{
+            padding: "4px 8px", borderRadius: 4, border: "none",
+            fontSize: 10, fontWeight: 600,
+            background: connectMode === "sequence" ? "#fff" : "transparent",
+            color: connectMode === "sequence" ? "#4F46E5" : "#667085",
+            boxShadow: connectMode === "sequence" ? "0 1px 2px rgba(16,24,40,0.06)" : "none",
+            cursor: "pointer",
+            transition: "all 0.12s ease",
+          }}
+        >
+          Sequence
+        </button>
+        <button
+          onClick={() => setConnectMode("message")}
+          style={{
+            padding: "4px 8px", borderRadius: 4, border: "none",
+            fontSize: 10, fontWeight: 600,
+            background: connectMode === "message" ? "#fff" : "transparent",
+            color: connectMode === "message" ? "#4F46E5" : "#667085",
+            boxShadow: connectMode === "message" ? "0 1px 2px rgba(16,24,40,0.06)" : "none",
+            cursor: "pointer",
+            transition: "all 0.12s ease",
+          }}
+        >
+          Message
+        </button>
+      </div>
 
       {divider}
 
