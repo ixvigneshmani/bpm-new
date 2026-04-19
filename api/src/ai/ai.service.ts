@@ -27,8 +27,10 @@ import { aiInteractions } from "../database/schema";
 
 /** Default model for scaffolding. Sonnet is the cost/quality pick per
  *  current Anthropic guidance — reserve Opus for tasks that clearly
- *  benefit from its extra reasoning headroom. */
-const MODEL = "claude-sonnet-4-6";
+ *  benefit from its extra reasoning headroom. Exported so the SSE
+ *  controller can echo it in the `start` event without duplicating. */
+export const SCAFFOLD_MODEL = "claude-sonnet-4-6";
+const MODEL = SCAFFOLD_MODEL;
 
 /** Node types the canvas can render today. Keep this in lockstep with
  *  `web/src/components/canvas/nodes/index.ts nodeTypes` — an AI-emitted
@@ -358,14 +360,19 @@ export class AiService {
       return sanitized;
     } catch (err) {
       const mapped = err instanceof HttpException ? err : this.mapAnthropicError(err);
-      this.recordInteractionAsync({
-        tenantId: args.tenantId,
-        userId: args.userId,
-        description: args.description,
-        status: "error",
-        errorMessage: this.formatErrorMessage(mapped),
-        durationMs: Date.now() - requestStart,
-      });
+      // User-initiated cancel: don't pollute history with a fake
+      // "error" — the user voluntarily closed the dialog. Also saves
+      // a row on every Regenerate click.
+      if (!args.abortSignal?.aborted) {
+        this.recordInteractionAsync({
+          tenantId: args.tenantId,
+          userId: args.userId,
+          description: args.description,
+          status: "error",
+          errorMessage: this.formatErrorMessage(mapped),
+          durationMs: Date.now() - requestStart,
+        });
+      }
       throw mapped;
     } finally {
       if (args.abortSignal) {

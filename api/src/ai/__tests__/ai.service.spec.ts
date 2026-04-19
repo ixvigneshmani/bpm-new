@@ -432,13 +432,23 @@ describe("AiService.scaffoldProcess — input guards", () => {
     });
   });
 
-  it("scaffoldProcessStream aborts the Anthropic stream when the abortSignal fires", async () => {
-    const service = makeService();
+  it("scaffoldProcessStream aborts the Anthropic stream + skips persistence when the abortSignal fires", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
     const abort = vi.fn();
+    // Model a stream whose `finalMessage()` resolves with a rejection
+    // once `abort()` is called — mirrors the real Anthropic SDK's
+    // APIUserAbortError behavior so we can observe the catch branch.
+    let rejectFinal!: (err: unknown) => void;
     const fakeStream = {
       on: vi.fn(() => fakeStream),
-      abort,
-      finalMessage: vi.fn(() => new Promise(() => { /* never resolves */ })),
+      abort: vi.fn(() => {
+        abort();
+        rejectFinal(Object.assign(new Error("aborted by user"), { name: "APIUserAbortError" }));
+      }),
+      finalMessage: vi.fn(
+        () => new Promise((_res, rej) => { rejectFinal = rej; }),
+      ),
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (service as any).client = { messages: { stream: vi.fn(() => fakeStream) } };
@@ -450,12 +460,14 @@ describe("AiService.scaffoldProcess — input guards", () => {
       userId: "u1",
       abortSignal: controller.signal,
     });
-    // Give the stream machinery a microtask to attach the abort listener.
     await new Promise((r) => setImmediate(r));
     controller.abort();
+
+    await expect(pending).rejects.toBeDefined();
     expect(abort).toHaveBeenCalled();
-    // Swallow the dangling rejection so vitest doesn't flag it.
-    pending.catch(() => {});
+    await flushPersistence();
+    // User-initiated cancel should not pollute the history table.
+    expect(db.insert).not.toHaveBeenCalled();
   });
 
   it("slow DB insert does not block the HTTP response", async () => {

@@ -155,20 +155,37 @@ export default function AiScaffoldDialog({ onClose }: Props) {
       }
       if (!res.body) throw new Error("Response body is not readable.");
 
+      // `charsOut` from the server re-stringifies the partial JSON
+      // snapshot, so it can dip as the model replaces a long string
+      // value with a structured sub-object. Users read any number that
+      // ticks backwards as "something broke" — cap it monotonically.
+      let maxCharsOut = 0;
+      let terminal: "complete" | "error" | null = null;
+
       await consumeSseStream(res.body, controller.signal, {
         onProgress: (p) => {
           if (!mountedRef.current || controller.signal.aborted) return;
-          setProgress(p);
+          maxCharsOut = Math.max(maxCharsOut, p.charsOut);
+          setProgress({ charsOut: maxCharsOut, elapsedMs: p.elapsedMs });
         },
         onComplete: (payload) => {
+          terminal = "complete";
           if (!mountedRef.current || controller.signal.aborted) return;
           setResult(payload);
         },
         onError: (evt) => {
+          terminal = "error";
           if (!mountedRef.current || controller.signal.aborted) return;
           setError(humanizeError(evt.status, evt.message));
         },
       });
+
+      // Stream closed without ever sending complete or error — surface
+      // it instead of leaving the dialog silent (happens if a proxy or
+      // server bug truncates the response mid-flight).
+      if (!terminal && mountedRef.current && !controller.signal.aborted) {
+        setError("Connection closed before the scaffold finished. Try again.");
+      }
     } catch (e) {
       if (!mountedRef.current || controller.signal.aborted) return;
       setError(humanizeError(status, (e as Error).message));
@@ -416,7 +433,9 @@ async function consumeSseStream(
       if (signal.aborted) return;
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      // Normalize CRLF → LF so proxies that rewrite line endings
+      // (some CDNs do) don't break our frame boundary detection.
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 
       // SSE frames are separated by a blank line. Emit each whole frame
       // and keep the trailing partial for the next read.

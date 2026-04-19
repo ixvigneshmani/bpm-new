@@ -9,20 +9,25 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import type { ServerResponse } from "node:http";
+import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { AuthenticatedRequest } from "../common/types/authenticated-request";
+import { AiService, SCAFFOLD_MODEL } from "./ai.service";
+import { ScaffoldProcessDto } from "./dto/scaffold-process.dto";
 
 /** Minimal structural type over the Fastify reply: we only touch `.raw`
  *  (the Node.js http.ServerResponse). Avoids adding `fastify` as an
  *  explicit dep just for one field. */
 type StreamingReply = { raw: ServerResponse };
-import { JwtAuthGuard } from "../auth/jwt-auth.guard";
-import { AuthenticatedRequest } from "../common/types/authenticated-request";
-import { AiService } from "./ai.service";
-import { ScaffoldProcessDto } from "./dto/scaffold-process.dto";
 
 /** Minimum ms between `progress` events we push down the SSE stream.
  *  The underlying Anthropic callback fires on every input-json delta
  *  (dozens per second); clients only need a heartbeat, not a firehose. */
 const PROGRESS_THROTTLE_MS = 200;
+
+/** Comment-frame keepalive interval. Proxies (nginx, Cloudflare) close
+ *  idle connections around 30–60s; a 15s ping keeps long generations
+ *  alive without being noisy. */
+const HEARTBEAT_MS = 15_000;
 
 @Controller("ai")
 @UseGuards(JwtAuthGuard)
@@ -56,7 +61,13 @@ export class AiController {
    *  The client keeps the HTTP POST (so auth + body work normally) and
    *  reads the response as a ReadableStream. Errors are *always* sent
    *  as SSE `error` events with a 200 status — the stream is already
-   *  open by the time we know the outcome. */
+   *  open by the time we know the outcome.
+   *
+   *  Note: because this handler uses `@Res()` directly, NestJS's global
+   *  exception filter does NOT fire — errors are caught inline and
+   *  emitted as SSE frames. Pre-handler layers (JwtAuthGuard,
+   *  ValidationPipe) still produce normal JSON responses before any
+   *  SSE headers go out, which is what the client expects. */
   @Post("scaffold-process-stream")
   async scaffoldStream(
     @Req() req: AuthenticatedRequest,
@@ -70,20 +81,45 @@ export class AiController {
     reply.raw.setHeader("X-Accel-Buffering", "no");
     reply.raw.flushHeaders?.();
 
-    const write = (event: string, data: unknown): boolean => {
-      if (reply.raw.writableEnded) return false;
-      reply.raw.write(`event: ${event}\n`);
-      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-      return true;
+    // Prevent a destroyed-socket error from crashing the worker. Any
+    // write() after the client bails can emit ERR_STREAM_WRITE_AFTER_END;
+    // we treat that as a signal to stop, not to throw.
+    reply.raw.on("error", (err) => {
+      this.logger.debug?.(`stream socket error: ${(err as Error).message}`);
+    });
+
+    const writeRaw = (chunk: string): void => {
+      if (reply.raw.writableEnded || reply.raw.destroyed) return;
+      try {
+        reply.raw.write(chunk);
+      } catch (err) {
+        this.logger.debug?.(`stream write skipped: ${(err as Error).message}`);
+      }
     };
 
-    // Detect client disconnect so the service can abort the Anthropic
-    // call rather than stream tokens into a closed socket.
+    const write = (event: string, data: unknown): void => {
+      writeRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Detect *real* client disconnect — Node emits `close` on every
+    // socket teardown including successful completion, so gate the
+    // abort on a flag we clear right before we end the response.
+    let clientDisconnected = false;
     const abortController = new AbortController();
-    const onClientClose = () => abortController.abort();
+    const onClientClose = () => {
+      if (reply.raw.writableEnded) return;
+      clientDisconnected = true;
+      abortController.abort();
+    };
     reply.raw.on("close", onClientClose);
 
-    write("start", { model: "claude-sonnet-4-6" });
+    // Comment-frame heartbeat so proxies don't cut us off during a slow
+    // generation. Cleared in finally whether we finish cleanly or not.
+    const heartbeat = setInterval(() => {
+      writeRaw(`: ping\n\n`);
+    }, HEARTBEAT_MS);
+
+    write("start", { model: SCAFFOLD_MODEL });
 
     let lastProgressAt = 0;
 
@@ -103,13 +139,18 @@ export class AiController {
       });
       write("complete", result);
     } catch (err) {
-      if (err instanceof HttpException) {
+      // Client bailed — no point writing to a dead socket, and the
+      // service has already suppressed persistence for user-aborts.
+      if (clientDisconnected) {
+        // Swallow silently; socket is gone.
+      } else if (err instanceof HttpException) {
         write("error", { status: err.getStatus(), message: err.message });
       } else {
         this.logger.error("Unexpected error in scaffoldStream", (err as Error)?.stack);
         write("error", { status: 500, message: "Unexpected error." });
       }
     } finally {
+      clearInterval(heartbeat);
       reply.raw.off("close", onClientClose);
       if (!reply.raw.writableEnded) reply.raw.end();
     }
