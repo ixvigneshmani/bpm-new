@@ -20,6 +20,10 @@ import ExclusiveGatewayNode from "./ExclusiveGatewayNode";
 import ParallelGatewayNode from "./ParallelGatewayNode";
 import InclusiveGatewayNode from "./InclusiveGatewayNode";
 import EventBasedGatewayNode from "./EventBasedGatewayNode";
+import SubProcessNode from "./SubProcessNode";
+import EventSubProcessNode from "./EventSubProcessNode";
+import TransactionNode from "./TransactionNode";
+import AdHocSubProcessNode from "./AdHocSubProcessNode";
 
 export const nodeTypes = {
   startEvent: StartEventNode,
@@ -39,4 +43,8 @@ export const nodeTypes = {
   parallelGateway: ParallelGatewayNode,
   inclusiveGateway: InclusiveGatewayNode,
   eventBasedGateway: EventBasedGatewayNode,
+  subProcess: SubProcessNode,
+  eventSubProcess: EventSubProcessNode,
+  transaction: TransactionNode,
+  adHocSubProcess: AdHocSubProcessNode,
 };

@@ -50,7 +50,16 @@ export type CanvasState = {
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
 
-  addNode: (type: string, position: { x: number; y: number }, label?: string) => void;
+  addNode: (
+    type: string,
+    position: { x: number; y: number },
+    label?: string,
+    parentId?: string,
+  ) => void;
+  /** Move a node (and its descendant subtree) under a new parent, or to
+   *  the root when `parentId` is null. React Flow positions become
+   *  relative to the new parent, so this also adjusts `position`. */
+  reparentNode: (nodeId: string, parentId: string | null) => void;
   setSelectedNode: (id: string | null) => void;
   updateNodeLabel: (id: string, label: string) => void;
   updateNodeData: (id: string, patch: Partial<BpmnNodeData>) => void;
@@ -126,15 +135,90 @@ const useCanvasStore = create<CanvasState>()(
         });
       },
 
-      addNode: (type, position, label) => {
+      addNode: (type, position, label, parentId) => {
         const id = `${type}-${nanoid(8)}`;
+        const nodes = get().nodes;
+        // React Flow requires child positions relative to parent. If the
+        // caller passed an absolute position and a parent, convert once
+        // here so every call-site doesn't have to repeat the math.
+        let pos = position;
+        if (parentId) {
+          const parent = nodes.find((n) => n.id === parentId);
+          if (parent) {
+            // Walk up to compute parent's absolute origin.
+            let px = parent.position.x;
+            let py = parent.position.y;
+            let cur: Node | undefined = parent;
+            while (cur?.parentId) {
+              const gp = nodes.find((n) => n.id === cur!.parentId);
+              if (!gp) break;
+              px += gp.position.x;
+              py += gp.position.y;
+              cur = gp;
+            }
+            pos = { x: position.x - px, y: position.y - py };
+          }
+        }
         const newNode: Node = {
           id,
           type,
-          position,
+          position: pos,
           data: createDefaultNodeData(type, label),
+          ...(parentId ? { parentId, extent: "parent" as const } : {}),
         };
-        set({ nodes: [...get().nodes, newNode] });
+        set({ nodes: [...nodes, newNode] });
+      },
+
+      reparentNode: (nodeId, parentId) => {
+        const nodes = get().nodes;
+        const node = nodes.find((n) => n.id === nodeId);
+        if (!node) return;
+        if ((node.parentId || null) === parentId) return;
+
+        // No self-parenting, no creating cycles (can't drop a subprocess
+        // into one of its own descendants).
+        if (parentId === nodeId) return;
+        if (parentId) {
+          let cur: string | undefined = parentId;
+          while (cur) {
+            if (cur === nodeId) return;
+            cur = nodes.find((n) => n.id === cur)?.parentId;
+          }
+        }
+
+        const absOf = (id: string): { x: number; y: number } => {
+          const n = nodes.find((m) => m.id === id);
+          if (!n) return { x: 0, y: 0 };
+          let x = n.position.x;
+          let y = n.position.y;
+          let cur: Node | undefined = n;
+          while (cur?.parentId) {
+            const p = nodes.find((m) => m.id === cur!.parentId);
+            if (!p) break;
+            x += p.position.x;
+            y += p.position.y;
+            cur = p;
+          }
+          return { x, y };
+        };
+
+        const myAbs = absOf(nodeId);
+        const newParentAbs = parentId ? absOf(parentId) : { x: 0, y: 0 };
+        const relative = { x: myAbs.x - newParentAbs.x, y: myAbs.y - newParentAbs.y };
+
+        set({
+          nodes: nodes.map((n) =>
+            n.id === nodeId
+              ? {
+                  ...n,
+                  position: relative,
+                  ...(parentId
+                    ? { parentId, extent: "parent" as const }
+                    : { parentId: undefined, extent: undefined }),
+                }
+              : n,
+          ),
+        });
       },
 
       setSelectedNode: (id) => set({ selectedNodeId: id }),
@@ -223,6 +307,28 @@ const useCanvasStore = create<CanvasState>()(
           }
         }
 
+        // Cascade: descendants of a deleted subprocess go with it. We
+        // walk repeatedly until the set stops growing so grandchildren
+        // and boundary events attached to nested hosts are also swept.
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const n of nodes) {
+            if (selectedNodeIds.has(n.id)) continue;
+            if (n.parentId && selectedNodeIds.has(n.parentId)) {
+              selectedNodeIds.add(n.id);
+              grew = true;
+            }
+            if (n.type === "boundaryEvent") {
+              const attachedTo = (n.data as { attachedToRef?: string })?.attachedToRef;
+              if (attachedTo && selectedNodeIds.has(attachedTo)) {
+                selectedNodeIds.add(n.id);
+                grew = true;
+              }
+            }
+          }
+        }
+
         set({
           nodes: nodes.filter((n) => !selectedNodeIds.has(n.id)),
           edges: edges.filter(
@@ -239,6 +345,29 @@ const useCanvasStore = create<CanvasState>()(
         const { nodes, edges } = get();
         const selectedNodeIds = new Set(nodes.filter((n) => n.selected).map((n) => n.id));
         if (selectedNodeIds.size === 0) return;
+
+        // Include descendants of selected subprocesses so the paste
+        // doesn't leave a dangling parentId. Boundary events attached
+        // to selected hosts come along too — same reasoning as delete.
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const n of nodes) {
+            if (selectedNodeIds.has(n.id)) continue;
+            if (n.parentId && selectedNodeIds.has(n.parentId)) {
+              selectedNodeIds.add(n.id);
+              grew = true;
+            }
+            if (n.type === "boundaryEvent") {
+              const attachedTo = (n.data as { attachedToRef?: string })?.attachedToRef;
+              if (attachedTo && selectedNodeIds.has(attachedTo)) {
+                selectedNodeIds.add(n.id);
+                grew = true;
+              }
+            }
+          }
+        }
+
         const copiedNodes = nodes.filter((n) => selectedNodeIds.has(n.id));
         const copiedEdges = edges.filter(
           (e) => selectedNodeIds.has(e.source) && selectedNodeIds.has(e.target)
@@ -274,12 +403,22 @@ const useCanvasStore = create<CanvasState>()(
           if (typeof data.attachedToRef === "string") {
             data.attachedToRef = nodeIdMap.get(data.attachedToRef) ?? undefined;
           }
+          // Root-level pasted nodes get the +32 offset; children keep
+          // their relative position so the subprocess interior doesn't
+          // fly apart on paste.
+          const isRootPaste = !n.parentId || !nodeIdMap.has(n.parentId);
+          const position = isRootPaste
+            ? { x: n.position.x + 32, y: n.position.y + 32 }
+            : n.position;
           return {
             ...n,
             id: nodeIdMap.get(n.id)!,
             data,
-            position: { x: n.position.x + 32, y: n.position.y + 32 },
+            position,
             selected: true,
+            ...(n.parentId && nodeIdMap.has(n.parentId)
+              ? { parentId: nodeIdMap.get(n.parentId), extent: "parent" as const }
+              : { parentId: undefined, extent: undefined }),
           };
         });
 

@@ -122,8 +122,16 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
         icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#475467" strokeWidth="1.5" strokeDasharray="3 1.5" /><line x1="12" y1="10" x2="12" y2="14" stroke="#475467" strokeWidth="1.5" strokeLinecap="round" /><line x1="10" y1="12" x2="14" y2="12" stroke="#475467" strokeWidth="1.5" strokeLinecap="round" /></>,
       },
       {
-        type: "transaction", label: "Transact", color: "#475467", shape: "rect-dash",
-        icon: <><rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="#475467" strokeWidth="1.2" /><rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="#475467" strokeWidth="1.2" /></>,
+        type: "transaction", label: "Transact", color: "#0F766E", shape: "rect-dash",
+        icon: <><rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="#0F766E" strokeWidth="1.2" /><rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="#0F766E" strokeWidth="1.2" /></>,
+      },
+      {
+        type: "eventSubProcess", label: "Event Sub", color: "#7C3AED", shape: "rect-dash",
+        icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#7C3AED" strokeWidth="1.5" strokeDasharray="2 1.5" /><circle cx="12" cy="12" r="2.5" fill="none" stroke="#7C3AED" strokeWidth="1.2" /></>,
+      },
+      {
+        type: "adHocSubProcess", label: "Ad-hoc", color: "#B45309", shape: "rect-dash",
+        icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#B45309" strokeWidth="1.5" strokeDasharray="3 1.5" /><path d="M8 13c1.5-3 3-3 4 0s2.5 3 4 0" stroke="#B45309" strokeWidth="1.2" fill="none" strokeLinecap="round" /></>,
       },
     ],
   },

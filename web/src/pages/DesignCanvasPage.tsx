@@ -22,6 +22,8 @@ import { normalizeCanvasPayload, toCanvasPayload } from "../store/canvas-schema"
 import { apiGet, apiPut } from "../lib/api";
 import { STEP_MAP, DOC_SOURCE_MAP } from "../lib/constants";
 import { nodeTypes } from "../components/canvas/nodes";
+import { isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "../lib/bpmn/element-map";
+import { getSize } from "../lib/bpmn/element-map";
 import { edgeTypes } from "../components/canvas/edges";
 import ElementPalette from "../components/canvas/element-palette";
 import PropertiesPanel from "../components/canvas/properties/PropertiesPanel";
@@ -63,6 +65,7 @@ function CanvasInner() {
   const onConnect = useCanvasStore((s) => s.onConnect);
   const reconnectEdgeAction = useCanvasStore((s) => s.reconnectEdge);
   const addNode = useCanvasStore((s) => s.addNode);
+  const reparentNode = useCanvasStore((s) => s.reparentNode);
   const setSelectedNode = useCanvasStore((s) => s.setSelectedNode);
   const deleteSelected = useCanvasStore((s) => s.deleteSelected);
   const copySelected = useCanvasStore((s) => s.copySelected);
@@ -93,6 +96,63 @@ function CanvasInner() {
     event.dataTransfer.dropEffect = "move";
   }, []);
 
+  /** Absolute origin of a node by walking the parent chain — needed when
+   *  computing whether a drop position falls inside a (possibly nested)
+   *  subprocess frame. Positions on React Flow nodes with `parentId` are
+   *  relative to the parent. */
+  const absOriginOf = useCallback(
+    (nodeId: string, allNodes: typeof rawNodes): { x: number; y: number } => {
+      const byId = new Map(allNodes.map((n) => [n.id, n]));
+      let cur = byId.get(nodeId);
+      let x = 0;
+      let y = 0;
+      while (cur) {
+        x += cur.position.x;
+        y += cur.position.y;
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+      }
+      return { x, y };
+    },
+    [rawNodes],
+  );
+
+  /** Deepest expanded subprocess whose bounding box contains the given
+   *  absolute flow-space position. Returns null when the drop is on the
+   *  root pane. */
+  const findSubprocessAt = useCallback(
+    (pos: { x: number; y: number }, ignoreId?: string): string | null => {
+      const allNodes = rawNodes;
+      let best: { id: string; depth: number } | null = null;
+      const byId = new Map(allNodes.map((n) => [n.id, n]));
+      for (const n of allNodes) {
+        if (!isSubprocessType(n.type)) continue;
+        if (ignoreId && n.id === ignoreId) continue;
+        const d = n.data as { isExpanded?: boolean; width?: number; height?: number };
+        if (d.isExpanded === false) continue;
+        const origin = absOriginOf(n.id, allNodes);
+        const size = getSize(n.type);
+        const w = d.width ?? n.width ?? size.width;
+        const h = d.height ?? n.height ?? size.height;
+        if (
+          pos.x >= origin.x &&
+          pos.x <= origin.x + w &&
+          pos.y >= origin.y &&
+          pos.y <= origin.y + h
+        ) {
+          let depth = 0;
+          let cur: typeof n | undefined = n;
+          while (cur?.parentId) {
+            depth++;
+            cur = byId.get(cur.parentId);
+          }
+          if (!best || depth > best.depth) best = { id: n.id, depth };
+        }
+      }
+      return best?.id || null;
+    },
+    [rawNodes, absOriginOf],
+  );
+
   const onDrop = useCallback(
     (event: DragEvent) => {
       event.preventDefault();
@@ -105,9 +165,45 @@ function CanvasInner() {
         y: event.clientY,
       });
 
-      addNode(type, position, label);
+      // Don't auto-parent a subprocess into another subprocess on drop —
+      // user can drag it in afterward. It keeps the drop intuitive
+      // for the common "drag a task into a subprocess" case while
+      // letting "drag a subprocess to the root then reparent" stay
+      // explicit. Task/event/gateway types DO get auto-parented.
+      const parentId = isSubprocessType(type) ? null : findSubprocessAt(position);
+      addNode(type, position, label, parentId || undefined);
     },
-    [screenToFlowPosition, addNode]
+    [screenToFlowPosition, addNode, findSubprocessAt]
+  );
+
+  const onNodeDragStop = useCallback(
+    (_: unknown, node: { id: string; type?: string; parentId?: string }) => {
+      // Re-parent when a node is dragged into or out of a subprocess frame.
+      // We use the center of the node's bounding box as the hit point.
+      const allNodes = useCanvasStore.getState().nodes;
+      const n = allNodes.find((m) => m.id === node.id);
+      if (!n || !n.type) return;
+      // Subprocess nodes themselves don't auto-reparent on drag — that's
+      // a structural move users should do deliberately via keyboard or
+      // future UX. This also avoids nesting cycles from fast drags.
+      if (isSubprocessType(n.type)) return;
+      const origin = absOriginOf(n.id, allNodes);
+      const size = getSize(n.type);
+      const d = n.data as { width?: number; height?: number; isExpanded?: boolean };
+      const w =
+        isSubprocessType(n.type) && d.isExpanded === false
+          ? COLLAPSED_SUBPROCESS_SIZE.width
+          : d.width ?? n.width ?? size.width;
+      const h =
+        isSubprocessType(n.type) && d.isExpanded === false
+          ? COLLAPSED_SUBPROCESS_SIZE.height
+          : d.height ?? n.height ?? size.height;
+      const center = { x: origin.x + w / 2, y: origin.y + h / 2 };
+      const hit = findSubprocessAt(center, n.id);
+      const current = n.parentId || null;
+      if (hit !== current) reparentNode(n.id, hit);
+    },
+    [absOriginOf, findSubprocessAt, reparentNode],
   );
 
   const onNodeClick = useCallback(
@@ -214,6 +310,7 @@ function CanvasInner() {
           onInit={(instance) => { reactFlowInstance.current = instance; }}
           onDrop={onDrop}
           onDragOver={onDragOver}
+          onNodeDragStop={onNodeDragStop}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
           nodeTypes={nodeTypes}
