@@ -21,9 +21,12 @@ const AdHocSubProcessNode = memo((props: NodeProps) => {
       />
     );
   }
+  const { width: _w, height: _h, ...collapsedData } = props.data as Record<string, unknown>;
+  void _w; void _h;
   return (
     <BaseTaskNode
       {...props}
+      data={collapsedData}
       icon={<CollapsedMarker color={theme.color} kind="tilde" />}
       iconBg={theme.iconBg}
       accentColor={theme.color}

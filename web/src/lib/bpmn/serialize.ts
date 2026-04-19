@@ -313,10 +313,10 @@ export async function serializeCanvasToBpmn(
   const effectiveSize = (n: Node): { width: number; height: number } => {
     const data = (n.data || {}) as { width?: number; height?: number; isExpanded?: boolean };
     if (isSubprocessType(n.type) && data.isExpanded === false) {
-      return {
-        width: data.width ?? n.width ?? COLLAPSED_SUBPROCESS_SIZE.width,
-        height: data.height ?? n.height ?? COLLAPSED_SUBPROCESS_SIZE.height,
-      };
+      // Collapsed: ignore any width/height the user set while expanded.
+      // Those represent the expanded-frame size and would produce a
+      // giant "collapsed" shape in the DI (and in the canvas render).
+      return COLLAPSED_SUBPROCESS_SIZE;
     }
     const size = getSize(n.type);
     return {

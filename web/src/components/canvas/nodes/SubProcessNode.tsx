@@ -20,9 +20,15 @@ const SubProcessNode = memo((props: NodeProps) => {
       />
     );
   }
+  // Drop width/height from the data we hand to BaseTaskNode — they hold
+  // the *expanded* frame dimensions (e.g. 800×500 after a resize), and
+  // the collapsed task shape would otherwise render at that size.
+  const { width: _w, height: _h, ...collapsedData } = props.data as Record<string, unknown>;
+  void _w; void _h;
   return (
     <BaseTaskNode
       {...props}
+      data={collapsedData}
       icon={<CollapsedMarker color={theme.color} kind="plus" />}
       iconBg={theme.iconBg}
       accentColor={theme.color}
