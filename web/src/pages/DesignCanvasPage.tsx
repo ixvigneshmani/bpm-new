@@ -33,6 +33,7 @@ import ProblemsPanel from "../components/canvas/problems-panel";
 import ProcessWizard from "../components/canvas/process-wizard";
 import ProcessSubheader from "../components/canvas/process-subheader";
 import BreadcrumbBar from "../components/canvas/breadcrumb-bar";
+import AiScaffoldDialog from "../components/canvas/ai-scaffold-dialog";
 
 const DEFAULT_EDGE_OPTIONS = {
   type: "sequence" as const,
@@ -57,6 +58,7 @@ function CanvasInner() {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null);
   const { screenToFlowPosition } = useReactFlow();
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
 
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const rawNodes = useCanvasStore((s) => s.nodes);
@@ -402,8 +404,10 @@ function CanvasInner() {
               borderRadius: 8,
             }}
           />
-          <CanvasToolbar />
+          <CanvasToolbar onOpenAi={() => setAiDialogOpen(true)} />
         </ReactFlow>
+
+        {aiDialogOpen && <AiScaffoldDialog onClose={() => setAiDialogOpen(false)} />}
 
         {/* Floating properties panel */}
         {!showWizard && <PropertiesPanel />}

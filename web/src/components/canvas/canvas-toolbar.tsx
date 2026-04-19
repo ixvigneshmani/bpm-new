@@ -5,7 +5,9 @@ import useCanvasStore from "../../store/canvas-store";
 import { serializeCanvasToBpmn } from "../../lib/bpmn/serialize";
 import { parseBpmnToCanvas } from "../../lib/bpmn/parse";
 
-export default function CanvasToolbar() {
+type Props = { onOpenAi?: () => void };
+
+export default function CanvasToolbar({ onOpenAi }: Props = {}) {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const deleteSelected = useCanvasStore((s) => s.deleteSelected);
   const selectedNodeId = useCanvasStore((s) => s.selectedNodeId);
@@ -153,6 +155,30 @@ export default function CanvasToolbar() {
           <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.13-9.36L23 10" />
         </svg>
       </button>
+
+      {divider}
+
+      {/* AI scaffold — natural-language → canvas */}
+      {onOpenAi && (
+        <button
+          onClick={onOpenAi}
+          style={{
+            ...btnStyle(),
+            background: "linear-gradient(135deg, #EEF2FF 0%, #FAF5FF 100%)",
+            border: "1px solid #C7D2FE",
+            color: "#4F46E5",
+            padding: "0 8px",
+            width: "auto",
+            gap: 4,
+            fontSize: 11,
+            fontWeight: 600,
+          }}
+          title="Describe your process in plain language; Claude scaffolds the canvas."
+        >
+          <span aria-hidden style={{ fontSize: 13 }}>✨</span>
+          AI
+        </button>
+      )}
 
       {divider}
 
