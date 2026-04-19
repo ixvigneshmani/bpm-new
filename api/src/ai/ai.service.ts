@@ -494,10 +494,24 @@ export class AiService {
       throw err;
     }
 
-    const canvasJson = JSON.stringify(args.currentCanvas);
+    // Don't trust the DTO shape — the client sends a permissive
+    // `Array<Record<string, unknown>>` and could (maliciously or not)
+    // stuff prompt-injecting strings into unknown fields. Projecting
+    // onto a fixed allowlist caps the surface + keeps token use
+    // predictable. `extensionElements` / `documentation` are dropped
+    // because the refine prompt only needs topology + labels.
+    const slimCanvas = {
+      nodes: (args.currentCanvas.nodes ?? []).map((n) =>
+        projectNodeForPrompt(n),
+      ),
+      edges: (args.currentCanvas.edges ?? []).map((e) =>
+        projectEdgeForPrompt(e),
+      ),
+    };
+    const canvasJson = JSON.stringify(slimCanvas);
     if (canvasJson.length > MAX_CANVAS_BYTES) {
       const err = new PayloadTooLargeException(
-        `Current canvas exceeds ${MAX_CANVAS_BYTES} bytes when serialized.`,
+        "Canvas is too large for AI refine. Try splitting the process or using 'Replace with new'.",
       );
       this.recordInteractionAsync({
         tenantId: args.tenantId,
@@ -582,7 +596,7 @@ export class AiService {
         throw new BadGatewayException("AI did not return structured diff ops.");
       }
       const parsed = toolUse.input as RefineResult;
-      const sanitized = this.sanitizeRefine(parsed, args.currentCanvas);
+      const sanitized = this.sanitizeRefine(parsed, slimCanvas);
       this.recordInteractionAsync({
         tenantId: args.tenantId,
         userId: args.userId,
@@ -822,12 +836,26 @@ export class AiService {
           break;
         }
         case "remove-node": {
-          if (!existingNodeIds.has(op.id) || removed.has(op.id)) {
-            dropped.push(`remove-node missing target ${op.id}`);
+          if (removed.has(op.id)) {
+            dropped.push(`remove-node already-removed target ${op.id}`);
             break;
           }
-          removed.add(op.id);
-          keep.push(op);
+          if (existingNodeIds.has(op.id)) {
+            removed.add(op.id);
+            keep.push(op);
+          } else if (added.has(op.id)) {
+            // AI emitted add + remove in the same batch — net effect is
+            // "the node never existed". Drop both ops rather than let
+            // the add leak into the canvas.
+            const addIdx = keep.findIndex(
+              (k) => k.op === "add-node" && k.node.id === op.id,
+            );
+            if (addIdx >= 0) keep.splice(addIdx, 1);
+            added.delete(op.id);
+            dropped.push(`add+remove cancelled for ${op.id}`);
+          } else {
+            dropped.push(`remove-node missing target ${op.id}`);
+          }
           break;
         }
         case "add-edge": {
@@ -1248,6 +1276,58 @@ export class AiService {
       notes,
     };
   }
+}
+
+/** Allowlisted fields we pass into the refine prompt. Anything not
+ *  here is dropped. `data` gets its own inner allowlist so
+ *  `extensionElements`, `documentation`, and model-specific payload
+ *  bloat never reach the prompt. */
+const NODE_DATA_PROMPT_KEYS: ReadonlySet<string> = new Set([
+  "label",
+  "bpmnType",
+  "eventDefinition",
+  "gatewayKind",
+  "isExpanded",
+  "triggeredByEvent",
+  "multiInstance",
+  "defaultFlowId",
+  "attachedToRef",
+  "cancelActivity",
+]);
+
+function projectNodeForPrompt(n: Record<string, unknown>): Record<string, unknown> {
+  const data = (n.data && typeof n.data === "object"
+    ? (n.data as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const slimData: Record<string, unknown> = {};
+  for (const k of NODE_DATA_PROMPT_KEYS) {
+    if (k in data) slimData[k] = data[k];
+  }
+  return {
+    id: String(n.id ?? ""),
+    type: typeof n.type === "string" ? n.type : undefined,
+    position: (n.position && typeof n.position === "object")
+      ? n.position
+      : undefined,
+    parentId: typeof n.parentId === "string" ? n.parentId : undefined,
+    data: slimData,
+  };
+}
+
+function projectEdgeForPrompt(e: Record<string, unknown>): Record<string, unknown> {
+  const data = (e.data && typeof e.data === "object"
+    ? (e.data as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const slimData: Record<string, unknown> = {};
+  if (data.flowType === "message") slimData.flowType = "message";
+  if (typeof data.condition === "string") slimData.condition = data.condition;
+  return {
+    id: String(e.id ?? ""),
+    source: typeof e.source === "string" ? e.source : undefined,
+    target: typeof e.target === "string" ? e.target : undefined,
+    label: typeof e.label === "string" ? e.label : undefined,
+    ...(Object.keys(slimData).length > 0 ? { data: slimData } : {}),
+  };
 }
 
 /** Structural guard on a persisted scaffold payload. The jsonb column

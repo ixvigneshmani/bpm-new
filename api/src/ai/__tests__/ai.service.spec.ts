@@ -639,6 +639,22 @@ describe("AiService.sanitizeRefine", () => {
     expect(out.notes).toMatch(/id collision/);
   });
 
+  it("cancels an add+remove of the same id in one batch", () => {
+    const out = service.sanitizeRefine(
+      refine([
+        {
+          op: "add-node",
+          node: { id: "nX", type: "userTask", label: "Transient", position: { x: 0, y: 0 } },
+        },
+        { op: "remove-node", id: "nX" },
+      ]),
+      current,
+    );
+    // Neither the add nor the remove should survive — net effect is "nothing".
+    expect(out.ops).toHaveLength(0);
+    expect(out.notes).toMatch(/add\+remove cancelled/);
+  });
+
   it("truncates over-long add-node labels", () => {
     const longLabel = "x".repeat(500);
     const out = service.sanitizeRefine(

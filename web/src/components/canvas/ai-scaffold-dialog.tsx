@@ -77,7 +77,14 @@ function humanizeError(status: number | null, raw: string): string {
   if (status === 429) return "Too many AI requests right now. Try again in a moment.";
   if (status === 401 || status === 500) return "AI service isn't available. Contact your admin.";
   if (status === 502 || status === 503) return "AI service is temporarily unreachable. Try again shortly.";
-  if (status === 413) return "Business document is too large for AI to process.";
+  if (status === 413) {
+    // Server distinguishes canvas vs schema via the message; fall back
+    // to a generic "too large" if we don't recognize the prefix so a
+    // future source of 413s doesn't degrade to the wrong copy.
+    if (/canvas/i.test(raw)) return raw;
+    if (/schema|document/i.test(raw)) return "Business document is too large for AI to process.";
+    return "Request is too large for AI to process.";
+  }
   if (status === 400) return "AI couldn't handle that request. Try rephrasing.";
   if (/aborted|AbortError/i.test(raw)) return "Request cancelled.";
   if (/Failed to fetch|NetworkError/i.test(raw)) return "Network error. Check your connection and try again.";
@@ -287,7 +294,15 @@ export default function AiScaffoldDialog({ onClose }: Props) {
 
   function applyRefine() {
     if (!refineResult || refineResult.ops.length === 0) return;
-    applyRefineOps(refineResult.ops);
+    const { skipped } = applyRefineOps(refineResult.ops);
+    if (skipped > 0) {
+      // Ops were produced against the canvas snapshot at generate-time;
+      // if the user edited during generation some targets may no longer
+      // exist. A mid-request alert beats a silent partial apply.
+      window.alert(
+        `${skipped} of ${refineResult.ops.length} change(s) skipped — the canvas changed since the AI started. Review the result.`,
+      );
+    }
     setHistory(null);
     onClose();
     setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
@@ -322,6 +337,17 @@ export default function AiScaffoldDialog({ onClose }: Props) {
       void loadHistory();
     }
   }, [tab, history, historyLoading, loadHistory]);
+
+  // Clear any stale result panels + error when the user flips modes.
+  // The footer reads `result || refineResult` and would otherwise
+  // render the previous mode's Apply button next to the new mode's
+  // (still-unset) result.
+  useEffect(() => {
+    setResult(null);
+    setRefineResult(null);
+    setError(null);
+    setProgress(null);
+  }, [mode]);
 
   async function reapply(id: string) {
     // Confirm before we spend a network round-trip fetching a ~20 KB
@@ -753,6 +779,11 @@ function HistoryRow({
   onReapply: () => void;
 }) {
   const isSuccess = row.status === "success";
+  // Only scaffold rows have a `responseJson` with `{nodes, edges}`;
+  // refine rows store `{ops, notes}` and re-applying them against a
+  // canvas that has since changed doesn't make sense. Hide the button
+  // rather than show a dead end.
+  const canReapply = isSuccess && row.kind === "scaffold-process";
   // Use absolute timestamp — relative-time drift is easy to get wrong
   // and the dialog is too transient for users to care about "3m ago".
   const when = new Date(row.createdAt).toLocaleString();
@@ -802,7 +833,7 @@ function HistoryRow({
             </span>
           )}
         </div>
-        {isSuccess && (
+        {canReapply ? (
           <button
             type="button"
             onClick={onReapply}
@@ -818,6 +849,10 @@ function HistoryRow({
           >
             {busy ? "Loading…" : "Re-apply"}
           </button>
+        ) : (
+          <span style={{ fontSize: 10, color: "#98a2b3", fontStyle: "italic" }}>
+            {row.kind === "refine-process" ? "refine" : row.kind}
+          </span>
         )}
       </div>
     </div>

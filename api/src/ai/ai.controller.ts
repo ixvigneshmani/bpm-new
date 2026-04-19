@@ -106,7 +106,7 @@ export class AiController {
     @Body() dto: ScaffoldProcessDto,
     @Res() reply: StreamingReply,
   ): Promise<void> {
-    return this.runSseStream(reply, (abortSignal, onProgress) =>
+    return this.runSseStream("scaffold", reply, (abortSignal, onProgress) =>
       this.ai.scaffoldProcessStream({
         description: dto.description,
         businessDocSchema: dto.businessDocSchema,
@@ -129,7 +129,7 @@ export class AiController {
     @Body() dto: RefineProcessDto,
     @Res() reply: StreamingReply,
   ): Promise<void> {
-    return this.runSseStream(reply, (abortSignal, onProgress) =>
+    return this.runSseStream("refine", reply, (abortSignal, onProgress) =>
       this.ai.refineProcessStream({
         description: dto.description,
         currentCanvas: dto.currentCanvas,
@@ -151,6 +151,7 @@ export class AiController {
    *  JwtAuthGuard + ValidationPipe still produce normal JSON error
    *  responses before any SSE header goes out). */
   private async runSseStream<T>(
+    route: string,
     reply: StreamingReply,
     run: (
       abortSignal: AbortSignal,
@@ -210,7 +211,7 @@ export class AiController {
       } else if (err instanceof HttpException) {
         write("error", { status: err.getStatus(), message: err.message });
       } else {
-        this.logger.error("Unexpected error in SSE stream", (err as Error)?.stack);
+        this.logger.error(`Unexpected error in SSE stream [${route}]`, (err as Error)?.stack);
         write("error", { status: 500, message: "Unexpected error." });
       }
     } finally {

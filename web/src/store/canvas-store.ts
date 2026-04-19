@@ -106,8 +106,10 @@ export type CanvasState = {
   loadCanvasData: (nodes: Node[], edges: Edge[]) => void;
   /** Apply a sequence of AI refine ops in order (add/modify/remove
    *  node + edge). All ops land as one store update so undo sees the
-   *  whole batch as a single entry. */
-  applyRefineOps: (ops: RefineOp[]) => void;
+   *  whole batch as a single entry. Returns a summary of applied vs
+   *  skipped so the caller can surface drift between snapshot and
+   *  live canvas (e.g. if the user edited during generation). */
+  applyRefineOps: (ops: RefineOp[]) => { applied: number; skipped: number };
   resetCanvas: () => void;
 };
 
@@ -617,11 +619,13 @@ const useCanvasStore = create<CanvasState>()(
         let edges = [...state.edges];
         const nodeIndex = new Map(nodes.map((n, i) => [n.id, i]));
         const edgeIndex = new Map(edges.map((e, i) => [e.id, i]));
+        let applied = 0;
+        let skipped = 0;
 
         for (const op of ops) {
           switch (op.op) {
             case "add-node": {
-              if (nodeIndex.has(op.node.id)) continue;
+              if (nodeIndex.has(op.node.id)) { skipped++; continue; }
               const payloadData = (op.node.data ?? {}) as Partial<BpmnNodeData>;
               // Start from the type's default data so renderers don't
               // hit `undefined` on fields they assume exist, then
@@ -640,29 +644,39 @@ const useCanvasStore = create<CanvasState>()(
               };
               nodeIndex.set(newNode.id, nodes.length);
               nodes.push(newNode);
+              applied++;
               break;
             }
             case "modify-node": {
               const idx = nodeIndex.get(op.id);
-              if (idx === undefined) continue;
+              if (idx === undefined) { skipped++; continue; }
               const existing = nodes[idx];
-              const mergedData = op.changes.data
-                ? { ...(existing.data ?? {}), ...op.changes.data }
+              // Strip discriminant/structural keys from the AI's data
+              // patch: `bpmnType` must match React Flow's `type` and is
+              // set at add-time; changing it here would silently break
+              // the renderer + serializer. `parentId`/`extent` are
+              // structural and have dedicated ops.
+              const cleanIncoming = op.changes.data ? sanitizeModifyData(op.changes.data) : undefined;
+              const mergedData = cleanIncoming
+                ? { ...(existing.data ?? {}), ...cleanIncoming }
                 : existing.data;
               const patched: Node = {
                 ...existing,
                 ...(op.changes.position ? { position: op.changes.position } : {}),
                 data: {
                   ...(mergedData as object),
+                  // Explicit top-level label wins over whatever made it
+                  // through the data merge — single source of truth.
                   ...(op.changes.label !== undefined ? { label: op.changes.label } : {}),
                 } as Record<string, unknown>,
               };
               nodes[idx] = patched;
+              applied++;
               break;
             }
             case "remove-node": {
               const idx = nodeIndex.get(op.id);
-              if (idx === undefined) continue;
+              if (idx === undefined) { skipped++; continue; }
               nodes = nodes.filter((n) => n.id !== op.id);
               // Cascade: drop any edges attached to the removed node
               // so we don't leave dangling refs (parser would warn on
@@ -672,11 +686,15 @@ const useCanvasStore = create<CanvasState>()(
               nodes.forEach((n, i) => nodeIndex.set(n.id, i));
               edgeIndex.clear();
               edges.forEach((e, i) => edgeIndex.set(e.id, i));
+              applied++;
               break;
             }
             case "add-edge": {
-              if (edgeIndex.has(op.edge.id)) continue;
-              const isMessage = op.edge.data?.flowType === "message";
+              if (edgeIndex.has(op.edge.id)) { skipped++; continue; }
+              // Don't set an inline `style` — BpmnSequenceEdge derives
+              // the message-flow dashed stroke from `data.flowType`, so
+              // overriding here would both clash with and drift from
+              // every other edge on the canvas.
               const newEdge: Edge = {
                 id: op.edge.id,
                 source: op.edge.source,
@@ -684,18 +702,19 @@ const useCanvasStore = create<CanvasState>()(
                 ...(op.edge.label ? { label: op.edge.label } : {}),
                 ...(op.edge.data ? { data: op.edge.data } : {}),
                 markerEnd: { type: MarkerType.ArrowClosed },
-                ...(isMessage ? { style: { strokeDasharray: "4 3" } } : {}),
               };
               edgeIndex.set(newEdge.id, edges.length);
               edges.push(newEdge);
+              applied++;
               break;
             }
             case "remove-edge": {
               const idx = edgeIndex.get(op.id);
-              if (idx === undefined) continue;
+              if (idx === undefined) { skipped++; continue; }
               edges = edges.filter((e) => e.id !== op.id);
               edgeIndex.clear();
               edges.forEach((e, i) => edgeIndex.set(e.id, i));
+              applied++;
               break;
             }
           }
@@ -706,6 +725,7 @@ const useCanvasStore = create<CanvasState>()(
           edges,
           documentDirty: true,
         });
+        return { applied, skipped };
       },
 
       resetCanvas: () => set({
@@ -749,5 +769,23 @@ const useCanvasStore = create<CanvasState>()(
     }
   )
 );
+
+/** Fields that must never flow in through an AI `modify-node.data`
+ *  patch. `bpmnType` is the renderer discriminant; parentId/extent
+ *  are structural and move through dedicated ops. */
+const MODIFY_DATA_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  "bpmnType",
+  "parentId",
+  "extent",
+]);
+
+function sanitizeModifyData(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (MODIFY_DATA_RESERVED_KEYS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 export default useCanvasStore;

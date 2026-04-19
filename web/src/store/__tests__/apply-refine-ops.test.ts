@@ -97,15 +97,32 @@ describe("P7.3 applyRefineOps", () => {
     expect((n1?.data as { label?: string })?.label).toBe("Renamed");
   });
 
-  it("silently skips ops that reference missing ids", () => {
+  it("reports skipped ops when target ids don't exist", () => {
     const before = useCanvasStore.getState();
     const ops: RefineOp[] = [
       { op: "modify-node", id: "ghost", changes: { label: "X" } },
       { op: "remove-edge", id: "also-ghost" },
     ];
-    useCanvasStore.getState().applyRefineOps(ops);
+    const summary = useCanvasStore.getState().applyRefineOps(ops);
     const after = useCanvasStore.getState();
     expect(after.nodes).toEqual(before.nodes);
     expect(after.edges).toEqual(before.edges);
+    expect(summary).toEqual({ applied: 0, skipped: 2 });
+  });
+
+  it("strips reserved keys (bpmnType / parentId) from modify-node.data", () => {
+    const ops: RefineOp[] = [
+      {
+        op: "modify-node",
+        id: "n1",
+        changes: { data: { bpmnType: "endEvent", parentId: "evil", role: "ok" } as Record<string, unknown> },
+      },
+    ];
+    useCanvasStore.getState().applyRefineOps(ops);
+    const n1 = useCanvasStore.getState().nodes.find((n) => n.id === "n1");
+    const data = n1?.data as Record<string, unknown>;
+    expect(data.bpmnType).toBeUndefined();
+    expect(data.parentId).toBeUndefined();
+    expect(data.role).toBe("ok");
   });
 });
