@@ -12,14 +12,18 @@ import {
   BadGatewayException,
   BadRequestException,
   HttpException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
+  Optional,
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import Anthropic from "@anthropic-ai/sdk";
+import { DATABASE, type Database } from "../database/database.module";
+import { aiInteractions } from "../database/schema";
 
 /** Default model for scaffolding. Sonnet is the cost/quality pick per
  *  current Anthropic guidance — reserve Opus for tasks that clearly
@@ -95,7 +99,10 @@ export class AiService {
   private readonly client: Anthropic | null;
   private readonly rateBuckets = new Map<string, number[]>();
 
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    @Optional() @Inject(DATABASE) private readonly db: Database | null = null,
+  ) {
     const apiKey = config.get<string>("ANTHROPIC_API_KEY");
     // Empty key = feature disabled. The controller surfaces a 503 if a
     // request comes in; swallowing the error at construction lets the
@@ -154,6 +161,7 @@ export class AiService {
 
     const userMessage = this.userMessage(args.description, schemaJson);
 
+    const startedAt = Date.now();
     try {
       const response = await this.client.messages.create({
         model: MODEL,
@@ -171,11 +179,64 @@ export class AiService {
       }
 
       const parsed = toolUse.input as ScaffoldResult;
-      return this.sanitize(parsed);
+      const sanitized = this.sanitize(parsed);
+      await this.recordInteraction({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        status: "success",
+        responseJson: sanitized as unknown as Record<string, unknown>,
+        tokensIn: response.usage?.input_tokens ?? null,
+        tokensOut: response.usage?.output_tokens ?? null,
+        durationMs: Date.now() - startedAt,
+      });
+      return sanitized;
     } catch (err) {
       // Pass through anything we already mapped.
-      if (err instanceof HttpException) throw err;
-      throw this.mapAnthropicError(err);
+      const mapped = err instanceof HttpException ? err : this.mapAnthropicError(err);
+      await this.recordInteraction({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        status: "error",
+        errorMessage: `${mapped.getStatus()}: ${mapped.message}`,
+        durationMs: Date.now() - startedAt,
+      });
+      throw mapped;
+    }
+  }
+
+  /** Persist one scaffold attempt. Failures are swallowed — if the DB is
+   *  unavailable the user still gets their scaffold, we just lose the
+   *  history row. Logs at error level so ops notice persistent failures. */
+  private async recordInteraction(row: {
+    tenantId: string;
+    userId: string;
+    description: string;
+    status: "success" | "error";
+    responseJson?: Record<string, unknown>;
+    errorMessage?: string;
+    tokensIn?: number | null;
+    tokensOut?: number | null;
+    durationMs: number;
+  }): Promise<void> {
+    if (!this.db) return;
+    try {
+      await this.db.insert(aiInteractions).values({
+        tenantId: row.tenantId,
+        userId: row.userId,
+        kind: "scaffold-process",
+        description: row.description,
+        model: MODEL,
+        status: row.status,
+        responseJson: row.responseJson ?? null,
+        errorMessage: row.errorMessage ?? null,
+        tokensIn: row.tokensIn ?? null,
+        tokensOut: row.tokensOut ?? null,
+        durationMs: row.durationMs,
+      });
+    } catch (err) {
+      this.logger.error("Failed to persist AI interaction", err as Error);
     }
   }
 

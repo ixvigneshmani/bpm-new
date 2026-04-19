@@ -6,6 +6,7 @@ import {
   timestamp,
   boolean,
   jsonb,
+  integer,
   pgEnum,
   uniqueIndex,
   index,
@@ -281,4 +282,37 @@ export const processDocuments = pgTable(
       .defaultNow(),
   },
   (t) => [uniqueIndex("PROC_DOC_PROCESS_IDX").on(t.processId)],
+);
+
+// ─── AI_INTERACTIONS (scaffold call history) ────────────────────────
+
+export const aiInteractionStatusEnum = pgEnum("AI_INTERACTION_STATUS", [
+  "success",
+  "error",
+]);
+
+export const aiInteractions = pgTable(
+  "AI_INTERACTIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("USER_ID")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    kind: varchar("KIND", { length: 64 }).notNull(),
+    description: text("DESCRIPTION").notNull(),
+    model: varchar("MODEL", { length: 128 }).notNull(),
+    status: aiInteractionStatusEnum("STATUS").notNull(),
+    responseJson: jsonb("RESPONSE_JSON"),
+    errorMessage: text("ERROR_MESSAGE"),
+    tokensIn: integer("TOKENS_IN"),
+    tokensOut: integer("TOKENS_OUT"),
+    durationMs: integer("DURATION_MS").notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("AI_INTERACTION_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt)],
 );

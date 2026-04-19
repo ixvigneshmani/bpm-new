@@ -9,7 +9,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConfigService } from "@nestjs/config";
 import { AiService, type ScaffoldResult } from "../ai.service";
 
-function makeService(opts: { apiKey?: string | null } = {}): AiService {
+type FakeDb = {
+  insert: ReturnType<typeof vi.fn>;
+  values: ReturnType<typeof vi.fn>;
+};
+
+function makeFakeDb(opts: { failOnInsert?: boolean } = {}): FakeDb {
+  const values = vi.fn(async () => {
+    if (opts.failOnInsert) throw new Error("DB down");
+  });
+  const insert = vi.fn(() => ({ values }));
+  return { insert, values } as unknown as FakeDb;
+}
+
+function makeService(
+  opts: { apiKey?: string | null; db?: FakeDb | null } = {},
+): AiService {
   // Distinguishing "not set" from "set to empty string": the explicit-
   // null branch lets tests force the disabled path regardless of the
   // default-arg fallthrough.
@@ -17,7 +32,8 @@ function makeService(opts: { apiKey?: string | null } = {}): AiService {
   const config = {
     get: vi.fn((key: string) => (key === "ANTHROPIC_API_KEY" ? apiKey : undefined)),
   } as unknown as ConfigService;
-  return new AiService(config);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new AiService(config, (opts.db ?? null) as any);
 }
 
 describe("AiService.sanitize", () => {
@@ -171,6 +187,110 @@ describe("AiService.scaffoldProcess — input guards", () => {
         userId: "u1",
       }),
     ).rejects.toMatchObject({ status: 413 });
+  });
+
+  it("records a history row on a successful scaffold", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
+    // Stub the Anthropic client so we don't hit the network.
+    const fakeResponse = {
+      content: [
+        {
+          type: "tool_use",
+          input: {
+            processName: "Test",
+            processDescription: "",
+            nodes: [
+              { id: "s", type: "startEvent", label: "Start", position: { x: 0, y: 0 } },
+            ],
+            edges: [],
+            notes: "",
+          },
+        },
+      ],
+      usage: { input_tokens: 123, output_tokens: 45 },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).client = { messages: { create: vi.fn(async () => fakeResponse) } };
+
+    await service.scaffoldProcess({
+      description: "test description long enough",
+      tenantId: "tenant-X",
+      userId: "user-X",
+    });
+
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const row = db.values.mock.calls[0][0];
+    expect(row).toMatchObject({
+      tenantId: "tenant-X",
+      userId: "user-X",
+      kind: "scaffold-process",
+      status: "success",
+      tokensIn: 123,
+      tokensOut: 45,
+    });
+    expect(row.responseJson).toBeTruthy();
+    expect(typeof row.durationMs).toBe("number");
+  });
+
+  it("records a history row on a failed scaffold", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).client = {
+      messages: {
+        create: vi.fn(async () => {
+          throw Object.assign(new Error("boom"), { status: 500 });
+        }),
+      },
+    };
+
+    await expect(
+      service.scaffoldProcess({
+        description: "test description long enough",
+        tenantId: "tenant-E",
+        userId: "user-E",
+      }),
+    ).rejects.toBeDefined();
+
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const row = db.values.mock.calls[0][0];
+    expect(row).toMatchObject({ tenantId: "tenant-E", status: "error" });
+    expect(row.errorMessage).toMatch(/\d+:/);
+    expect(row.responseJson).toBeNull();
+  });
+
+  it("swallows DB insert failures and still returns the scaffold", async () => {
+    const db = makeFakeDb({ failOnInsert: true });
+    const service = makeService({ db });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).client = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [
+            {
+              type: "tool_use",
+              input: {
+                processName: "Ok",
+                processDescription: "",
+                nodes: [{ id: "s", type: "startEvent", label: "S", position: { x: 0, y: 0 } }],
+                edges: [],
+                notes: "",
+              },
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 10 },
+        })),
+      },
+    };
+
+    const out = await service.scaffoldProcess({
+      description: "test description long enough",
+      tenantId: "tenant-Y",
+      userId: "user-Y",
+    });
+    expect(out.nodes).toHaveLength(1);
+    expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
   it("rate-limits per tenant (20 per rolling hour)", async () => {
