@@ -31,6 +31,7 @@ import CanvasToolbar from "../components/canvas/canvas-toolbar";
 import ProblemsPanel from "../components/canvas/problems-panel";
 import ProcessWizard from "../components/canvas/process-wizard";
 import ProcessSubheader from "../components/canvas/process-subheader";
+import BreadcrumbBar from "../components/canvas/breadcrumb-bar";
 
 const DEFAULT_EDGE_OPTIONS = {
   type: "sequence" as const,
@@ -298,6 +299,7 @@ function CanvasInner() {
       <div ref={reactFlowWrapper} style={{ flex: 1, position: "relative" }}>
         {/* Floating palette */}
         {!showWizard && <ElementPalette />}
+        {!showWizard && <BreadcrumbBar />}
         <ReactFlow
           nodes={nodes}
           edges={edges}

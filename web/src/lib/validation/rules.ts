@@ -6,24 +6,59 @@
 
 import type { ValidationRule, ValidationIssue } from "./types";
 import { EVENT_BASED_VALID_TARGETS } from "../bpmn/capabilities";
+import { isSubprocessType } from "../bpmn/element-map";
 
 const labelOf = (n: { data: Record<string, unknown>; id: string }) =>
   (n.data?.label as string) || n.id;
+
+/** Group nodes by their parent scope. Root scope is keyed by `null`.
+ *  Nodes whose parentId references a missing node fall back to root. */
+function groupByScope<T extends { id: string; parentId?: string }>(
+  nodes: T[],
+): Map<string | null, T[]> {
+  const ids = new Set(nodes.map((n) => n.id));
+  const byScope = new Map<string | null, T[]>();
+  for (const n of nodes) {
+    const key = n.parentId && ids.has(n.parentId) ? n.parentId : null;
+    const arr = byScope.get(key) || [];
+    arr.push(n);
+    byScope.set(key, arr);
+  }
+  return byScope;
+}
+
+const scopeLabel = (
+  scopeId: string | null,
+  byId: Map<string, { data: Record<string, unknown>; id: string }>,
+): string => {
+  if (!scopeId) return "Process";
+  const host = byId.get(scopeId);
+  return host ? `subprocess "${labelOf(host)}"` : `subprocess "${scopeId}"`;
+};
 
 export const noStartEventRule: ValidationRule = {
   id: "no-start-event",
   name: "Missing start event",
   run: (nodes) => {
     if (nodes.length === 0) return [];
-    if (nodes.some((n) => n.type === "startEvent")) return [];
-    return [
-      {
-        id: "no-start-event",
+    const byScope = groupByScope(nodes);
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const issues: ValidationIssue[] = [];
+    for (const [scopeId, scopeNodes] of byScope) {
+      // An empty (but existing) subprocess is a work-in-progress, not yet
+      // an error — flagging it would spam users mid-modeling. Root with
+      // zero nodes short-circuits above.
+      if (scopeNodes.length === 0) continue;
+      if (scopeNodes.some((n) => n.type === "startEvent")) continue;
+      issues.push({
+        id: scopeId ? `no-start-event:${scopeId}` : "no-start-event",
         severity: "error",
         ruleId: "no-start-event",
-        message: "Process has no start event. Add one so the process knows where to begin.",
-      },
-    ];
+        nodeId: scopeId ?? undefined,
+        message: `${scopeLabel(scopeId, byId)} has no start event. Add one so it knows where to begin.`,
+      });
+    }
+    return issues;
   },
 };
 
@@ -32,15 +67,51 @@ export const noEndEventRule: ValidationRule = {
   name: "Missing end event",
   run: (nodes) => {
     if (nodes.length === 0) return [];
-    if (nodes.some((n) => n.type === "endEvent")) return [];
-    return [
-      {
-        id: "no-end-event",
+    const byScope = groupByScope(nodes);
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const issues: ValidationIssue[] = [];
+    for (const [scopeId, scopeNodes] of byScope) {
+      if (scopeNodes.length === 0) continue;
+      if (scopeNodes.some((n) => n.type === "endEvent")) continue;
+      issues.push({
+        id: scopeId ? `no-end-event:${scopeId}` : "no-end-event",
         severity: "warning",
         ruleId: "no-end-event",
-        message: "Process has no end event. Add one so the process has a clean termination point.",
-      },
-    ];
+        nodeId: scopeId ?? undefined,
+        message: `${scopeLabel(scopeId, byId)} has no end event. Add one so it has a clean termination point.`,
+      });
+    }
+    return issues;
+  },
+};
+
+/** Event subprocesses fire when their inner start event receives a
+ *  trigger (timer, message, signal, error, escalation, compensation,
+ *  conditional). A start event without an event definition makes an
+ *  event subprocess unreachable. */
+export const eventSubprocessTriggerRule: ValidationRule = {
+  id: "event-subprocess-trigger",
+  name: "Event subprocess trigger",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "eventSubProcess") continue;
+      const children = nodes.filter((m) => m.parentId === n.id && m.type === "startEvent");
+      if (children.length === 0) continue; // covered by no-start-event rule
+      for (const start of children) {
+        const def = (start.data as { eventDefinition?: { kind?: string } })?.eventDefinition;
+        if (!def || def.kind === "none" || !def.kind) {
+          issues.push({
+            id: `event-subprocess-trigger:${start.id}`,
+            severity: "error",
+            ruleId: "event-subprocess-trigger",
+            nodeId: start.id,
+            message: `Start event "${labelOf(start as { id: string; data: Record<string, unknown> })}" inside event subprocess "${labelOf(n as { id: string; data: Record<string, unknown> })}" needs an event definition (timer, message, signal, error, escalation, compensation, or conditional).`,
+          });
+        }
+      }
+    }
+    return issues;
   },
 };
 
@@ -53,6 +124,7 @@ export const disconnectedNodeRule: ValidationRule = {
       connected.add(e.source);
       connected.add(e.target);
     }
+    const byId = new Map(nodes.map((m) => [m.id, m]));
     const issues: ValidationIssue[] = [];
     for (const n of nodes) {
       if (connected.has(n.id)) continue;
@@ -62,6 +134,16 @@ export const disconnectedNodeRule: ValidationRule = {
       // via their `attachedToRef` host activity. The boundary-attachment
       // rule covers their own validation.
       if (n.type === "boundaryEvent") continue;
+      // Subprocess frames aren't themselves "disconnected" when they
+      // only contain (fully connected) children — connectivity is
+      // evaluated per scope. Skip subprocesses that have children.
+      if (isSubprocessType(n.type) && nodes.some((m) => m.parentId === n.id)) continue;
+      // Start events of event subprocesses intentionally have no
+      // incoming flow — they fire on event. Skip.
+      if (n.type === "startEvent") {
+        const parent = n.parentId ? byId.get(n.parentId) : undefined;
+        if (parent?.type === "eventSubProcess") continue;
+      }
       issues.push({
         id: `disconnected-node:${n.id}`,
         severity: "warning",
@@ -175,4 +257,5 @@ export const DEFAULT_RULES: ValidationRule[] = [
   duplicateIdsRule,
   eventBasedTargetRule,
   boundaryAttachmentRule,
+  eventSubprocessTriggerRule,
 ];
