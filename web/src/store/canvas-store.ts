@@ -87,6 +87,11 @@ export type CanvasState = {
 
   setConnectMode: (mode: "sequence" | "message") => void;
 
+  /** Select a single edge by id — clears any node selection and marks
+   *  the target edge as selected. Used by the Problems panel to jump
+   *  to an edge-scoped validation issue. */
+  selectEdge: (edgeId: string) => void;
+
   setSaveStatus: (status: SaveStatus) => void;
 
   setProcessId: (id: string | null) => void;
@@ -534,6 +539,17 @@ const useCanvasStore = create<CanvasState>()(
       },
 
       setConnectMode: (mode) => set({ connectMode: mode }),
+
+      selectEdge: (edgeId) => {
+        const { nodes, edges } = get();
+        set({
+          selectedNodeId: null,
+          edges: edges.map((e) =>
+            e.selected === (e.id === edgeId) ? e : { ...e, selected: e.id === edgeId },
+          ),
+          nodes: nodes.map((n) => (n.selected ? { ...n, selected: false } : n)),
+        });
+      },
 
       setSaveStatus: (status) => {
         set({

@@ -19,6 +19,7 @@ const SEVERITY_STYLE: Record<IssueSeverity, { color: string; bg: string; icon: s
 export default function ProblemsPanel() {
   const issues = useValidationIssues();
   const setSelectedNode = useCanvasStore((s) => s.setSelectedNode);
+  const selectEdge = useCanvasStore((s) => s.selectEdge);
   const [open, setOpen] = useState(false);
 
   const errorCount = issues.filter((i) => i.severity === "error").length;
@@ -135,13 +136,16 @@ export default function ProblemsPanel() {
           ) : (
             issues.map((issue) => {
               const s = SEVERITY_STYLE[issue.severity];
-              const clickable = Boolean(issue.nodeId);
+              const clickable = Boolean(issue.nodeId || issue.edgeId);
               return (
                 <button
                   key={issue.id}
                   type="button"
                   disabled={!clickable}
-                  onClick={() => issue.nodeId && setSelectedNode(issue.nodeId)}
+                  onClick={() => {
+                    if (issue.nodeId) setSelectedNode(issue.nodeId);
+                    else if (issue.edgeId) selectEdge(issue.edgeId);
+                  }}
                   style={{
                     display: "flex",
                     alignItems: "flex-start",

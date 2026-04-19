@@ -7,6 +7,7 @@
 import type { ValidationRule, ValidationIssue } from "./types";
 import { EVENT_BASED_VALID_TARGETS } from "../bpmn/capabilities";
 import { isSubprocessType } from "../bpmn/element-map";
+import { poolOf as sharedPoolOf } from "../bpmn/scope";
 
 /** Node types valid as boundary-event hosts per BPMN 2.0 §10.5.5. */
 const BOUNDARY_VALID_HOSTS = new Set([
@@ -317,19 +318,6 @@ export const eventSubprocessNestingRule: ValidationRule = {
   },
 };
 
-/** Walk a node's parentId chain to find the owning pool (if any). */
-function poolOf(
-  nodeId: string,
-  byId: Map<string, { id: string; type?: string; parentId?: string }>,
-): string | null {
-  let cur = byId.get(nodeId);
-  while (cur) {
-    if (cur.type === "pool") return cur.id;
-    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
-  }
-  return null;
-}
-
 /** Sequence flows must stay inside a single pool (BPMN 2.0 §8.3.3).
  *  Cross-pool connections must be message flows — firing here prevents
  *  a silent export-time drop. */
@@ -344,8 +332,8 @@ export const sequenceFlowSamePoolRule: ValidationRule = {
     for (const e of edges) {
       const flowType = (e.data as { flowType?: string } | undefined)?.flowType;
       if (flowType === "message") continue;
-      const sp = poolOf(e.source, byId);
-      const tp = poolOf(e.target, byId);
+      const sp = sharedPoolOf(e.source, byId);
+      const tp = sharedPoolOf(e.target, byId);
       if (sp && tp && sp !== tp) {
         issues.push({
           id: `sequence-flow-same-pool:${e.id}`,
@@ -353,6 +341,18 @@ export const sequenceFlowSamePoolRule: ValidationRule = {
           ruleId: "sequence-flow-same-pool",
           edgeId: e.id,
           message: "Sequence flow crosses a pool boundary. Convert to a message flow, or redraw inside a single pool.",
+        });
+      } else if ((sp && !tp) || (!sp && tp)) {
+        // Asymmetric — one endpoint is in a pool, the other is an
+        // orphan. The serializer will adopt the orphan into the first
+        // pool on export, which changes the flow's structural meaning.
+        // Flag it so the user can decide deliberately.
+        issues.push({
+          id: `sequence-flow-same-pool:${e.id}`,
+          severity: "warning",
+          ruleId: "sequence-flow-same-pool",
+          edgeId: e.id,
+          message: "Sequence flow has one endpoint outside any pool. Move it into a pool (or remove the pool) to make scope explicit.",
         });
       }
     }
@@ -370,8 +370,8 @@ export const messageFlowCrossPoolRule: ValidationRule = {
     for (const e of edges) {
       const flowType = (e.data as { flowType?: string } | undefined)?.flowType;
       if (flowType !== "message") continue;
-      const sp = poolOf(e.source, byId);
-      const tp = poolOf(e.target, byId);
+      const sp = sharedPoolOf(e.source, byId);
+      const tp = sharedPoolOf(e.target, byId);
       if (!sp || !tp) {
         issues.push({
           id: `message-flow-cross-pool:${e.id}`,
@@ -407,7 +407,7 @@ export const laneRequiresPoolRule: ValidationRule = {
     const issues: ValidationIssue[] = [];
     for (const n of nodes) {
       if (n.type !== "lane") continue;
-      if (!poolOf(n.id, byId)) {
+      if (!sharedPoolOf(n.id, byId)) {
         issues.push({
           id: `lane-requires-pool:${n.id}`,
           severity: "error",

@@ -20,6 +20,7 @@
 import type { Node, Edge } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
 import { INTERNAL_TO_BPMN, getSize, isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "./element-map";
+import { poolOf as sharedPoolOf } from "./scope";
 import { flowproDescriptor } from "./flowpro-descriptor";
 import {
   buildEventDefinitionElements,
@@ -399,16 +400,11 @@ export async function serializeCanvasToBpmn(
     }
 
     // Walk each node up to its owning pool (if any). Used to detect
-    // cross-pool edges and to route orphan flows correctly.
+    // cross-pool edges and to route orphan flows correctly. Shared
+    // helper so validation rules use the exact same walk.
     const poolIdSet = new Set(pools.map((p) => p.id));
-    const poolOf = (nodeId: string): string | null => {
-      let cur: Node | undefined = nodeById.get(nodeId);
-      while (cur) {
-        if (cur.type === "pool") return cur.id;
-        cur = cur.parentId ? nodeById.get(cur.parentId) : undefined;
-      }
-      return null;
-    };
+    const poolOf = (nodeId: string): string | null =>
+      sharedPoolOf(nodeId, nodeById as Map<string, { id: string; type?: string; parentId?: string }>);
 
     // Adopt orphans into the first pool *in the scope map only* (no data
     // mutation) so assembleScope sees them as children.

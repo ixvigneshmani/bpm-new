@@ -366,8 +366,10 @@ export default function PropertiesPanel() {
         <PoolSection
           participantName={d.participantName || d.label || ""}
           onParticipantNameChange={(v) => {
-            update({ participantName: v });
-            updateNodeLabel(selectedNode.id, v);
+            // Atomic: label + participantName travel together so we
+            // never land in a half-updated state where one subscriber
+            // reads the old value and another reads the new.
+            update({ label: v, participantName: v });
           }}
           isHorizontal={d.isHorizontal !== false}
           onIsHorizontalChange={(v) => update({ isHorizontal: v })}
