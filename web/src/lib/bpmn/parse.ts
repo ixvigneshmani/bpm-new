@@ -284,8 +284,24 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
 
   // bpmn:MessageFlow elements live on the Collaboration, not on any
   // Process. Walk them here; they become edges with data.flowType.
+  // Dangling endpoints are stashed too (React Flow will visually
+  // disconnect them), but we surface a warning so the user knows
+  // something was off in the import.
   if (collaboration) {
     const messageFlows = (collaboration.messageFlows as ModdleElement[] | undefined) || [];
+    // Collect valid flow-node ids from every Process (recursively into
+    // subprocesses) so we can detect MessageFlow refs that don't resolve.
+    const flowNodeIds = new Set<string>();
+    const walkIds = (els: ModdleElement[]) => {
+      for (const el of els) {
+        if (el.id) flowNodeIds.add(el.id);
+        const nested = el.flowElements as ModdleElement[] | undefined;
+        if (Array.isArray(nested)) walkIds(nested);
+      }
+    };
+    for (const p of processes) {
+      walkIds((p.flowElements as ModdleElement[] | undefined) || []);
+    }
     for (const mf of messageFlows) {
       const source = mf.sourceRef as ModdleElement | string | undefined;
       const target = mf.targetRef as ModdleElement | string | undefined;
@@ -294,6 +310,11 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
       if (!mf.id || !sourceId || !targetId) {
         warnings.push(`Skipped message flow with missing id/source/target: ${mf.id ?? "(no id)"}`);
         continue;
+      }
+      if (!flowNodeIds.has(sourceId) || !flowNodeIds.has(targetId)) {
+        warnings.push(
+          `Message flow "${mf.id}" has a dangling endpoint (source=${sourceId}, target=${targetId}).`,
+        );
       }
       edges.push({
         id: mf.id,

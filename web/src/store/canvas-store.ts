@@ -177,6 +177,11 @@ const useCanvasStore = create<CanvasState>()(
             { ...connection, id, ...DEFAULT_EDGE_VISUAL, ...(data ? { data } : {}) },
             get().edges
           ),
+          // Auto-reset to "sequence" after each connect so a user who
+          // forgets they're in message mode doesn't silently draw three
+          // more dashed edges. Deliberate pick-and-use instead of
+          // sticky mode; toolbar shows the current state.
+          connectMode: "sequence",
         });
       },
 

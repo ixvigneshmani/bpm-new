@@ -70,6 +70,42 @@ describe("P6.4 message flows", () => {
     expect(xml).not.toContain(`id="m1"`);
   });
 
+  it("same-pool message flow: dropped with a warning (§8.3.3 — must cross a pool boundary)", async () => {
+    const nodes: Node[] = [
+      mkNode({ id: "PA", type: "pool", data: { label: "A", bpmnType: "pool" } }),
+      mkNode({ id: "t1", type: "userTask", parentId: "PA", data: { label: "T1", bpmnType: "userTask" } }),
+      mkNode({ id: "t2", type: "userTask", parentId: "PA", data: { label: "T2", bpmnType: "userTask" } }),
+    ];
+    const edges: Edge[] = [
+      { id: "m1", source: "t1", target: "t2", data: { flowType: "message" } } as Edge,
+    ];
+    const { xml, warnings } = await serializeCanvasToBpmn(nodes, edges);
+    expect(warnings.some((w) => /same pool/i.test(w))).toBe(true);
+    expect(xml).not.toContain(`id="m1"`);
+  });
+
+  it("parser warns on dangling MessageFlow endpoint", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D" targetNamespace="http://flowpro.io/bpmn">
+  <bpmn:process id="P_A" isExecutable="true">
+    <bpmn:userTask id="a1" name="A"/>
+  </bpmn:process>
+  <bpmn:process id="P_B" isExecutable="true">
+    <bpmn:userTask id="b1" name="B"/>
+  </bpmn:process>
+  <bpmn:collaboration id="C1">
+    <bpmn:participant id="PA" name="A" processRef="P_A"/>
+    <bpmn:participant id="PB" name="B" processRef="P_B"/>
+    <bpmn:messageFlow id="m_dangling" sourceRef="a1" targetRef="ghost"/>
+  </bpmn:collaboration>
+</bpmn:definitions>`;
+    const result = await parseBpmnToCanvas(xml);
+    // bpmn-moddle itself emits "unresolved reference" for the ghost id;
+    // we also surface our own dangling-endpoint warning when the id
+    // does reach us but isn't in any Process.
+    expect(result.warnings.some((w) => /unresolved reference|dangling endpoint/i.test(w))).toBe(true);
+  });
+
   it("sequence flow between different pools still drops with its own warning (not converted silently)", async () => {
     const nodes: Node[] = [
       mkNode({ id: "PA", type: "pool", data: { label: "A", bpmnType: "pool" } }),

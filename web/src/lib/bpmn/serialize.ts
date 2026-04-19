@@ -486,12 +486,25 @@ export async function serializeCanvasToBpmn(
 
     // bpmn:MessageFlow lives on the Collaboration. Each one references
     // the flow-node moddle object at each endpoint (NOT wrapped in a
-    // Process — Collaboration is an independent scope).
+    // Process — Collaboration is an independent scope). BPMN 2.0 §8.3.3
+    // requires message flows to cross a pool boundary — drop + warn on
+    // same-pool or dangling-endpoint cases so the XML stays valid.
     const messageFlowEls: ModdleElement[] = [];
+    let sameMsgDropped = 0;
     for (const e of messageFlowEdges) {
       const sourceEl = nodeElById.get(e.source);
       const targetEl = nodeElById.get(e.target);
       if (!sourceEl || !targetEl) continue;
+      const sp = poolOf(e.source);
+      const tp = poolOf(e.target);
+      // Adoption moved orphans into firstPoolId earlier, so a pool lookup
+      // that still returns null for either endpoint means the endpoint
+      // wasn't a registered flow-node — bail. sp===tp (same pool, or
+      // both orphans adopted into first pool) is invalid per spec.
+      if (!sp || !tp || sp === tp) {
+        sameMsgDropped++;
+        continue;
+      }
       const attrs: Record<string, unknown> = {
         id: e.id,
         sourceRef: sourceEl,
@@ -502,6 +515,11 @@ export async function serializeCanvasToBpmn(
       const mfEl = moddle.create("bpmn:MessageFlow", attrs) as unknown as ModdleElement;
       messageFlowEls.push(mfEl);
       flowElById.set(e.id, mfEl);
+    }
+    if (sameMsgDropped > 0) {
+      warnings.push(
+        `Dropped ${sameMsgDropped} message flow(s) whose endpoints are in the same pool. BPMN 2.0 §8.3.3 requires message flows to cross a pool boundary.`,
+      );
     }
 
     const collaborationAttrs: Record<string, unknown> = {
