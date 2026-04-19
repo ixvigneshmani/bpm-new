@@ -117,13 +117,32 @@ export class AiService {
     tenantId: string;
     userId: string;
   }): Promise<ScaffoldResult> {
+    // Server-misconfig: 503 with no API key. Don't record a history row
+    // for this — it's not a tenant-observable event, it's an ops problem.
     if (!this.client) {
       throw new ServiceUnavailableException(
         "AI scaffolding is not configured on this server.",
       );
     }
 
-    this.enforceRateLimit(args.tenantId);
+    const requestStart = Date.now();
+
+    // Rate-limit + payload-too-large are user-observable failure modes
+    // that belong in the history so users can see why their request
+    // bounced. Capture them before we branch into the Claude call.
+    try {
+      this.enforceRateLimit(args.tenantId);
+    } catch (err) {
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        description: args.description,
+        status: "error",
+        errorMessage: this.formatErrorMessage(err as HttpException),
+        durationMs: Date.now() - requestStart,
+      });
+      throw err;
+    }
 
     // Guard the schema serialization before it reaches Claude — 10 MB
     // of nested JSON would pass class-validator's @IsObject but cost us
@@ -132,9 +151,18 @@ export class AiService {
     if (args.businessDocSchema && Object.keys(args.businessDocSchema).length > 0) {
       schemaJson = JSON.stringify(args.businessDocSchema, null, 2);
       if (schemaJson.length > MAX_SCHEMA_BYTES) {
-        throw new PayloadTooLargeException(
+        const err = new PayloadTooLargeException(
           `Business document schema exceeds ${MAX_SCHEMA_BYTES} bytes when serialized.`,
         );
+        this.recordInteractionAsync({
+          tenantId: args.tenantId,
+          userId: args.userId,
+          description: args.description,
+          status: "error",
+          errorMessage: this.formatErrorMessage(err),
+          durationMs: Date.now() - requestStart,
+        });
+        throw err;
       }
     }
 
@@ -161,7 +189,6 @@ export class AiService {
 
     const userMessage = this.userMessage(args.description, schemaJson);
 
-    const startedAt = Date.now();
     try {
       const response = await this.client.messages.create({
         model: MODEL,
@@ -180,7 +207,7 @@ export class AiService {
 
       const parsed = toolUse.input as ScaffoldResult;
       const sanitized = this.sanitize(parsed);
-      await this.recordInteraction({
+      this.recordInteractionAsync({
         tenantId: args.tenantId,
         userId: args.userId,
         description: args.description,
@@ -188,27 +215,47 @@ export class AiService {
         responseJson: sanitized as unknown as Record<string, unknown>,
         tokensIn: response.usage?.input_tokens ?? null,
         tokensOut: response.usage?.output_tokens ?? null,
-        durationMs: Date.now() - startedAt,
+        durationMs: Date.now() - requestStart,
       });
       return sanitized;
     } catch (err) {
       // Pass through anything we already mapped.
       const mapped = err instanceof HttpException ? err : this.mapAnthropicError(err);
-      await this.recordInteraction({
+      this.recordInteractionAsync({
         tenantId: args.tenantId,
         userId: args.userId,
         description: args.description,
         status: "error",
-        errorMessage: `${mapped.getStatus()}: ${mapped.message}`,
-        durationMs: Date.now() - startedAt,
+        errorMessage: this.formatErrorMessage(mapped),
+        durationMs: Date.now() - requestStart,
       });
       throw mapped;
     }
   }
 
-  /** Persist one scaffold attempt. Failures are swallowed — if the DB is
-   *  unavailable the user still gets their scaffold, we just lose the
-   *  history row. Logs at error level so ops notice persistent failures. */
+  /** Build the DB `errorMessage` from a NestJS HttpException. Only the
+   *  status + our own sanitized client-facing message are stored — raw
+   *  provider detail (request IDs, keys, stack) never reaches this path
+   *  because `mapAnthropicError` already substitutes a fixed string. */
+  private formatErrorMessage(err: HttpException): string {
+    return `${err.getStatus()}: ${err.message}`.slice(0, 500);
+  }
+
+  /** Fire-and-forget persistence. Returning void means a slow or down
+   *  database cannot add latency to the user's HTTP response — the
+   *  insert continues in the background and logs on failure. */
+  private recordInteractionAsync(row: Parameters<AiService["recordInteraction"]>[0]): void {
+    void this.recordInteraction(row).catch((err: unknown) => {
+      this.logger.error(
+        "Failed to persist AI interaction",
+        (err as Error)?.stack,
+      );
+    });
+  }
+
+  /** Persist one scaffold attempt. Failures bubble up so the caller
+   *  (recordInteractionAsync) can log them; do not call this directly
+   *  from a request path — use the async wrapper. */
   private async recordInteraction(row: {
     tenantId: string;
     userId: string;
@@ -221,23 +268,19 @@ export class AiService {
     durationMs: number;
   }): Promise<void> {
     if (!this.db) return;
-    try {
-      await this.db.insert(aiInteractions).values({
-        tenantId: row.tenantId,
-        userId: row.userId,
-        kind: "scaffold-process",
-        description: row.description,
-        model: MODEL,
-        status: row.status,
-        responseJson: row.responseJson ?? null,
-        errorMessage: row.errorMessage ?? null,
-        tokensIn: row.tokensIn ?? null,
-        tokensOut: row.tokensOut ?? null,
-        durationMs: row.durationMs,
-      });
-    } catch (err) {
-      this.logger.error("Failed to persist AI interaction", err as Error);
-    }
+    await this.db.insert(aiInteractions).values({
+      tenantId: row.tenantId,
+      userId: row.userId,
+      kind: "scaffold-process",
+      description: row.description,
+      model: MODEL,
+      status: row.status,
+      responseJson: row.responseJson ?? null,
+      errorMessage: row.errorMessage ?? null,
+      tokensIn: row.tokensIn ?? null,
+      tokensOut: row.tokensOut ?? null,
+      durationMs: row.durationMs,
+    });
   }
 
   /** Map Anthropic SDK errors to sensible HTTP responses without

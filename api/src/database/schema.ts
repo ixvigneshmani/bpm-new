@@ -314,5 +314,10 @@ export const aiInteractions = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("AI_INTERACTION_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt)],
+  (t) => [
+    index("AI_INTERACTIONS_TENANT_CREATED_IDX").on(
+      t.tenantId,
+      t.createdAt.desc(),
+    ),
+  ],
 );

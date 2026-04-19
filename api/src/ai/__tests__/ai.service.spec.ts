@@ -22,6 +22,12 @@ function makeFakeDb(opts: { failOnInsert?: boolean } = {}): FakeDb {
   return { insert, values } as unknown as FakeDb;
 }
 
+/** Fire-and-forget persistence means the insert runs on a microtask
+ *  after the caller's promise resolves. Flush the queue before asserting. */
+async function flushPersistence(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 function makeService(
   opts: { apiKey?: string | null; db?: FakeDb | null } = {},
 ): AiService {
@@ -219,6 +225,7 @@ describe("AiService.scaffoldProcess — input guards", () => {
       userId: "user-X",
     });
 
+    await flushPersistence();
     expect(db.insert).toHaveBeenCalledTimes(1);
     const row = db.values.mock.calls[0][0];
     expect(row).toMatchObject({
@@ -253,6 +260,7 @@ describe("AiService.scaffoldProcess — input guards", () => {
       }),
     ).rejects.toBeDefined();
 
+    await flushPersistence();
     expect(db.insert).toHaveBeenCalledTimes(1);
     const row = db.values.mock.calls[0][0];
     expect(row).toMatchObject({ tenantId: "tenant-E", status: "error" });
@@ -290,6 +298,7 @@ describe("AiService.scaffoldProcess — input guards", () => {
       userId: "user-Y",
     });
     expect(out.nodes).toHaveLength(1);
+    await flushPersistence();
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
@@ -311,5 +320,91 @@ describe("AiService.scaffoldProcess — input guards", () => {
         userId: "u1",
       }),
     ).rejects.toMatchObject({ status: 429 });
+  });
+
+  it("persists a history row when the tenant rate limit trips", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
+    const bucket: number[] = [];
+    const now = Date.now();
+    for (let i = 0; i < 20; i++) bucket.push(now - i * 1000);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).rateBuckets.set("tenant-RL", bucket);
+
+    await expect(
+      service.scaffoldProcess({
+        description: "test description that is long enough",
+        tenantId: "tenant-RL",
+        userId: "u1",
+      }),
+    ).rejects.toMatchObject({ status: 429 });
+
+    await flushPersistence();
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const row = db.values.mock.calls[0][0];
+    expect(row).toMatchObject({ tenantId: "tenant-RL", status: "error" });
+    expect(row.errorMessage).toMatch(/^429:/);
+  });
+
+  it("persists a history row when the business-doc schema is too large", async () => {
+    const db = makeFakeDb();
+    const service = makeService({ db });
+    const big: Record<string, string> = {};
+    for (let i = 0; i < 500; i++) big[`field_${i}`] = "x".repeat(100);
+
+    await expect(
+      service.scaffoldProcess({
+        description: "test",
+        businessDocSchema: big,
+        tenantId: "tenant-413",
+        userId: "u1",
+      }),
+    ).rejects.toMatchObject({ status: 413 });
+
+    await flushPersistence();
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const row = db.values.mock.calls[0][0];
+    expect(row).toMatchObject({ tenantId: "tenant-413", status: "error" });
+    expect(row.errorMessage).toMatch(/^413:/);
+  });
+
+  it("slow DB insert does not block the HTTP response", async () => {
+    let resolveInsert!: () => void;
+    const slowValues = vi.fn(
+      () => new Promise<void>((r) => { resolveInsert = r; }),
+    );
+    const db = { insert: vi.fn(() => ({ values: slowValues })) } as unknown as FakeDb;
+    const service = makeService({ db });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (service as any).client = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [
+            {
+              type: "tool_use",
+              input: {
+                processName: "Ok",
+                processDescription: "",
+                nodes: [{ id: "s", type: "startEvent", label: "S", position: { x: 0, y: 0 } }],
+                edges: [],
+                notes: "",
+              },
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        })),
+      },
+    };
+
+    // Response resolves even while the DB insert is still pending.
+    const out = await service.scaffoldProcess({
+      description: "test description long enough",
+      tenantId: "tenant-S",
+      userId: "u1",
+    });
+    expect(out.nodes).toHaveLength(1);
+    expect(slowValues).toHaveBeenCalledTimes(1);
+    // Unblock the stub so vitest doesn't leak a pending promise.
+    resolveInsert();
   });
 });
