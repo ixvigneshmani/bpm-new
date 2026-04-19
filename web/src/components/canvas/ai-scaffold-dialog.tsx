@@ -5,17 +5,18 @@
  * then applies (replacing the current canvas) or regenerates.
  *
  * Deliberate choices for the v1 UX:
- *  - Apply fully replaces the canvas. Merging with existing nodes
- *    risks collisions + confusing layout; a "regenerate in place"
- *    flow is a follow-up.
+ *  - Apply fully replaces the canvas. When the canvas is non-empty
+ *    we gate Apply behind a confirm prompt so users don't lose work.
  *  - We surface the AI's `notes` so the user has a readable summary
  *    before the canvas changes. No diff UI yet.
+ *  - Generate uses AbortController: closing the modal cancels the
+ *    request, and a second Generate before the first returns cancels
+ *    the stale request so a late response can't clobber a newer one.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useState, type CSSProperties } from "react";
-import type { Node, Edge } from "@xyflow/react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useReactFlow, type Node, type Edge } from "@xyflow/react";
 import useCanvasStore from "../../store/canvas-store";
-import { apiPost } from "../../lib/api";
 
 type ScaffoldResponse = {
   processName: string;
@@ -24,6 +25,9 @@ type ScaffoldResponse = {
   edges: Edge[];
   notes: string;
 };
+
+const API_BASE = "/api";
+const MAX_DESCRIPTION = 4000;
 
 const overlayStyle: CSSProperties = {
   position: "fixed",
@@ -45,47 +49,149 @@ const cardStyle: CSSProperties = {
 
 type Props = { onClose: () => void };
 
+/** Map HTTP-status + provider-error text into a short, user-readable
+ *  sentence. Keeps raw Anthropic messages + request IDs out of the UI. */
+function humanizeError(status: number | null, raw: string): string {
+  if (status === 429) return "Too many AI requests right now. Try again in a moment.";
+  if (status === 401 || status === 500) return "AI service isn't available. Contact your admin.";
+  if (status === 502 || status === 503) return "AI service is temporarily unreachable. Try again shortly.";
+  if (status === 413) return "Business document is too large for AI to process.";
+  if (status === 400) return "AI couldn't handle that request. Try rephrasing.";
+  if (/aborted|AbortError/i.test(raw)) return "Request cancelled.";
+  if (/Failed to fetch|NetworkError/i.test(raw)) return "Network error. Check your connection and try again.";
+  return "Something went wrong. Try again.";
+}
+
 export default function AiScaffoldDialog({ onClose }: Props) {
   const loadCanvasData = useCanvasStore((s) => s.loadCanvasData);
   const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
   const setDocumentDirty = useCanvasStore((s) => s.setDocumentDirty);
   const businessDoc = useCanvasStore((s) => s.processMeta.businessDoc);
+  const existingNodeCount = useCanvasStore((s) => s.nodes.length);
+  const { fitView } = useReactFlow();
 
   const [description, setDescription] = useState("");
   const [result, setResult] = useState<ScaffoldResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canGenerate = description.trim().length >= 8 && !busy;
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const titleId = useRef(`ai-scaffold-title-${Math.random().toString(36).slice(2, 8)}`);
+
+  // Cleanup on unmount: abort any in-flight request and flip the
+  // mounted flag so stale responses can't setState on a dead tree.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  // Focus the textarea on open for keyboard users.
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
+  // Esc closes; prevent close while busy so users don't lose a
+  // half-completed request without understanding it was cancelled.
+  const handleClose = useCallback(() => {
+    if (busy) abortRef.current?.abort();
+    onClose();
+  }, [busy, onClose]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        handleClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [handleClose]);
+
+  const hasSchema = !!(businessDoc && Object.keys(businessDoc).length > 0);
+  const canGenerate = description.trim().length >= 8 && description.length <= MAX_DESCRIPTION && !busy;
 
   async function generate() {
+    // Cancel any previous request — stale responses can't update state
+    // because (a) we overwrite abortRef here and (b) the mountedRef
+    // gate below skips setState after unmount.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setBusy(true);
     setError(null);
+
+    const token = localStorage.getItem("flowpro_token");
+    const body: Record<string, unknown> = { description };
+    if (hasSchema) body.businessDocSchema = businessDoc;
+
+    let status: number | null = null;
     try {
-      const res = await apiPost<ScaffoldResponse>("/ai/scaffold-process", {
-        description,
-        ...(businessDoc ? { businessDocSchema: businessDoc } : {}),
+      const res = await fetch(`${API_BASE}/ai/scaffold-process`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
       });
-      setResult(res);
+      status = res.status;
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({ message: "Request failed" }));
+        throw new Error(errBody.message || `HTTP ${res.status}`);
+      }
+      const payload: ScaffoldResponse = await res.json();
+      if (!mountedRef.current || controller.signal.aborted) return;
+      setResult(payload);
     } catch (e) {
-      setError((e as Error).message);
+      if (!mountedRef.current || controller.signal.aborted) return;
+      setError(humanizeError(status, (e as Error).message));
     } finally {
-      setBusy(false);
+      if (mountedRef.current && abortRef.current === controller) {
+        setBusy(false);
+      }
     }
   }
 
   function apply() {
-    if (!result) return;
+    if (!result || result.nodes.length === 0) return;
+    if (existingNodeCount > 0) {
+      // One explicit confirm per session beats a quiet 10px footer
+      // hint for the class of user who has real work on the canvas.
+      const ok = window.confirm(
+        `Replace the ${existingNodeCount} element(s) currently on the canvas with the AI scaffold? This cannot be undone.`,
+      );
+      if (!ok) return;
+    }
     loadCanvasData(result.nodes, result.edges);
     if (result.processName) {
       setProcessMeta({ name: result.processName, description: result.processDescription || "" });
     }
     setDocumentDirty(true);
     onClose();
+    // Auto-fit the new graph so Claude's layout guesses never leave
+    // the canvas blank at the old viewport.
+    setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
   }
 
+  const emptyResult = result !== null && result.nodes.length === 0;
+  const charCount = description.length;
+
   return (
-    <div style={overlayStyle} role="dialog" aria-modal="true" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div
+      style={overlayStyle}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId.current}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) handleClose(); }}
+    >
       <div style={cardStyle} onMouseDown={(e) => e.stopPropagation()}>
         {/* Header */}
         <div style={{
@@ -94,7 +200,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           display: "flex", alignItems: "center", justifyContent: "space-between",
         }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "#101828", display: "flex", alignItems: "center", gap: 8 }}>
+            <div id={titleId.current} style={{ fontSize: 16, fontWeight: 700, color: "#101828", display: "flex", alignItems: "center", gap: 8 }}>
               <span aria-hidden>✨</span> AI Process Scaffold
             </div>
             <div style={{ fontSize: 12, color: "#667085", marginTop: 2 }}>
@@ -103,7 +209,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             style={{ width: 28, height: 28, borderRadius: 6, border: "none", background: "transparent", cursor: "pointer", color: "#667085" }}
             aria-label="Close"
           >
@@ -114,10 +220,14 @@ export default function AiScaffoldDialog({ onClose }: Props) {
         {/* Body */}
         <div style={{ flex: 1, padding: "18px 28px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-              Description
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", display: "flex", justifyContent: "space-between" }}>
+              <span>Description</span>
+              <span style={{ color: charCount > MAX_DESCRIPTION ? "#B42318" : "#98a2b3", fontWeight: 500 }}>
+                {charCount}/{MAX_DESCRIPTION}
+              </span>
             </span>
             <textarea
+              ref={textareaRef}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Example: 3-step invoice approval with manager review, finance check for amounts over $1000, and director sign-off. Escalate if no response in 48h."
@@ -132,14 +242,44 @@ export default function AiScaffoldDialog({ onClose }: Props) {
               disabled={busy}
             />
             <span style={{ fontSize: 10, color: "#98a2b3" }}>
-              {businessDoc
+              {hasSchema
                 ? "Business document schema is attached — Claude will use your real variable names."
                 : "Tip: attach a business document first to get richer gateway conditions."}
             </span>
           </label>
 
+          {busy && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                padding: "10px 14px", borderRadius: 8,
+                background: "#EEF2FF", border: "1px solid #C7D2FE",
+                color: "#4F46E5", fontSize: 12,
+                display: "flex", alignItems: "center", gap: 10,
+              }}
+            >
+              <Spinner />
+              <span>
+                Generating scaffold… this usually takes 5–20 seconds.
+                {" "}
+                <button
+                  type="button"
+                  onClick={() => abortRef.current?.abort()}
+                  style={{
+                    background: "none", border: "none", padding: 0,
+                    color: "#4F46E5", cursor: "pointer", textDecoration: "underline",
+                    fontSize: 12, fontFamily: "inherit", fontWeight: 600,
+                  }}
+                >
+                  Cancel
+                </button>
+              </span>
+            </div>
+          )}
+
           {error && (
-            <div style={{
+            <div role="alert" style={{
               padding: "8px 12px", borderRadius: 6,
               background: "#FEE4E2", color: "#B42318",
               fontSize: 12, lineHeight: 1.4,
@@ -148,7 +288,17 @@ export default function AiScaffoldDialog({ onClose }: Props) {
             </div>
           )}
 
-          {result && (
+          {emptyResult && (
+            <div role="alert" style={{
+              padding: "12px 14px", borderRadius: 8,
+              background: "#FEF3C7", color: "#92400E",
+              fontSize: 12, lineHeight: 1.5,
+            }}>
+              AI returned an empty scaffold — try rephrasing your description with specific steps, roles, or conditions.
+            </div>
+          )}
+
+          {result && !emptyResult && (
             <div style={{
               padding: "12px 14px", borderRadius: 8,
               background: "#F8FAFC", border: "1px solid #E5E7EB",
@@ -157,7 +307,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
               <div style={{ fontSize: 12, fontWeight: 600, color: "#101828" }}>
                 {result.processName || "Scaffold ready"}
               </div>
-              <div style={{ fontSize: 11, color: "#475467", lineHeight: 1.5 }}>
+              <div style={{ fontSize: 11, color: "#475467", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                 {result.notes}
               </div>
               <div style={{ fontSize: 10, color: "#667085", display: "flex", gap: 12 }}>
@@ -176,16 +326,17 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           gap: 12,
         }}>
           <div style={{ fontSize: 10, color: "#98a2b3" }}>
-            {result ? "Applying replaces the current canvas." : ""}
+            {result && !emptyResult && existingNodeCount > 0
+              ? `Applying replaces ${existingNodeCount} existing element(s).`
+              : ""}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               style={btnStyle("ghost")}
-              disabled={busy}
             >
-              Cancel
+              {busy ? "Cancel" : "Close"}
             </button>
             {!result ? (
               <button
@@ -194,14 +345,19 @@ export default function AiScaffoldDialog({ onClose }: Props) {
                 disabled={!canGenerate}
                 style={btnStyle("primary", !canGenerate)}
               >
-                {busy ? "Generating…" : "Generate"}
+                Generate
               </button>
             ) : (
               <>
                 <button type="button" onClick={generate} disabled={busy} style={btnStyle("ghost", busy)}>
-                  {busy ? "Regenerating…" : "Regenerate"}
+                  Regenerate
                 </button>
-                <button type="button" onClick={apply} style={btnStyle("primary")}>
+                <button
+                  type="button"
+                  onClick={apply}
+                  disabled={emptyResult}
+                  style={btnStyle("primary", emptyResult)}
+                >
                   Apply to canvas
                 </button>
               </>
@@ -210,6 +366,17 @@ export default function AiScaffoldDialog({ onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="#C7D2FE" strokeWidth="3" fill="none" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="#4F46E5" strokeWidth="3" fill="none" strokeLinecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+      </path>
+    </svg>
   );
 }
 

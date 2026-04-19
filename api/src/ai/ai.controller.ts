@@ -13,13 +13,15 @@ export class AiController {
    *  Turn a plain-language description into a canvas-ready
    *  {nodes, edges} payload. The frontend loads the result via
    *  `loadCanvasData` — user can accept, edit, or regenerate.
-   *  Tenant-scoped via the JWT guard; the AI call itself is stateless
-   *  so no tenant row is written here. */
+   *  Tenant-scoped via the JWT guard; rate-limited per tenant inside
+   *  the service. */
   @Post("scaffold-process")
-  scaffold(@Req() _req: AuthenticatedRequest, @Body() dto: ScaffoldProcessDto) {
+  scaffold(@Req() req: AuthenticatedRequest, @Body() dto: ScaffoldProcessDto) {
     return this.ai.scaffoldProcess({
       description: dto.description,
       businessDocSchema: dto.businessDocSchema,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
     });
   }
 }
