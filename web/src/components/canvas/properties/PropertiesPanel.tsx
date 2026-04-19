@@ -15,6 +15,11 @@ import type {
   ManualTaskData,
   BusinessRuleTaskData,
   CallActivityData,
+  SubProcessData,
+  EventSubProcessData,
+  TransactionData,
+  AdHocSubProcessData,
+  TransactionMethod,
   ExclusiveGatewayData,
   InclusiveGatewayData,
   EventBasedGatewayData,
@@ -49,12 +54,23 @@ import ManualInstructionsSection from "./sections/ManualInstructionsSection";
 import BusinessRuleSection from "./sections/BusinessRuleSection";
 import CallActivitySection from "./sections/CallActivitySection";
 import MultiInstanceSection from "./sections/MultiInstanceSection";
+import SubprocessConfigSection from "./sections/SubprocessConfigSection";
 
-/** BPMN types that support activity markers (loop / multi-instance / compensation). */
+/** BPMN types that support activity markers (loop / multi-instance / compensation).
+ *  Subprocess variants are valid boundary-event hosts per BPMN 2.0 §10.5.5 and
+ *  carry multi-instance markers per §10.5.1, so they live here too. */
 const ACTIVITY_TYPES = new Set([
   "userTask", "serviceTask", "scriptTask", "sendTask", "receiveTask",
   "manualTask", "businessRuleTask", "callActivity",
+  "subProcess", "eventSubProcess", "transaction", "adHocSubProcess",
 ]);
+
+const SUBPROCESS_VARIANT_BY_TYPE: Record<string, "subProcess" | "eventSubProcess" | "transaction" | "adHocSubProcess"> = {
+  subProcess: "subProcess",
+  eventSubProcess: "eventSubProcess",
+  transaction: "transaction",
+  adHocSubProcess: "adHocSubProcess",
+};
 
 /** Maps our internal bpmnType for event nodes to the variant the
  *  EventDefinitionSection uses to filter allowed definition kinds. */
@@ -332,6 +348,34 @@ export default function PropertiesPanel() {
         <BusinessRuleSection
           rule={d.rule}
           onChange={(r: BusinessRuleConfig) => update({ rule: r })}
+        />
+      ),
+    });
+  }
+
+  const subprocessVariant = SUBPROCESS_VARIANT_BY_TYPE[bpmnType];
+  if (subprocessVariant) {
+    const d = data as unknown as SubProcessData | EventSubProcessData | TransactionData | AdHocSubProcessData;
+    const adhoc = subprocessVariant === "adHocSubProcess" ? (d as AdHocSubProcessData) : undefined;
+    const tx = subprocessVariant === "transaction" ? (d as TransactionData) : undefined;
+    sections.push({
+      id: "subprocessConfig",
+      title: "Subprocess",
+      icon: <SectionIcon d="M4 5a1 1 0 011-1h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5z" extra={<path d="M9 10v4M12 8v8M15 10v4" />} />,
+      defaultOpen: true,
+      content: (
+        <SubprocessConfigSection
+          variant={subprocessVariant}
+          isExpanded={d.isExpanded !== false}
+          onIsExpandedChange={(v) => update({ isExpanded: v })}
+          ordering={adhoc?.ordering}
+          onOrderingChange={
+            adhoc ? (v) => update({ ordering: v }) : undefined
+          }
+          method={tx?.method}
+          onMethodChange={
+            tx ? (v: TransactionMethod | undefined) => update({ method: v }) : undefined
+          }
         />
       ),
     });
