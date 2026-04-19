@@ -21,7 +21,12 @@ import type { Node, Edge } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
 import { INTERNAL_TO_BPMN, getSize, isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "./element-map";
 import { flowproDescriptor } from "./flowpro-descriptor";
-import { buildEventDefinitionElements } from "./event-definitions";
+import {
+  buildEventDefinitionElements,
+  collectRootDeclarationNames,
+  emptyRootDeclarations,
+  rootDeclarationsAsArray,
+} from "./event-definitions";
 import { packRichData } from "./extensions";
 import type { EventDefinition } from "../../types/bpmn-node-data";
 
@@ -52,6 +57,18 @@ export async function serializeCanvasToBpmn(
   const processId = opts.processId || "Process_1";
   const processName = opts.processName || "Process";
   const definitionsId = opts.definitionsId || `Definitions_${Date.now()}`;
+
+  // ─── Root declarations (Message / Signal / Error) ─────────────────
+  // Pre-scan every node's data and allocate one root element per unique
+  // name/code. buildEventDefinitionElements then resolves refs against
+  // this registry so the emitted XML carries `messageRef`/`signalRef`/
+  // `errorRef` — required for interop with other BPMN tools.
+  const rootDecls = emptyRootDeclarations();
+  collectRootDeclarationNames(
+    moddle,
+    rootDecls,
+    nodes.map((n) => (n.data || {}) as Record<string, unknown>),
+  );
 
   // ─── Index edges per endpoint ──────────────────────────────────────
   const outgoingByNode = new Map<string, string[]>();
@@ -162,6 +179,7 @@ export async function serializeCanvasToBpmn(
       const defs = buildEventDefinitionElements(
         moddle,
         data.eventDefinition as EventDefinition | undefined,
+        rootDecls,
       );
       if (defs.length > 0) el.eventDefinitions = defs;
     }
@@ -392,10 +410,13 @@ export async function serializeCanvasToBpmn(
     plane,
   });
 
+  // Process must come AFTER Message/Signal/Error in rootElements — some
+  // importers resolve refs positionally and complain if the declaration
+  // appears after its first reference.
   const definitions = moddle.create("bpmn:Definitions", {
     id: definitionsId,
     targetNamespace: "http://flowpro.io/bpmn",
-    rootElements: [processEl],
+    rootElements: [...rootDeclarationsAsArray(rootDecls), processEl],
     diagrams: [diagram],
   });
 

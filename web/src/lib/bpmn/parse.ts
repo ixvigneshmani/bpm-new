@@ -18,7 +18,7 @@ import { BpmnModdle } from "bpmn-moddle";
 import { BPMN_TO_INTERNAL, getSize, isSubprocessType } from "./element-map";
 import { createDefaultNodeData } from "../../types/bpmn-node-data";
 import { flowproDescriptor } from "./flowpro-descriptor";
-import { readEventDefinition } from "./event-definitions";
+import { readEventDefinition, resolveRootDeclarations } from "./event-definitions";
 import { unpackRichData } from "./extensions";
 
 type ModdleElement = {
@@ -62,6 +62,10 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
   if (!process) {
     return { nodes: [], edges: [], processId: null, processName: null, warnings: [...warnings, "No bpmn:Process found in XML"] };
   }
+
+  // Resolve root Message/Signal/Error declarations so event definitions
+  // can map their *Ref back to user-facing names/codes.
+  const resolvedDecls = resolveRootDeclarations(rootElements);
 
   // ─── Index DI shapes/edges by the element they describe ───────────
   const shapeByRef = new Map<string, ModdleElement>();
@@ -175,7 +179,7 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
         internalType === "intermediateThrowEvent" ||
         internalType === "boundaryEvent"
       ) {
-        baseData.eventDefinition = readEventDefinition(el);
+        baseData.eventDefinition = readEventDefinition(el, resolvedDecls);
       }
 
       if (internalType === "boundaryEvent") {
