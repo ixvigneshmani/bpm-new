@@ -42,6 +42,18 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
         type: "terminateEvent", label: "Termint", color: "#DC2626", shape: "circle-bold",
         icon: <circle cx="12" cy="12" r="5" fill="#DC2626" stroke="none" />,
       },
+      {
+        type: "intermediateCatchEvent", label: "Catch", color: "#0891B2", shape: "circle",
+        icon: <circle cx="12" cy="12" r="5" fill="none" stroke="#0891B2" strokeWidth="1.5" />,
+      },
+      {
+        type: "intermediateThrowEvent", label: "Throw", color: "#9333EA", shape: "circle",
+        icon: <circle cx="12" cy="12" r="5" fill="#9333EA" stroke="none" />,
+      },
+      {
+        type: "boundaryEvent", label: "Boundary", color: "#C2410C", shape: "circle",
+        icon: <circle cx="12" cy="12" r="5" fill="none" stroke="#C2410C" strokeWidth="1.5" strokeDasharray="2 1.5" />,
+      },
     ],
   },
   {

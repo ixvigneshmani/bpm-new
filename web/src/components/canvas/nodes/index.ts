@@ -5,6 +5,9 @@
 
 import StartEventNode from "./StartEventNode";
 import EndEventNode from "./EndEventNode";
+import IntermediateCatchEventNode from "./IntermediateCatchEventNode";
+import IntermediateThrowEventNode from "./IntermediateThrowEventNode";
+import BoundaryEventNode from "./BoundaryEventNode";
 import UserTaskNode from "./UserTaskNode";
 import ServiceTaskNode from "./ServiceTaskNode";
 import ScriptTaskNode from "./ScriptTaskNode";
@@ -21,6 +24,9 @@ import EventBasedGatewayNode from "./EventBasedGatewayNode";
 export const nodeTypes = {
   startEvent: StartEventNode,
   endEvent: EndEventNode,
+  intermediateCatchEvent: IntermediateCatchEventNode,
+  intermediateThrowEvent: IntermediateThrowEventNode,
+  boundaryEvent: BoundaryEventNode,
   userTask: UserTaskNode,
   serviceTask: ServiceTaskNode,
   scriptTask: ScriptTaskNode,

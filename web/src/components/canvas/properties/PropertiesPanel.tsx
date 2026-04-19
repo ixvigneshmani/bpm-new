@@ -6,8 +6,7 @@
 import { useState } from "react";
 import useCanvasStore from "../../../store/canvas-store";
 import type {
-  StartEventData,
-  EndEventData,
+  BoundaryEventData,
   UserTaskData,
   ServiceTaskData,
   ScriptTaskData,
@@ -55,6 +54,12 @@ import MultiInstanceSection from "./sections/MultiInstanceSection";
 const ACTIVITY_TYPES = new Set([
   "userTask", "serviceTask", "scriptTask", "sendTask", "receiveTask",
   "manualTask", "businessRuleTask", "callActivity",
+]);
+
+/** All event-kind bpmnTypes that carry an eventDefinition. */
+const EVENT_TYPES = new Set([
+  "startEvent", "endEvent",
+  "intermediateCatchEvent", "intermediateThrowEvent", "boundaryEvent",
 ]);
 
 /** Maps a gateway bpmnType to its behavioural kind. */
@@ -115,8 +120,8 @@ export default function PropertiesPanel() {
   });
 
   // Node-specific sections
-  if (bpmnType === "startEvent") {
-    const d = data as unknown as StartEventData;
+  if (EVENT_TYPES.has(bpmnType)) {
+    const d = data as unknown as { eventDefinition?: EventDefinition };
     sections.push({
       id: "eventDef",
       title: "Event Definition",
@@ -126,25 +131,63 @@ export default function PropertiesPanel() {
         <EventDefinitionSection
           definition={d.eventDefinition || { kind: "none" }}
           onChange={(def: EventDefinition) => update({ eventDefinition: def })}
-          isStart
+          isStart={bpmnType === "startEvent"}
         />
       ),
     });
   }
 
-  if (bpmnType === "endEvent") {
-    const d = data as unknown as EndEventData;
+  // Boundary-specific config
+  if (bpmnType === "boundaryEvent") {
+    const d = data as unknown as BoundaryEventData;
+    const activities = nodes.filter((n) =>
+      ACTIVITY_TYPES.has((n.data as { bpmnType?: string })?.bpmnType || n.type || "")
+    );
     sections.push({
-      id: "eventDef",
-      title: "Event Definition",
-      icon: <SectionIcon d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z" />,
+      id: "boundaryConfig",
+      title: "Attachment",
+      icon: <SectionIcon d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" extra={<path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />} />,
       defaultOpen: true,
       content: (
-        <EventDefinitionSection
-          definition={d.eventDefinition || { kind: "none" }}
-          onChange={(def: EventDefinition) => update({ eventDefinition: def })}
-          isStart={false}
-        />
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+              Attached to activity
+            </label>
+            <select
+              value={d.attachedToRef || ""}
+              onChange={(e) => update({ attachedToRef: e.target.value || undefined })}
+              className="w-full rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-700 outline-none focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+            >
+              <option value="">— None (select host) —</option>
+              {activities.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {((a.data as { label?: string })?.label as string) || a.id}
+                </option>
+              ))}
+            </select>
+            {!d.attachedToRef && (
+              <div className="mt-1 text-[10px] text-amber-600">
+                Boundary events must be attached to an activity (task or subprocess).
+              </div>
+            )}
+          </div>
+
+          <label className="flex items-start gap-2 text-[12px] text-gray-700">
+            <input
+              type="checkbox"
+              checked={d.cancelActivity !== false}
+              onChange={(e) => update({ cancelActivity: e.target.checked })}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="font-medium">Interrupting</span>
+              <span className="block text-[10px] text-gray-500">
+                When checked, the host activity is cancelled when this event fires. Uncheck for non-interrupting (dashed ring).
+              </span>
+            </span>
+          </label>
+        </div>
       ),
     });
   }

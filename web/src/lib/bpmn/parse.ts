@@ -146,11 +146,27 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     if (bounds?.width && bounds.width !== size.width) baseData.width = bounds.width;
     if (bounds?.height && bounds.height !== size.height) baseData.height = bounds.height;
 
-    // Event definitions → baseData.eventDefinition (only meaningful for
-    // start/end events today; a future boundary/intermediate event parse
-    // would read the same way).
-    if (internalType === "startEvent" || internalType === "endEvent") {
+    // Event definitions → baseData.eventDefinition for any event kind.
+    if (
+      internalType === "startEvent" ||
+      internalType === "endEvent" ||
+      internalType === "intermediateCatchEvent" ||
+      internalType === "intermediateThrowEvent" ||
+      internalType === "boundaryEvent"
+    ) {
       baseData.eventDefinition = readEventDefinition(el);
+    }
+
+    // Boundary event: attachedToRef + cancelActivity.
+    if (internalType === "boundaryEvent") {
+      const attached = el.attachedToRef;
+      const attachedId =
+        typeof attached === "string"
+          ? attached
+          : (attached as ModdleElement | undefined)?.id;
+      if (attachedId) baseData.attachedToRef = attachedId;
+      // Spec default is true; only persist when explicitly false.
+      if (el.cancelActivity === false) baseData.cancelActivity = false;
     }
 
     // Merge rich data from extensionElements last so our defaults win

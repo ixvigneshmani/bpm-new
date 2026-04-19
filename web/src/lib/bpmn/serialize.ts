@@ -82,13 +82,31 @@ export async function serializeCanvasToBpmn(
       el.instantiate = true;
     }
 
-    // Event definitions on start / end events
-    if (bpmnType === "bpmn:StartEvent" || bpmnType === "bpmn:EndEvent") {
+    // Event definitions on any event element (start, end, intermediate
+    // catch/throw, boundary).
+    if (
+      bpmnType === "bpmn:StartEvent" ||
+      bpmnType === "bpmn:EndEvent" ||
+      bpmnType === "bpmn:IntermediateCatchEvent" ||
+      bpmnType === "bpmn:IntermediateThrowEvent" ||
+      bpmnType === "bpmn:BoundaryEvent"
+    ) {
       const defs = buildEventDefinitionElements(
         moddle,
         data.eventDefinition as EventDefinition | undefined,
       );
       if (defs.length > 0) el.eventDefinitions = defs;
+    }
+
+    // Boundary event: attachedToRef + cancelActivity.
+    if (bpmnType === "bpmn:BoundaryEvent") {
+      const attachedToRef = data.attachedToRef;
+      if (typeof attachedToRef === "string" && attachedToRef.length > 0) {
+        el._pendingAttachedToRef = attachedToRef;
+      }
+      // Default per spec is true (interrupting). Only emit when explicitly
+      // non-interrupting to keep the XML minimal.
+      if (data.cancelActivity === false) el.cancelActivity = false;
     }
 
     // Rich node data → bpmn:extensionElements / flowpro:Data
@@ -177,6 +195,21 @@ export async function serializeCanvasToBpmn(
       if (target) el.default = target;
       delete el._pendingDefaultFlowId;
     }
+  }
+
+  // Resolve boundary-event attachedToRef now that host activity elements exist.
+  for (const el of flowElements) {
+    const pending = el._pendingAttachedToRef as string | undefined;
+    if (!pending) continue;
+    const host = nodeElById.get(pending);
+    if (host) {
+      el.attachedToRef = host;
+    } else {
+      warnings.push(
+        `Boundary event ${el.id} references unknown activity "${pending}"; attachedToRef dropped.`,
+      );
+    }
+    delete el._pendingAttachedToRef;
   }
 
   // Append sequence/message flows after the flow nodes so references resolve.

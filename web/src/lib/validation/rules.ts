@@ -58,6 +58,10 @@ export const disconnectedNodeRule: ValidationRule = {
       if (connected.has(n.id)) continue;
       // A single-node canvas is a work-in-progress, not an issue.
       if (nodes.length <= 1) continue;
+      // Boundary events intentionally have no incoming flows — they fire
+      // via their `attachedToRef` host activity. The boundary-attachment
+      // rule covers their own validation.
+      if (n.type === "boundaryEvent") continue;
       issues.push({
         id: `disconnected-node:${n.id}`,
         severity: "warning",
@@ -131,10 +135,44 @@ export const eventBasedTargetRule: ValidationRule = {
   },
 };
 
+export const boundaryAttachmentRule: ValidationRule = {
+  id: "boundary-missing-attachment",
+  name: "Boundary event not attached",
+  run: (nodes) => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "boundaryEvent") continue;
+      const data = n.data as { attachedToRef?: string; label?: string };
+      if (!data.attachedToRef) {
+        issues.push({
+          id: `boundary-missing-attachment:${n.id}`,
+          severity: "error",
+          ruleId: "boundary-missing-attachment",
+          nodeId: n.id,
+          message: `Boundary event "${labelOf(n as { id: string; data: Record<string, unknown> })}" isn't attached to an activity. Pick a host in the Attachment section.`,
+        });
+        continue;
+      }
+      if (!byId.has(data.attachedToRef)) {
+        issues.push({
+          id: `boundary-dangling-attachment:${n.id}`,
+          severity: "error",
+          ruleId: "boundary-missing-attachment",
+          nodeId: n.id,
+          message: `Boundary event "${labelOf(n as { id: string; data: Record<string, unknown> })}" references a deleted activity "${data.attachedToRef}".`,
+        });
+      }
+    }
+    return issues;
+  },
+};
+
 export const DEFAULT_RULES: ValidationRule[] = [
   noStartEventRule,
   noEndEventRule,
   disconnectedNodeRule,
   duplicateIdsRule,
   eventBasedTargetRule,
+  boundaryAttachmentRule,
 ];

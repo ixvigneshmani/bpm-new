@@ -9,6 +9,9 @@
 export const DEFAULT_SIZE: Record<string, { width: number; height: number }> = {
   startEvent: { width: 36, height: 36 },
   endEvent: { width: 36, height: 36 },
+  intermediateCatchEvent: { width: 36, height: 36 },
+  intermediateThrowEvent: { width: 36, height: 36 },
+  boundaryEvent: { width: 36, height: 36 },
   userTask: { width: 120, height: 80 },
   serviceTask: { width: 120, height: 80 },
   scriptTask: { width: 120, height: 80 },
@@ -27,6 +30,9 @@ export const DEFAULT_SIZE: Record<string, { width: number; height: number }> = {
 export const INTERNAL_TO_BPMN: Record<string, string> = {
   startEvent: "bpmn:StartEvent",
   endEvent: "bpmn:EndEvent",
+  intermediateCatchEvent: "bpmn:IntermediateCatchEvent",
+  intermediateThrowEvent: "bpmn:IntermediateThrowEvent",
+  boundaryEvent: "bpmn:BoundaryEvent",
   userTask: "bpmn:UserTask",
   serviceTask: "bpmn:ServiceTask",
   scriptTask: "bpmn:ScriptTask",

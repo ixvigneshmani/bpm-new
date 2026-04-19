@@ -327,6 +327,26 @@ export type EndEventData = BaseNodeData & {
   eventDefinition: EventDefinition;
 };
 
+export type IntermediateThrowEventData = BaseNodeData & {
+  bpmnType: "intermediateThrowEvent";
+  eventDefinition: EventDefinition;
+};
+
+export type IntermediateCatchEventData = BaseNodeData & {
+  bpmnType: "intermediateCatchEvent";
+  eventDefinition: EventDefinition;
+};
+
+export type BoundaryEventData = BaseNodeData & {
+  bpmnType: "boundaryEvent";
+  eventDefinition: EventDefinition;
+  /** ID of the host activity this boundary event is attached to. */
+  attachedToRef?: string;
+  /** When true (default, interrupting), the host activity is cancelled
+   *  when the event fires. When false, the host continues running. */
+  cancelActivity?: boolean;
+};
+
 export type UserTaskData = BaseNodeData & ActivityCommon & {
   bpmnType: "userTask";
   assignment?: Assignment;
@@ -399,6 +419,9 @@ export type EventBasedGatewayData = BaseNodeData & {
 export type BpmnNodeData =
   | StartEventData
   | EndEventData
+  | IntermediateThrowEventData
+  | IntermediateCatchEventData
+  | BoundaryEventData
   | UserTaskData
   | ServiceTaskData
   | ScriptTaskData
@@ -419,6 +442,9 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
   const defaults: Record<string, string> = {
     startEvent: "Start",
     endEvent: "End",
+    intermediateThrowEvent: "Throw",
+    intermediateCatchEvent: "Catch",
+    boundaryEvent: "Boundary",
     userTask: "User Task",
     serviceTask: "Service Task",
     scriptTask: "Script Task",
@@ -445,6 +471,12 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
       return { ...base, bpmnType: "startEvent", eventDefinition: { kind: "none" } } as StartEventData;
     case "endEvent":
       return { ...base, bpmnType: "endEvent", eventDefinition: { kind: "none" } } as EndEventData;
+    case "intermediateThrowEvent":
+      return { ...base, bpmnType: "intermediateThrowEvent", eventDefinition: { kind: "none" } } as IntermediateThrowEventData;
+    case "intermediateCatchEvent":
+      return { ...base, bpmnType: "intermediateCatchEvent", eventDefinition: { kind: "none" } } as IntermediateCatchEventData;
+    case "boundaryEvent":
+      return { ...base, bpmnType: "boundaryEvent", eventDefinition: { kind: "none" }, cancelActivity: true } as BoundaryEventData;
     case "userTask":
       return { ...base, ...activityBase, bpmnType: "userTask" } as UserTaskData;
     case "serviceTask":
@@ -503,6 +535,9 @@ export type NodeTheme = {
 export const NODE_THEMES: Record<string, NodeTheme> = {
   startEvent:       { color: "#16A34A", bgLight: "#F0FDF4", bgSelected: "#DCFCE7", borderLight: "#86EFAC", label: "Start Event",        iconBg: "#DCFCE7" },
   endEvent:         { color: "#DC2626", bgLight: "#FEF2F2", bgSelected: "#FEE2E2", borderLight: "#FCA5A5", label: "End Event",          iconBg: "#FEE2E2" },
+  intermediateThrowEvent: { color: "#9333EA", bgLight: "#FAF5FF", bgSelected: "#F3E8FF", borderLight: "#D8B4FE", label: "Throw Event",  iconBg: "#F3E8FF" },
+  intermediateCatchEvent: { color: "#0891B2", bgLight: "#ECFEFF", bgSelected: "#CFFAFE", borderLight: "#67E8F9", label: "Catch Event",  iconBg: "#CFFAFE" },
+  boundaryEvent:    { color: "#C2410C", bgLight: "#FFF7ED", bgSelected: "#FFEDD5", borderLight: "#FDBA74", label: "Boundary Event",    iconBg: "#FFEDD5" },
   userTask:         { color: "#6366F1", bgLight: "#EEF2FF", bgSelected: "#E0E7FF", borderLight: "#C7D2FE", label: "User Task",          iconBg: "#EEF2FF" },
   serviceTask:      { color: "#EA580C", bgLight: "#FFF7ED", bgSelected: "#FFEDD5", borderLight: "#FDBA74", label: "Service Task",       iconBg: "#FFF7ED" },
   scriptTask:       { color: "#0891B2", bgLight: "#ECFEFF", bgSelected: "#CFFAFE", borderLight: "#67E8F9", label: "Script Task",        iconBg: "#ECFEFF" },
