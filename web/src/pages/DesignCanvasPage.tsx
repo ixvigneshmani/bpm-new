@@ -77,13 +77,54 @@ function CanvasInner() {
   // base nodes (and React Flow's internal selection state) stay in sync.
   // BUT only force this when a single node is selected via panel — multi-select
   // (from React Flow's selection box) should pass through unchanged.
-  const nodes = selectedNodeId
-    ? rawNodes.map((n) =>
-        n.selected === (n.id === selectedNodeId)
-          ? n
-          : { ...n, selected: n.id === selectedNodeId }
-      )
-    : rawNodes;
+  //
+  // Collapsed subprocess frames hide their descendant subtree: children
+  // still exist in the store (positions preserved) but React Flow skips
+  // rendering them and their edges. Without this, `extent: 'parent'`
+  // clamps children into the collapsed 120×80 box, so expanding again
+  // would show a jammed pile.
+  const hiddenIds = (() => {
+    const byId = new Map(rawNodes.map((n) => [n.id, n]));
+    const collapsed = new Set<string>();
+    for (const n of rawNodes) {
+      const d = n.data as { isExpanded?: boolean };
+      const isSubprocess =
+        n.type === "subProcess" || n.type === "eventSubProcess" ||
+        n.type === "transaction" || n.type === "adHocSubProcess";
+      if (isSubprocess && d.isExpanded === false) collapsed.add(n.id);
+    }
+    if (collapsed.size === 0) return null;
+    const hidden = new Set<string>();
+    for (const n of rawNodes) {
+      let cur: string | undefined = n.parentId;
+      while (cur) {
+        if (collapsed.has(cur)) { hidden.add(n.id); break; }
+        cur = byId.get(cur)?.parentId;
+      }
+    }
+    return hidden;
+  })();
+
+  const nodes = (() => {
+    const base = selectedNodeId
+      ? rawNodes.map((n) =>
+          n.selected === (n.id === selectedNodeId)
+            ? n
+            : { ...n, selected: n.id === selectedNodeId }
+        )
+      : rawNodes;
+    if (!hiddenIds || hiddenIds.size === 0) return base;
+    return base.map((n) => (hiddenIds.has(n.id) ? { ...n, hidden: true } : n));
+  })();
+
+  const visibleEdges = (() => {
+    if (!hiddenIds || hiddenIds.size === 0) return edges;
+    return edges.map((e) =>
+      hiddenIds.has(e.source) || hiddenIds.has(e.target)
+        ? { ...e, hidden: true }
+        : e,
+    );
+  })();
 
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {
@@ -166,12 +207,16 @@ function CanvasInner() {
         y: event.clientY,
       });
 
-      // Don't auto-parent a subprocess into another subprocess on drop —
-      // user can drag it in afterward. It keeps the drop intuitive
-      // for the common "drag a task into a subprocess" case while
-      // letting "drag a subprocess to the root then reparent" stay
-      // explicit. Task/event/gateway types DO get auto-parented.
-      const parentId = isSubprocessType(type) ? null : findSubprocessAt(position);
+      // Auto-parent tasks / events / gateways dropped onto an expanded
+      // subprocess frame. Generic subprocess drops stay at root (user
+      // can drag in afterward) — *except* for eventSubProcess, which
+      // per BPMN 2.0 §10.11 must be nested inside a parent process or
+      // subprocess. Auto-parenting it matches that constraint.
+      const canAutoNestSubprocess = type === "eventSubProcess";
+      const parentId =
+        isSubprocessType(type) && !canAutoNestSubprocess
+          ? null
+          : findSubprocessAt(position);
       addNode(type, position, label, parentId || undefined);
     },
     [screenToFlowPosition, addNode, findSubprocessAt]
@@ -302,7 +347,7 @@ function CanvasInner() {
         {!showWizard && <BreadcrumbBar />}
         <ReactFlow
           nodes={nodes}
-          edges={edges}
+          edges={visibleEdges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}

@@ -23,11 +23,16 @@ type BaseSubprocessFrameProps = NodeProps & {
   adHoc?: boolean;
 };
 
-function SideHandles() {
+function SideHandles({ enabled }: { enabled: boolean }) {
   const sides: Array<Position> = [Position.Top, Position.Right, Position.Bottom, Position.Left];
+  // Without `pointerEvents: none`, the 14px transparent handles on the
+  // frame border intercept clicks/drags meant for children that sit near
+  // the frame edge — especially painful when a child task is placed just
+  // inside the subprocess. Turn them on only when the frame is selected.
   const transparent: CSSProperties = {
     background: "transparent", border: "none", opacity: 0,
     width: 14, height: 14,
+    pointerEvents: enabled ? "auto" : "none",
   };
   return (
     <>
@@ -152,7 +157,7 @@ const BaseSubprocessFrame = memo((props: BaseSubprocessFrameProps): ReactNode =>
         {adHoc && <div style={{ pointerEvents: "auto" }}><AdHocGlyph color={accentColor} /></div>}
       </div>
 
-      <SideHandles />
+      <SideHandles enabled={!!selected} />
     </div>
   );
 });

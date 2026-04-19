@@ -88,17 +88,36 @@ export const noEndEventRule: ValidationRule = {
 /** Event subprocesses fire when their inner start event receives a
  *  trigger (timer, message, signal, error, escalation, compensation,
  *  conditional). A start event without an event definition makes an
- *  event subprocess unreachable. */
+ *  event subprocess unreachable — and an event subprocess with no
+ *  children at all can never fire, so we flag both cases here (the
+ *  generic no-start-event rule skips empty scopes to avoid spamming
+ *  during modeling, so event subprocesses need their own coverage). */
 export const eventSubprocessTriggerRule: ValidationRule = {
   id: "event-subprocess-trigger",
   name: "Event subprocess trigger",
   run: (nodes) => {
     const issues: ValidationIssue[] = [];
+    const childrenByParent = new Map<string, typeof nodes>();
+    for (const n of nodes) {
+      if (!n.parentId) continue;
+      const arr = childrenByParent.get(n.parentId) || [];
+      arr.push(n);
+      childrenByParent.set(n.parentId, arr);
+    }
     for (const n of nodes) {
       if (n.type !== "eventSubProcess") continue;
-      const children = nodes.filter((m) => m.parentId === n.id && m.type === "startEvent");
-      if (children.length === 0) continue; // covered by no-start-event rule
-      for (const start of children) {
+      const starts = (childrenByParent.get(n.id) || []).filter((m) => m.type === "startEvent");
+      if (starts.length === 0) {
+        issues.push({
+          id: `event-subprocess-trigger:${n.id}:no-start`,
+          severity: "error",
+          ruleId: "event-subprocess-trigger",
+          nodeId: n.id,
+          message: `Event subprocess "${labelOf(n as { id: string; data: Record<string, unknown> })}" has no start event. Add a start event with a trigger (timer, message, signal, error, escalation, compensation, or conditional).`,
+        });
+        continue;
+      }
+      for (const start of starts) {
         const def = (start.data as { eventDefinition?: { kind?: string } })?.eventDefinition;
         if (!def || def.kind === "none" || !def.kind) {
           issues.push({

@@ -178,46 +178,55 @@ const useCanvasStore = create<CanvasState>()(
         // No self-parenting, no creating cycles (can't drop a subprocess
         // into one of its own descendants).
         if (parentId === nodeId) return;
+        const byId = new Map(nodes.map((n) => [n.id, n]));
         if (parentId) {
           let cur: string | undefined = parentId;
           while (cur) {
             if (cur === nodeId) return;
-            cur = nodes.find((n) => n.id === cur)?.parentId;
+            cur = byId.get(cur)?.parentId;
           }
         }
 
         const absOf = (id: string): { x: number; y: number } => {
-          const n = nodes.find((m) => m.id === id);
-          if (!n) return { x: 0, y: 0 };
-          let x = n.position.x;
-          let y = n.position.y;
-          let cur: Node | undefined = n;
-          while (cur?.parentId) {
-            const p = nodes.find((m) => m.id === cur!.parentId);
-            if (!p) break;
-            x += p.position.x;
-            y += p.position.y;
-            cur = p;
+          let cur: Node | undefined = byId.get(id);
+          let x = 0;
+          let y = 0;
+          while (cur) {
+            x += cur.position.x;
+            y += cur.position.y;
+            cur = cur.parentId ? byId.get(cur.parentId) : undefined;
           }
           return { x, y };
         };
 
-        const myAbs = absOf(nodeId);
+        // Boundary events attached to the moved node must follow — they're
+        // geometrically and semantically tied to their host's scope per
+        // BPMN 2.0 §10.5.5. Without this, dragging a task-with-boundary
+        // into a subprocess strands the boundary at the old scope.
+        const boundaryIds = new Set<string>();
+        for (const n of nodes) {
+          if (n.type !== "boundaryEvent") continue;
+          const attachedTo = (n.data as { attachedToRef?: string })?.attachedToRef;
+          if (attachedTo === nodeId) boundaryIds.add(n.id);
+        }
+
         const newParentAbs = parentId ? absOf(parentId) : { x: 0, y: 0 };
-        const relative = { x: myAbs.x - newParentAbs.x, y: myAbs.y - newParentAbs.y };
 
         set({
-          nodes: nodes.map((n) =>
-            n.id === nodeId
-              ? {
-                  ...n,
-                  position: relative,
-                  ...(parentId
-                    ? { parentId, extent: "parent" as const }
-                    : { parentId: undefined, extent: undefined }),
-                }
-              : n,
-          ),
+          nodes: nodes.map((n) => {
+            if (n.id === nodeId || boundaryIds.has(n.id)) {
+              const myAbs = absOf(n.id);
+              const relative = { x: myAbs.x - newParentAbs.x, y: myAbs.y - newParentAbs.y };
+              return {
+                ...n,
+                position: relative,
+                ...(parentId
+                  ? { parentId, extent: "parent" as const }
+                  : { parentId: undefined, extent: undefined }),
+              };
+            }
+            return n;
+          }),
         });
       },
 
