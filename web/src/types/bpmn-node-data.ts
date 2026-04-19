@@ -414,6 +414,43 @@ export type EventBasedGatewayData = BaseNodeData & {
   instantiate?: boolean;
 };
 
+/* ─── Subprocess family ─── */
+
+/** Transaction protocol (BPMN 2.0 §10.6.4). Rarely tuned by modelers — kept
+ *  as a typed string so it round-trips through XML for tools that do. */
+export type TransactionMethod = "##Compensate" | "##Store" | "##Image";
+
+export type SubProcessData = BaseNodeData & ActivityCommon & {
+  bpmnType: "subProcess";
+  /** BPMN `isExpanded` on a SubProcess. When true the shape renders as a
+   *  resizable frame with children; when false it collapses to a task-
+   *  sized box with a `+` marker. */
+  isExpanded?: boolean;
+};
+
+export type EventSubProcessData = BaseNodeData & ActivityCommon & {
+  bpmnType: "eventSubProcess";
+  isExpanded?: boolean;
+  /** Always true for event subprocesses — modeled as a SubProcess with
+   *  `triggeredByEvent=true` per BPMN 2.0 §10.11. Kept on the data for
+   *  symmetry with other flags; we do not allow editing it away. */
+  triggeredByEvent: true;
+};
+
+export type TransactionData = BaseNodeData & ActivityCommon & {
+  bpmnType: "transaction";
+  isExpanded?: boolean;
+  /** Transaction protocol (rarely used). Undefined = unspecified. */
+  method?: TransactionMethod;
+};
+
+export type AdHocSubProcessData = BaseNodeData & ActivityCommon & {
+  bpmnType: "adHocSubProcess";
+  isExpanded?: boolean;
+  /** Ordering of ad-hoc activities. BPMN default is `Parallel`. */
+  ordering?: "Parallel" | "Sequential";
+};
+
 /* ─── Discriminated union ─── */
 
 export type BpmnNodeData =
@@ -430,6 +467,10 @@ export type BpmnNodeData =
   | ManualTaskData
   | BusinessRuleTaskData
   | CallActivityData
+  | SubProcessData
+  | EventSubProcessData
+  | TransactionData
+  | AdHocSubProcessData
   | ExclusiveGatewayData
   | ParallelGatewayData
   | InclusiveGatewayData
@@ -457,6 +498,10 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     parallelGateway: "",
     inclusiveGateway: "",
     eventBasedGateway: "",
+    subProcess: "Subprocess",
+    eventSubProcess: "Event Subprocess",
+    transaction: "Transaction",
+    adHocSubProcess: "Ad-hoc Subprocess",
   };
 
   const base: BaseNodeData = {
@@ -516,6 +561,26 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
       return { ...base, bpmnType: "inclusiveGateway" } as InclusiveGatewayData;
     case "eventBasedGateway":
       return { ...base, bpmnType: "eventBasedGateway", instantiate: false } as EventBasedGatewayData;
+    case "subProcess":
+      return {
+        ...base, ...activityBase, bpmnType: "subProcess",
+        isExpanded: true,
+      } as SubProcessData;
+    case "eventSubProcess":
+      return {
+        ...base, ...activityBase, bpmnType: "eventSubProcess",
+        isExpanded: true, triggeredByEvent: true,
+      } as EventSubProcessData;
+    case "transaction":
+      return {
+        ...base, ...activityBase, bpmnType: "transaction",
+        isExpanded: true,
+      } as TransactionData;
+    case "adHocSubProcess":
+      return {
+        ...base, ...activityBase, bpmnType: "adHocSubProcess",
+        isExpanded: true, ordering: "Parallel",
+      } as AdHocSubProcessData;
     default:
       return base;
   }
@@ -550,4 +615,8 @@ export const NODE_THEMES: Record<string, NodeTheme> = {
   parallelGateway:  { color: "#2563EB", bgLight: "#EFF6FF", bgSelected: "#DBEAFE", borderLight: "#93C5FD", label: "Parallel Gateway",   iconBg: "#DBEAFE" },
   inclusiveGateway: { color: "#7C3AED", bgLight: "#F5F3FF", bgSelected: "#EDE9FE", borderLight: "#C4B5FD", label: "Inclusive Gateway",  iconBg: "#EDE9FE" },
   eventBasedGateway:{ color: "#059669", bgLight: "#ECFDF5", bgSelected: "#D1FAE5", borderLight: "#6EE7B7", label: "Event-Based Gateway",iconBg: "#D1FAE5" },
+  subProcess:       { color: "#475467", bgLight: "#F8FAFC", bgSelected: "#F1F5F9", borderLight: "#CBD5E1", label: "Subprocess",          iconBg: "#F1F5F9" },
+  eventSubProcess:  { color: "#7C3AED", bgLight: "#F5F3FF", bgSelected: "#EDE9FE", borderLight: "#C4B5FD", label: "Event Subprocess",    iconBg: "#EDE9FE" },
+  transaction:      { color: "#0F766E", bgLight: "#F0FDFA", bgSelected: "#CCFBF1", borderLight: "#5EEAD4", label: "Transaction",         iconBg: "#CCFBF1" },
+  adHocSubProcess:  { color: "#B45309", bgLight: "#FFFBEB", bgSelected: "#FEF3C7", borderLight: "#FCD34D", label: "Ad-hoc Subprocess",   iconBg: "#FEF3C7" },
 };

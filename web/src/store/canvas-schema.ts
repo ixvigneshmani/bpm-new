@@ -8,7 +8,7 @@
 import type { Node, Edge } from "@xyflow/react";
 
 /** Bump on every breaking data-model change. */
-export const CANVAS_SCHEMA_VERSION = 1;
+export const CANVAS_SCHEMA_VERSION = 2;
 
 export type CanvasPayload = {
   schemaVersion: number;
@@ -23,6 +23,10 @@ type Migration = (payload: CanvasPayload) => CanvasPayload;
 const MIGRATIONS: Record<number, Migration> = {
   // 0 → 1: legacy payloads had no schemaVersion; we treat them as v0.
   0: (payload) => ({ ...payload, schemaVersion: 1 }),
+  // 1 → 2: subprocess types added. Nesting is expressed via React Flow's
+  // native `parentId` / `extent` fields on Node — no pre-existing node
+  // gains or loses a parent, so this is a no-op bump.
+  1: (payload) => ({ ...payload, schemaVersion: 2 }),
 };
 
 /** Accept either a bare `{ nodes, edges }` (legacy) or a versioned payload,
