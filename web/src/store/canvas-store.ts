@@ -73,6 +73,9 @@ export type CanvasState = {
   updateEdgeData: (id: string, patch: Record<string, unknown>) => void;
   /** Set an edge's condition (FEEL) for exclusive/inclusive gateways. */
   setEdgeCondition: (edgeId: string, condition: string) => void;
+  /** Toggle an edge between sequence flow and message flow. Message
+   *  flows get `data.flowType: "message"`; sequence flows clear it. */
+  setEdgeFlowType: (edgeId: string, flowType: "sequence" | "message") => void;
   /** Atomically mark a single outgoing edge of `gatewayId` as the default.
    *  Writes `defaultFlowId` on the node *and* mirrors `isDefault` onto each
    *  outgoing edge so the slash marker renders. Pass `null` to clear. */
@@ -346,6 +349,19 @@ const useCanvasStore = create<CanvasState>()(
               ? { ...e, data: { ...(e.data || {}), condition } }
               : e
           ),
+        });
+      },
+
+      setEdgeFlowType: (edgeId, flowType) => {
+        set({
+          edges: get().edges.map((e) => {
+            if (e.id !== edgeId) return e;
+            const prev = (e.data || {}) as Record<string, unknown>;
+            const next = { ...prev };
+            if (flowType === "message") next.flowType = "message";
+            else delete next.flowType;
+            return { ...e, data: next };
+          }),
         });
       },
 

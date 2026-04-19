@@ -108,9 +108,23 @@ export default function PropertiesPanel() {
   const updateNodeLabel = useCanvasStore((s) => s.updateNodeLabel);
   const updateEdgeLabel = useCanvasStore((s) => s.updateEdgeLabel);
   const setEdgeCondition = useCanvasStore((s) => s.setEdgeCondition);
+  const setEdgeFlowType = useCanvasStore((s) => s.setEdgeFlowType);
   const setGatewayDefaultFlow = useCanvasStore((s) => s.setGatewayDefaultFlow);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+  const selectedEdge = !selectedNode ? edges.find((e) => e.selected) : undefined;
+
+  if (!selectedNode && selectedEdge) {
+    return (
+      <EdgeProperties
+        edgeId={selectedEdge.id}
+        label={(selectedEdge.label as string) || ""}
+        flowType={(selectedEdge.data as { flowType?: string } | undefined)?.flowType === "message" ? "message" : "sequence"}
+        onLabelChange={(v) => updateEdgeLabel(selectedEdge.id, v)}
+        onFlowTypeChange={(v) => setEdgeFlowType(selectedEdge.id, v)}
+      />
+    );
+  }
 
   if (!selectedNode) {
     return <EmptyState />;
@@ -653,6 +667,105 @@ function CollapsibleSection({
 function EmptyState() {
   // When nothing is selected, don't show the floating panel at all
   return null;
+}
+
+/* ─── Edge properties ─── */
+
+function EdgeProperties({
+  edgeId,
+  label,
+  flowType,
+  onLabelChange,
+  onFlowTypeChange,
+}: {
+  edgeId: string;
+  label: string;
+  flowType: "sequence" | "message";
+  onLabelChange: (v: string) => void;
+  onFlowTypeChange: (v: "sequence" | "message") => void;
+}) {
+  return (
+    <div style={{
+      position: "absolute",
+      top: 0, right: 0, bottom: 0,
+      width: "50%",
+      minWidth: 420,
+      zIndex: 10,
+      background: "#ffffff",
+      borderLeft: "1px solid #E5E7EB",
+      display: "flex", flexDirection: "column",
+      overflow: "hidden",
+    }}>
+      <div style={{
+        padding: "18px 28px 16px",
+        borderBottom: "1px solid #f2f4f7",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        flexShrink: 0,
+      }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#101828" }}>Edge</div>
+          <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 2 }}>
+            {flowType === "message" ? "Message flow" : "Sequence flow"}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "20px 28px", display: "flex", flexDirection: "column", gap: 16 }}>
+        <div>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+            Label
+          </label>
+          <input
+            type="text"
+            value={label}
+            onChange={(e) => onLabelChange(e.target.value)}
+            placeholder="Optional edge label"
+            style={{
+              width: "100%", padding: "6px 10px",
+              borderRadius: 6, border: "1px solid #E5E7EB",
+              fontSize: 12, fontFamily: "inherit", color: "#101828",
+              outline: "none",
+            }}
+          />
+        </div>
+
+        <div>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+            Flow Type
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <label style={{ flex: 1, display: "flex", gap: 8, padding: "8px 12px", border: `1px solid ${flowType === "sequence" ? "#4F46E5" : "#E5E7EB"}`, borderRadius: 6, cursor: "pointer", background: flowType === "sequence" ? "#EEF2FF" : "#fff" }}>
+              <input
+                type="radio"
+                name={`flowType-${edgeId}`}
+                checked={flowType === "sequence"}
+                onChange={() => onFlowTypeChange("sequence")}
+              />
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#101828" }}>Sequence</span>
+                <span style={{ fontSize: 10, color: "#667085" }}>Same pool</span>
+              </div>
+            </label>
+            <label style={{ flex: 1, display: "flex", gap: 8, padding: "8px 12px", border: `1px solid ${flowType === "message" ? "#4F46E5" : "#E5E7EB"}`, borderRadius: 6, cursor: "pointer", background: flowType === "message" ? "#EEF2FF" : "#fff" }}>
+              <input
+                type="radio"
+                name={`flowType-${edgeId}`}
+                checked={flowType === "message"}
+                onChange={() => onFlowTypeChange("message")}
+              />
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#101828" }}>Message</span>
+                <span style={{ fontSize: 10, color: "#667085" }}>Cross-pool</span>
+              </div>
+            </label>
+          </div>
+          <div style={{ marginTop: 6, fontSize: 10, color: "#98a2b3" }}>
+            BPMN 2.0 §8.3.3: sequence flows must stay inside one pool; message flows must cross a pool boundary.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ─── Section icon helper ─── */

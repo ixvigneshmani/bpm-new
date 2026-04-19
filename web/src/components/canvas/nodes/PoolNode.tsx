@@ -84,7 +84,25 @@ const PoolNode = memo((props: NodeProps) => {
         maxHeight={1200}
         handleStyle={resizeHandleStyle(theme.color)}
         lineStyle={{ border: "none" }}
-        onResize={(_, params) => updateNodeData(id, { width: params.width, height: params.height })}
+        onResize={(_, params) => {
+          // Clamp shrink so the pool never ends up smaller than the
+          // bounding rect of its descendants — React Flow's
+          // `extent:'parent'` would otherwise clamp children into the
+          // shrunken box and silently relocate them.
+          const store = useCanvasStore.getState();
+          const kids = store.nodes.filter((n) => n.parentId === id);
+          let minW = 0, minH = 0;
+          for (const k of kids) {
+            const kd = (k.data || {}) as { width?: number; height?: number };
+            const kw = kd.width ?? k.width ?? 120;
+            const kh = kd.height ?? k.height ?? 80;
+            minW = Math.max(minW, (k.position?.x ?? 0) + kw);
+            minH = Math.max(minH, (k.position?.y ?? 0) + kh);
+          }
+          const w = Math.max(params.width, minW);
+          const h = Math.max(params.height, minH);
+          updateNodeData(id, { width: w, height: h });
+        }}
       />
 
       {/* Left label band */}
