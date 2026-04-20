@@ -323,6 +323,12 @@ export const processInstances = pgTable(
     startedBy: uuid("STARTED_BY")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    // Frozen copy of the process canvas at start time. The interpreter
+    // executes against this — never the live `processes.canvas_data` —
+    // so an in-flight instance is unaffected by edits to the design.
+    // Required for determinism, audit, and replay. Type is loose
+    // (jsonb) but the EngineCanvas projection narrows it at read time.
+    definitionSnapshot: jsonb("DEFINITION_SNAPSHOT").notNull(),
     status: processInstanceStatusEnum("STATUS").notNull().default("running"),
     // Use a SQL-side default so raw inserts (seeds, admin tooling) that
     // omit VARIABLES don't trip the NOT NULL — Drizzle's `.default({})`
@@ -363,6 +369,11 @@ export const instanceTokens = pgTable(
       onDelete: "set null",
     }),
     errorMessage: text("ERROR_MESSAGE"),
+    // Optimistic-locking guard. Every UPDATE bumps `version`; the
+    // interpreter's update statement asserts the prior version in the
+    // WHERE clause so two concurrent "complete this task" calls can't
+    // both win — the loser's update affects 0 rows and we retry/error.
+    version: integer("VERSION").notNull().default(0),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -374,6 +385,58 @@ export const instanceTokens = pgTable(
     index("TOKEN_INSTANCE_IDX").on(t.instanceId),
     index("TOKEN_TENANT_STATUS_IDX").on(t.tenantId, t.status),
     index("TOKEN_ASSIGNED_IDX").on(t.assignedTo, t.status),
+  ],
+);
+
+// ─── INSTANCE_EVENTS ────────────────────────────────────────────────
+// Append-only audit log of everything that happened during an instance:
+// node entered/exited, decision taken, variable changed, error raised.
+// Powers debugging, replay, compliance, and (later) timeline UIs.
+// Never UPDATE or DELETE — only INSERT.
+
+export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
+  "instance-started",
+  "instance-completed",
+  "instance-failed",
+  "instance-cancelled",
+  "node-entered",
+  "node-exited",
+  "edge-taken",
+  "token-created",
+  "token-completed",
+  "token-waiting",
+  "token-resumed",
+  "variable-set",
+  "error",
+]);
+
+export const instanceEvents = pgTable(
+  "INSTANCE_EVENTS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID")
+      .notNull()
+      .references(() => processInstances.id, { onDelete: "cascade" }),
+    // Token may not exist for instance-level events (started/completed)
+    // and may have been deleted by the time we read; nullable + no FK
+    // back to INSTANCE_TOKENS keeps the audit trail immutable.
+    tokenId: uuid("TOKEN_ID"),
+    nodeId: varchar("NODE_ID", { length: 255 }),
+    eventType: instanceEventTypeEnum("EVENT_TYPE").notNull(),
+    // Per-event payload: edge id for edge-taken, variable name+value
+    // for variable-set, error detail for error, etc. Shape is event-
+    // specific and validated by the writer, not the schema.
+    payload: jsonb("PAYLOAD"),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("EVENT_INSTANCE_CREATED_IDX").on(t.instanceId, t.createdAt),
+    index("EVENT_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
   ],
 );
 
