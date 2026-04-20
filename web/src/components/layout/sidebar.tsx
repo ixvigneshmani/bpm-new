@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
 import { apiGet } from "../../lib/api";
@@ -12,12 +12,16 @@ type NavItem = {
 };
 
 /** Hook for the live counts shown in the sidebar (My Tasks + Running).
- *  Polled every 30s so badges stay reasonably current without push.
- *  Fails silently — a network blip shouldn't blank the badges. */
+ *  Polled every 30s while the tab is visible. Paused when hidden so
+ *  an idle background tab doesn't generate perpetual API load.
+ *  Refreshes immediately on visibility re-entry so the operator sees
+ *  current counts when they come back to the tab. Fails silently —
+ *  a network blip shouldn't blank the badges. */
 function useSidebarCounts(): { tasks: number; running: number } {
   const [counts, setCounts] = useState({ tasks: 0, running: 0 });
   useEffect(() => {
     let alive = true;
+    let timer: number | null = null;
     const refresh = async () => {
       try {
         const [tasks, running] = await Promise.all([
@@ -34,11 +38,27 @@ function useSidebarCounts(): { tasks: number; running: number } {
         // ignore — keep prior counts
       }
     };
-    refresh();
-    const id = window.setInterval(refresh, 30_000);
+    const start = () => {
+      if (timer !== null) return;
+      refresh();
+      timer = window.setInterval(refresh, 30_000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVis);
     return () => {
       alive = false;
-      window.clearInterval(id);
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
   return counts;
@@ -110,7 +130,9 @@ export default function Sidebar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const counts = useSidebarCounts();
-  const navGroups = buildNavGroups(counts);
+  // Memoise so ancestor re-renders (route changes, sidebar collapse
+  // toggles) don't rebuild the nav-group JSX identity unnecessarily.
+  const navGroups = useMemo(() => buildNavGroups(counts), [counts]);
 
   const location = useLocation();
 

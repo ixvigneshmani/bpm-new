@@ -15,8 +15,9 @@
  * Security milestone (push from outbox webhooks).
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { apiGet, apiPost } from "../lib/api";
+import { useVisiblePoll } from "../lib/use-visible-poll";
 
 type Task = {
   tokenId: string;
@@ -43,24 +44,49 @@ export default function TasksInboxPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Task | null>(null);
+  /** Token ids the user just completed, held for ~30s so if the
+   *  interval-refresh pulls a stale list that still includes them,
+   *  we filter them out. Prevents the "blink" where a completed
+   *  task flashes back into the list before the DB is caught up. */
+  const [recentlyCompleted, setRecentlyCompleted] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
       const rows = await apiGet<Task[]>("/tasks");
-      setTasks(rows);
+      setTasks((prev) => {
+        const filtered = rows.filter((r) => !recentlyCompleted.has(r.tokenId));
+        return filtered.length === prev.length &&
+          filtered.every((t, i) => t.tokenId === prev[i]?.tokenId)
+          ? prev
+          : filtered;
+      });
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [recentlyCompleted]);
 
-  useEffect(() => {
-    refresh();
-    const id = window.setInterval(refresh, REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [refresh]);
+  useVisiblePoll(refresh, REFRESH_INTERVAL_MS);
+
+  const optimisticallyCompleted = useCallback((tokenId: string) => {
+    setTasks((prev) => prev.filter((t) => t.tokenId !== tokenId));
+    setRecentlyCompleted((prev) => {
+      const next = new Set(prev);
+      next.add(tokenId);
+      return next;
+    });
+    // Let the server catch up, then drop the suppression so a future
+    // "re-suspend on next user task" re-entry can show normally.
+    window.setTimeout(() => {
+      setRecentlyCompleted((prev) => {
+        const next = new Set(prev);
+        next.delete(tokenId);
+        return next;
+      });
+    }, 30_000);
+  }, []);
 
   return (
     <div>
@@ -176,7 +202,14 @@ export default function TasksInboxPage() {
           task={selected}
           onClose={() => setSelected(null)}
           onCompleted={async () => {
+            // Optimistic: remove from local list immediately so the
+            // operator sees instant feedback; the server catches up
+            // on the next poll and the recentlyCompleted set keeps
+            // the row from flashing back.
+            optimisticallyCompleted(selected.tokenId);
             setSelected(null);
+            // Background re-fetch picks up any NEW tasks (e.g. this
+            // same instance re-suspended on a chained user task).
             await refresh();
           }}
         />
@@ -214,6 +247,18 @@ function TaskDrawer(props: {
         return;
       }
     }
+    // Confirm when the user is submitting real form data (not just
+    // acknowledging an empty task). Completion advances the token and
+    // can't be undone; a stray click shouldn't commit the variables
+    // silently. Empty-object submissions ({} — the default) skip the
+    // prompt because the common "acknowledge and move on" flow
+    // doesn't warrant a dialog.
+    if (Object.keys(parsed).length > 0) {
+      const ok = window.confirm(
+        "Complete this task with the entered form data? This advances the process and can't be undone.",
+      );
+      if (!ok) return;
+    }
     setSubmitting(true);
     try {
       const res = await apiPost<CompleteResponse>(
@@ -221,10 +266,12 @@ function TaskDrawer(props: {
         { formData: parsed },
       );
       setResult(res);
-      // Brief success display before closing the drawer.
+      // Brief success display before closing the drawer. Shortened
+      // from 800ms → 400ms since optimistic UI removes the task from
+      // the list immediately anyway.
       window.setTimeout(() => {
         onCompleted();
-      }, 800);
+      }, 400);
     } catch (e) {
       setError((e as Error).message);
     } finally {

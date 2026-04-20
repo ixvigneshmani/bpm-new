@@ -3,11 +3,14 @@
  * header (status + variables), live tokens, recent audit events.
  * Cancel button on running instances.
  *
- * No auto-refresh — the detail view is a "what happened?" snapshot,
- * not a live monitor (use the inbox + list pages for live work).
+ * Auto-refresh: while the instance is still `running`, we poll every
+ * 3 s so the operator watching a service-task complete sees tokens
+ * advance without manual refresh clicks. Terminal states
+ * (completed/failed/cancelled) stop the poll — the view freezes as
+ * a "what happened?" snapshot.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
 
@@ -71,9 +74,45 @@ export default function InstanceDetailPage() {
     }
   }, [id]);
 
+  // Initial fetch; the auto-poll effect below picks up from there.
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Live auto-refresh while running. Interval is stopped + cleared
+  // when the instance terminates OR the tab is hidden (to avoid
+  // idle polling of backgrounded windows). Visibility-change
+  // re-arms it when the tab comes back.
+  const statusRef = useRef(detail?.status);
+  statusRef.current = detail?.status;
+  useEffect(() => {
+    if (!detail || detail.status !== "running") return;
+    let timer: number | null = null;
+    const tick = () => {
+      if (statusRef.current !== "running") return;
+      refresh();
+    };
+    const start = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(tick, 3_000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [detail, refresh]);
 
   const onCancel = async () => {
     if (!detail || !window.confirm(`Cancel this instance? This cannot be undone.`)) return;

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiGet } from "../lib/api";
+import { useVisiblePoll } from "../lib/use-visible-poll";
 
 type InstanceRow = {
   id: string;
@@ -49,12 +50,15 @@ export default function InstancesListPage() {
     }
   }, [filter]);
 
+  // Reset the loading spinner when the filter changes. The actual
+  // refresh is driven by useVisiblePoll, which fires an immediate
+  // refresh on every render where `refresh` identity changes (which
+  // happens when the filter does).
   useEffect(() => {
     setLoading(true);
-    refresh();
-    const id = window.setInterval(refresh, REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [refresh]);
+  }, [filter]);
+
+  useVisiblePoll(refresh, REFRESH_INTERVAL_MS);
 
   return (
     <div>

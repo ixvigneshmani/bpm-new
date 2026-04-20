@@ -1,10 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useReactFlow } from "@xyflow/react";
 import { useStore } from "zustand";
 import useCanvasStore from "../../store/canvas-store";
 import { serializeCanvasToBpmn } from "../../lib/bpmn/serialize";
 import { parseBpmnToCanvas } from "../../lib/bpmn/parse";
+import { apiPost } from "../../lib/api";
 
 type Props = {
   onOpenAi?: () => void;
@@ -27,34 +28,47 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<null | "export" | "import" | "start">(null);
+  /** Abort + mounted guard for the Start-instance fetch. Without these,
+   *  if the user navigates away while the POST is in flight, the
+   *  resolved promise calls `navigate()` on an unmounted component
+   *  (React warning, and the navigate may redirect them away from the
+   *  page they intentionally moved to). AbortController cancels the
+   *  request on unmount; mountedRef gates post-resolve side effects. */
+  const startAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      startAbortRef.current?.abort();
+    };
+  }, []);
 
   const handleStartInstance = async () => {
     if (!processId || busy) return;
     setBusy("start");
+    // Generate a fresh idempotency key per click so a double-click
+    // can't create two instances even if the network blips. The engine
+    // returns the cached response on the second call.
+    const idempotencyKey = crypto.randomUUID();
+    const controller = new AbortController();
+    startAbortRef.current = controller;
     try {
-      // Generate an idempotency key per click so a double-click can't
-      // create two instances even if the network blips. The engine
-      // returns the cached response on the second call.
-      const idempotencyKey = crypto.randomUUID();
-      const res = await fetch(`/api/processes/${processId}/instances`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("flowpro_token") ?? ""}`,
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.message ?? `HTTP ${res.status}`);
+      const out = await apiPost<{ instanceId: string; status: string }>(
+        `/processes/${processId}/instances`,
+        {},
+        { headers: { "Idempotency-Key": idempotencyKey }, signal: controller.signal },
+      );
+      if (mountedRef.current) {
+        navigate(`/instances/${out.instanceId}`);
       }
-      const out = (await res.json()) as { instanceId: string; status: string };
-      navigate(`/instances/${out.instanceId}`);
     } catch (e) {
-      alert(`Failed to start instance: ${(e as Error).message}`);
+      if (controller.signal.aborted) return; // user navigated away; ignore
+      if (mountedRef.current) {
+        alert(`Failed to start instance: ${(e as Error).message}`);
+      }
     } finally {
-      setBusy(null);
+      if (mountedRef.current) setBusy(null);
+      if (startAbortRef.current === controller) startAbortRef.current = null;
     }
   };
 
