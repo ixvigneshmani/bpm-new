@@ -287,6 +287,82 @@ export const processDocuments = pgTable(
 
 // ─── AI_INTERACTIONS (scaffold call history) ────────────────────────
 
+// ─── ENGINE_JOBS ────────────────────────────────────────────────────
+// Durable async work queue. The interpreter enqueues a job whenever
+// a node needs side-effects that shouldn't block the request thread
+// (E5: service tasks; later: webhook dispatch, timer fires, retries).
+// Worker poll loop claims rows via SELECT FOR UPDATE SKIP LOCKED so
+// horizontally-scaled API processes don't double-execute.
+//
+// Token relationship: a job typically belongs to a token that's
+// suspended on `waitingFor=service-task` (etc.); when the job
+// completes, the worker resumes the token via the same advance-loop
+// path completeTask uses. Decoupling means a slow/failing handler
+// can't tie up an HTTP request thread or hold an open DB txn.
+
+export const engineJobStatusEnum = pgEnum("ENGINE_JOB_STATUS", [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "dead",
+]);
+
+export const engineJobs = pgTable(
+  "ENGINE_JOBS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    // Optional links: not every job ties to a specific token (e.g.
+    // webhook-dispatch fires on instance lifecycle, may not have a
+    // single owning token). Nullable + no FK so audit survives token
+    // deletion — same pattern as INSTANCE_EVENTS.tokenId.
+    instanceId: uuid("INSTANCE_ID"),
+    tokenId: uuid("TOKEN_ID"),
+    /** Job kind — picks the handler from the worker registry. E4.5
+     *  defines the contract; concrete kinds land in E5+ (`service-task`,
+     *  `webhook-dispatch`, `timer-fire`). */
+    jobType: varchar("JOB_TYPE", { length: 64 }).notNull(),
+    /** Free-form routing key inside the kind — for service-task this
+     *  is the user-defined topic (e.g. `crm.upsertContact`). */
+    topic: varchar("TOPIC", { length: 255 }).notNull(),
+    input: jsonb("INPUT"),
+    result: jsonb("RESULT"),
+    status: engineJobStatusEnum("STATUS").notNull().default("queued"),
+    attempts: integer("ATTEMPTS").notNull().default(0),
+    maxAttempts: integer("MAX_ATTEMPTS").notNull().default(3),
+    lastError: text("LAST_ERROR"),
+    /** When the job is eligible to run. Set in the future by the
+     *  exponential-backoff retry path. The worker query is
+     *  `WHERE status='queued' AND scheduledFor <= now()`. */
+    scheduledFor: timestamp("SCHEDULED_FOR", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    /** Set by the worker when it claims the job. `lockedBy` is a
+     *  worker id (pid + random suffix) used for diagnostics — stale
+     *  `running` rows can be reclaimed by checking lockedAt age. */
+    lockedAt: timestamp("LOCKED_AT", { withTimezone: true }),
+    lockedBy: varchar("LOCKED_BY", { length: 64 }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // The hot path for the worker poll: queued + due. Partial-index
+    // semantics aren't expressed here (drizzle-kit doesn't support
+    // `WHERE` clauses on indexes cleanly) but the leading-column
+    // status is highly selective so the planner uses this efficiently.
+    index("ENGINE_JOB_QUEUE_IDX").on(t.status, t.scheduledFor),
+    index("ENGINE_JOB_INSTANCE_IDX").on(t.instanceId),
+    index("ENGINE_JOB_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
+  ],
+);
+
 // ─── IDEMPOTENCY_KEYS ───────────────────────────────────────────────
 // Replay-safe POST endpoints. Client sends an Idempotency-Key header;
 // the first request stores its serialised response keyed by

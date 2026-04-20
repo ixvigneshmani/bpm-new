@@ -5,11 +5,12 @@ import { EngineService } from "./engine.service";
 import { IdempotencyService } from "./idempotency.service";
 import { InstancesController } from "./instances.controller";
 import { TasksController } from "./tasks.controller";
+import { WorkerService } from "./worker.service";
 
 @Module({
   imports: [AuthModule],
   controllers: [EngineController, InstancesController, TasksController],
-  providers: [EngineService, IdempotencyService],
-  exports: [EngineService],
+  providers: [EngineService, IdempotencyService, WorkerService],
+  exports: [EngineService, WorkerService],
 })
 export class EngineModule {}
