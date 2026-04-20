@@ -14,7 +14,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:3001",
+        // Override via env var when the default :3001 is taken by
+        // another worktree's API. Defaults to the standard dev port.
+        target: process.env.VITE_API_PROXY ?? "http://localhost:3001",
         changeOrigin: true,
       },
     },
