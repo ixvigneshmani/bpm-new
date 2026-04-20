@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -323,7 +324,10 @@ export const processInstances = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     status: processInstanceStatusEnum("STATUS").notNull().default("running"),
-    variables: jsonb("VARIABLES").notNull().default({}),
+    // Use a SQL-side default so raw inserts (seeds, admin tooling) that
+    // omit VARIABLES don't trip the NOT NULL — Drizzle's `.default({})`
+    // only fills in app-side INSERTs.
+    variables: jsonb("VARIABLES").notNull().default(sql`'{}'::jsonb`),
     errorMessage: text("ERROR_MESSAGE"),
     startedAt: timestamp("STARTED_AT", { withTimezone: true })
       .notNull()
@@ -336,6 +340,7 @@ export const processInstances = pgTable(
   (t) => [
     index("PROC_INST_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
     index("PROC_INST_PROCESS_IDX").on(t.processId),
+    index("PROC_INST_TENANT_STATUS_IDX").on(t.tenantId, t.status),
   ],
 );
 

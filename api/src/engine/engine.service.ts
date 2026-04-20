@@ -6,7 +6,7 @@
  * later phases (E2 onward) fill in. No advance loop yet.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { DATABASE, type Database } from "../database/database.module";
 
 /** A canvas node as the interpreter sees it. The full shape lives in
@@ -47,9 +47,7 @@ export type EngineCanvas = {
 export class EngineService {
   private readonly logger = new Logger(EngineService.name);
 
-  constructor(
-    @Optional() @Inject(DATABASE) private readonly db: Database | null = null,
-  ) {}
+  constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   /** E2: start a new instance of a process — create a PROCESS_INSTANCES
    *  row, place one INSTANCE_TOKENS token on the start event, then
