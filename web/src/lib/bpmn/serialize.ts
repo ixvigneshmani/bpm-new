@@ -135,7 +135,18 @@ export async function serializeCanvasToBpmn(
   const messageFlowEdges: Edge[] = [];
   for (const e of edges) {
     if (!nodeById.has(e.source) || !nodeById.has(e.target)) continue;
-    const flowType = (e.data as Record<string, unknown> | undefined)?.flowType;
+    const declaredFlowType = (e.data as Record<string, unknown> | undefined)?.flowType;
+    // Inference: an edge touching an artifact must be an association
+    // regardless of what `data.flowType` says — routes paste / import /
+    // reconnect-through-an-artifact into the correct BPMN element so
+    // it can't land as an invalid bpmn:SequenceFlow with an artifact
+    // endpoint (which bpmn-moddle would silently emit, but downstream
+    // tools would reject).
+    const src = nodeById.get(e.source);
+    const tgt = nodeById.get(e.target);
+    const touchesArtifact =
+      isArtifactType(src?.type) || isArtifactType(tgt?.type);
+    const flowType = touchesArtifact ? "association" : declaredFlowType;
     if (flowType === "message") {
       messageFlowEdges.push(e);
       continue;
@@ -541,6 +552,24 @@ export async function serializeCanvasToBpmn(
         warnings.push(
           `Dropped ${crossPoolDropped} cross-pool sequence flow(s). BPMN 2.0 requires cross-pool connections to be message flows; change the edge type or redraw inside a single pool.`,
         );
+      }
+    }
+
+    // Same story for associations that commonScope routed to null:
+    // either both endpoints are in the same pool (route there) or they
+    // span pools / touch a root artifact (route to the first pool so
+    // the artifact panel survives export — dropping would silently
+    // lose user-visible annotations).
+    const rootAssoc = associationsByScope.get(null) || [];
+    if (rootAssoc.length > 0) {
+      associationsByScope.set(null, []);
+      for (const e of rootAssoc) {
+        const sp = poolOf(e.source);
+        const tp = poolOf(e.target);
+        const target = (sp && tp && sp === tp) ? sp : (sp || tp || firstPoolId);
+        const arr = associationsByScope.get(target) || [];
+        arr.push(e);
+        associationsByScope.set(target, arr);
       }
     }
     void poolIdSet;

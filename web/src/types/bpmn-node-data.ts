@@ -553,7 +553,10 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     pool: "Pool",
     lane: "Lane",
     dataStore: "Data Store",
-    textAnnotation: "Note",
+    // Intentionally empty so fresh palette drops show the "Double-click
+    // to edit" placeholder and the empty-text-annotation validation
+    // rule actually catches the undone-state mistake.
+    textAnnotation: "",
     group: "Group",
   };
 

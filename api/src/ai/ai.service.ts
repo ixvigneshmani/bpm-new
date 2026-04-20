@@ -46,7 +46,15 @@ const SUPPORTED_NODE_TYPES = [
   "subProcess", "eventSubProcess", "transaction", "adHocSubProcess",
   "exclusiveGateway", "parallelGateway", "inclusiveGateway", "eventBasedGateway",
   "pool", "lane",
+  // P8 artifacts — non-flow visual elements. Data stores for external
+  // systems, text annotations for commentary, groups for clustering.
+  "dataStore", "textAnnotation", "group",
 ] as const;
+
+/** Edge flow-type values the model may emit. Association edges connect
+ *  artifacts (dataStore/textAnnotation/group) to flow nodes and are
+ *  dashed with no arrowhead. */
+const SUPPORTED_FLOW_TYPES = ["message", "association"] as const;
 
 /** Types that need a default `eventDefinition` to render safely. */
 const EVENT_TYPES = new Set([
@@ -127,7 +135,7 @@ export type RefineOp =
         source: string;
         target: string;
         label?: string;
-        data?: { flowType?: "message"; condition?: string };
+        data?: { flowType?: "message" | "association"; condition?: string };
       };
     }
   | { op: "remove-edge"; id: string };
@@ -706,7 +714,7 @@ export class AiService {
         data: {
           type: "object",
           properties: {
-            flowType: { type: "string", enum: ["message"] },
+            flowType: { type: "string", enum: [...SUPPORTED_FLOW_TYPES] },
             condition: { type: "string" },
           },
         },
@@ -1103,10 +1111,17 @@ export class AiService {
       "- If the process has organizational participants, wrap them in pools (`type: \"pool\"`) and set `parentId` on every flow node inside.",
       "- Subprocess nodes (`subProcess`, `eventSubProcess`, `transaction`, `adHocSubProcess`) hold their children via `parentId`; set `data.isExpanded = true` so they render open.",
       "",
+      "ARTIFACTS (optional — use when they add clarity, not by default)",
+      "- `dataStore` = an external system of record (DB, ERP, CRM). Link it to the task(s) that read/write it using an edge with `data.flowType: \"association\"`.",
+      "- `textAnnotation` = free-form commentary pinned to a node. Put the note body in `label`. Associate with `data.flowType: \"association\"`.",
+      "- `group` = dashed visual cluster. Purely decorative; don't use `parentId` to put nodes in a group — groups are not containers.",
+      "- Associations are dashed, arrowless, and must have at least one artifact endpoint.",
+      "",
       "LAYOUT",
       "- Start near (100, 200). Advance +180px along the flow direction per step, +140px for vertical branches out of gateways.",
       "- Lay out left-to-right. Keep things tidy — the user will auto-layout later but a reasonable first pass matters.",
       "- Frames (subprocesses, pools) should be sized to comfortably contain their children.",
+      "- Artifacts: place a dataStore ~120px below/above the task that uses it; a textAnnotation ~180px to the side.",
       "",
       "LABELS",
       "- Short, imperative verb phrases for tasks: `Review Invoice`, not `The system reviews the invoice`.",
@@ -1173,7 +1188,7 @@ export class AiService {
                 data: {
                   type: "object",
                   properties: {
-                    flowType: { type: "string", enum: ["message"] },
+                    flowType: { type: "string", enum: [...SUPPORTED_FLOW_TYPES] },
                     condition: { type: "string" },
                   },
                 },

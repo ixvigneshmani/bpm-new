@@ -140,8 +140,57 @@ describe("P8 artifacts + associations round-trip", () => {
       }),
     ];
     const { xml } = await serializeCanvasToBpmn(nodes, []);
+    // The textAnnotation must be nested *inside* the subProcess element,
+    // not at root scope. A weaker parentId-only check would pass even if
+    // serialize dumped the note at root and parse happened to re-nest it
+    // via DI bounds coincidence.
+    expect(xml).toMatch(/<bpmn:subProcess[^>]*id="SP1"[\s\S]*<bpmn:textAnnotation/);
     const result = await parseBpmnToCanvas(xml);
     const note = result.nodes.find((n) => n.id === "n1");
     expect(note?.parentId).toBe("SP1");
+  });
+
+  it("inference: an edge touching an artifact serializes as bpmn:Association even when data.flowType is absent", async () => {
+    // Simulates an edge loaded from an older canvas / created via paste
+    // with no `flowType` set — serialize must still classify it as an
+    // association based on the endpoint types.
+    const nodes: Node[] = [
+      mkNode({
+        id: "t1", type: "userTask",
+        position: { x: 100, y: 100 },
+        data: { label: "Task", bpmnType: "userTask" },
+      }),
+      mkNode({
+        id: "ds1", type: "dataStore",
+        position: { x: 300, y: 100 },
+        data: { label: "DB", bpmnType: "dataStore" },
+      }),
+    ];
+    const edges: Edge[] = [
+      { id: "e1", source: "t1", target: "ds1" }, // no data.flowType
+    ];
+    const { xml } = await serializeCanvasToBpmn(nodes, edges);
+    expect(xml).toContain("bpmn:association");
+    expect(xml).not.toMatch(/<bpmn:sequenceFlow[^>]*id="e1"/);
+  });
+
+  it("TextAnnotation body round-trips from a { $body } shaped moddle element", async () => {
+    // Some bpmn-moddle versions return the text child as an object.
+    // Parser must accept all three shapes (string, {$body}, {text}).
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" id="d1" targetNamespace="t">
+  <bpmn:process id="P1">
+    <bpmn:textAnnotation id="n1">
+      <bpmn:text>External body text</bpmn:text>
+    </bpmn:textAnnotation>
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="d"><bpmndi:BPMNPlane id="plane" bpmnElement="P1">
+    <bpmndi:BPMNShape id="n1_di" bpmnElement="n1"><dc:Bounds x="0" y="0" width="180" height="70"/></bpmndi:BPMNShape>
+  </bpmndi:BPMNPlane></bpmndi:BPMNDiagram>
+</bpmn:definitions>`;
+    const result = await parseBpmnToCanvas(xml);
+    const note = result.nodes.find((n) => n.id === "n1");
+    expect(note?.type).toBe("textAnnotation");
+    expect((note?.data as { label?: string }).label).toBe("External body text");
   });
 });

@@ -77,7 +77,7 @@ export type CanvasState = {
   setEdgeCondition: (edgeId: string, condition: string) => void;
   /** Toggle an edge between sequence flow and message flow. Message
    *  flows get `data.flowType: "message"`; sequence flows clear it. */
-  setEdgeFlowType: (edgeId: string, flowType: "sequence" | "message") => void;
+  setEdgeFlowType: (edgeId: string, flowType: "sequence" | "message" | "association") => void;
   /** Atomically mark a single outgoing edge of `gatewayId` as the default.
    *  Writes `defaultFlowId` on the node *and* mirrors `isDefault` onto each
    *  outgoing edge so the slash marker renders. Pass `null` to clear. */
@@ -397,8 +397,8 @@ const useCanvasStore = create<CanvasState>()(
             if (e.id !== edgeId) return e;
             const prev = (e.data || {}) as Record<string, unknown>;
             const next = { ...prev };
-            if (flowType === "message") next.flowType = "message";
-            else delete next.flowType;
+            if (flowType === "sequence") delete next.flowType;
+            else next.flowType = flowType;
             return { ...e, data: next };
           }),
         });

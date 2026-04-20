@@ -37,6 +37,21 @@ export type ParseResult = {
   warnings: string[];
 };
 
+/** Pull the text body off a bpmn:TextAnnotation's `text` child. Different
+ *  bpmn-moddle versions and source tools expose this in three shapes:
+ *  a bare string, `{ $body: "..." }`, or a nested `{ text: "..." }`.
+ *  Return "" if nothing resolves — an empty note renders the
+ *  placeholder and fires the empty-text-annotation validation rule. */
+function extractAnnotationText(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object") {
+    const v = raw as Record<string, unknown>;
+    if (typeof v.$body === "string") return v.$body;
+    if (typeof v.text === "string") return v.text;
+  }
+  return "";
+}
+
 const DEFAULT_EDGE_VISUAL = {
   type: "smoothstep" as const,
   animated: false,
@@ -192,10 +207,12 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
       }
 
       // bpmn:TextAnnotation carries its body in a child `text` element,
-      // not in `name`. Pull it into the internal `label` field so the
-      // TextAnnotationNode renders without a second code path.
+      // not in `name`. bpmn-moddle variously exposes that as either a
+      // raw string or a wrapped `{ $body }` / `{ text }` object; external
+      // tools (Camunda, bpmn.io) emit their own flavours. Accept all
+      // three so imports from other modelers don't lose the note body.
       const nodeLabel = internalType === "textAnnotation"
-        ? (typeof el.text === "string" ? el.text : "")
+        ? extractAnnotationText(el.text)
         : (el.name || undefined);
 
       const shape = shapeByRef.get(el.id);

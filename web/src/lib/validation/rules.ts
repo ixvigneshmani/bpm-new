@@ -476,8 +476,8 @@ const associationEndpointsRule: ValidationRule = {
           ruleId: "association-endpoints",
           edgeId: e.id,
           message: srcArt
-            ? "Association connects two artifacts — at least one endpoint should be a flow node."
-            : "Association connects two flow nodes — use a sequence flow or message flow instead.",
+            ? "Association connects two artifacts — consider linking one end to a flow node instead."
+            : "Association between two flow nodes reads as commentary; a sequence flow or message flow is usually clearer.",
         });
       }
     }

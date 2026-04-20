@@ -28,6 +28,13 @@ const GroupNode = memo(({ id, data, selected }: NodeProps) => {
     if (draft !== label) updateNodeLabel(id, draft);
   };
 
+  // A narrow draggable border band (pointer-events: auto) surrounds an
+  // interior pass-through area (pointer-events: none). This keeps flow
+  // nodes inside the group bounds clickable while still letting the
+  // user grab the group to move/select it. The value matches the width
+  // of the visible dashed border + a little hit slop.
+  const BORDER_BAND = 8;
+
   return (
     <div
       style={{
@@ -36,11 +43,19 @@ const GroupNode = memo(({ id, data, selected }: NodeProps) => {
         border: `1.5px dashed ${theme.color}`,
         borderRadius: 14,
         background: selected ? theme.bgSelected : "transparent",
-        // No pointer events on the interior so the user can still click
-        // through to flow nodes inside the group's bounds.
-        pointerEvents: "none",
       }}
     >
+      {/* Interior pass-through region — sits on top and blocks events
+          so that clicks and drags on nodes inside the group reach
+          them, not the group. */}
+      <div
+        style={{
+          position: "absolute",
+          top: BORDER_BAND, left: BORDER_BAND,
+          right: BORDER_BAND, bottom: BORDER_BAND,
+          pointerEvents: "none",
+        }}
+      />
       <NodeResizer
         isVisible={!!selected}
         minWidth={120}
@@ -59,7 +74,6 @@ const GroupNode = memo(({ id, data, selected }: NodeProps) => {
           padding: "2px 6px",
           background: "#fff",
           borderRadius: 4,
-          pointerEvents: "auto",
           cursor: "text",
         }}
         onDoubleClick={() => setEditing(true)}

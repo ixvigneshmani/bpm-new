@@ -214,8 +214,13 @@ function CanvasInner() {
       const isSubprocess = isSubprocessType(type);
       const isPool = type === "pool";
       const isLane = type === "lane";
+      // Groups are visual-only (BPMN 2.0 §10.4.3): they do NOT own
+      // their contents via parentId, so skip auto-nesting or they'd
+      // clamp nodes into the group frame and serialize under the
+      // wrong scope's artifacts list.
+      const isGroup = type === "group";
       const canAutoNestSubprocess = type === "eventSubProcess";
-      const parentId = isPool
+      const parentId = isPool || isGroup
         ? null
         : (isSubprocess && !canAutoNestSubprocess)
           ? null
