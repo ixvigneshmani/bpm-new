@@ -260,17 +260,49 @@ function makeFakeTx(canvas: unknown) {
     },
   };
 
+  // Tracks where the most recent select was routed. The two queries
+  // we need to differentiate at the db (non-tx) level are:
+  //   • PROCESSES → return canvasData
+  //   • PROCESS_VERSIONS → return any existing version row (we
+  //     simulate "no existing version" so getOrCreateProcessVersion
+  //     follows the insert path)
+  let lastDbSelectTable: string | null = null;
+  const dbTableName = (table: unknown): string => {
+    if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+      // @ts-expect-error — drizzle internal
+      return table[Symbol.for("drizzle:Name")] as string;
+    }
+    return "unknown";
+  };
+
   const db = {
     select(_cols?: unknown) {
+      const chain = {
+        from(table: unknown) {
+          lastDbSelectTable = dbTableName(table);
+          return chain;
+        },
+        where: () => chain,
+        orderBy: () => chain,
+        limit: () => {
+          if (lastDbSelectTable === "PROCESSES") {
+            return Promise.resolve([{ canvasData: canvas }]);
+          }
+          // PROCESS_VERSIONS lookups return empty so the engine takes
+          // the create-version path.
+          return Promise.resolve([]);
+        },
+      };
+      return chain;
+    },
+    insert(_table: unknown) {
+      // Non-tx insert path is used for PROCESS_VERSIONS create. Return
+      // a synthetic id so the engine can wire it onto the instance.
       return {
-        from(_table: unknown) {
+        values() {
           return {
-            where(_cond: unknown) {
-              return {
-                limit() {
-                  return Promise.resolve([{ canvasData: canvas }]);
-                },
-              };
+            returning() {
+              return Promise.resolve([{ id: "ver-1" }]);
             },
           };
         },
@@ -459,17 +491,19 @@ describe("EngineService.startInstance", () => {
 
   it("rejects a process belonging to a different tenant (404)", async () => {
     // Build a fake DB whose process row exists but the loadProcessForInstance
-    // tenant filter excludes it (we simulate by returning empty rows).
+    // tenant filter excludes it (we simulate by returning empty rows
+    // from every select).
     env = makeFakeTx(undefined);
-    // Override the top-level select to return zero rows — i.e. the
-    // (id, tenantId) WHERE didn't match any row.
-    env.db.select = () => ({
-      from: () => ({
-        where: () => ({
-          limit: () => Promise.resolve([]),
-        }),
-      }),
-    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (env.db as any).select = () => {
+      const chain = {
+        from: () => chain,
+        where: () => chain,
+        orderBy: () => chain,
+        limit: () => Promise.resolve([]),
+      };
+      return chain;
+    };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     service = new EngineService(env.db as any);
     await expect(
@@ -479,6 +513,83 @@ describe("EngineService.startInstance", () => {
         userId: "u",
       }),
     ).rejects.toThrow(/Process not found/);
+  });
+
+  it("E4.5b: startInstance writes processVersionId (PROCESS_VERSIONS dedup path)", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [{ id: "e1", source: "s", target: "e" }],
+    });
+    const out = await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+    });
+    expect(out.status).toBe("completed");
+    // The instance row carries processVersionId pointing at the synthetic
+    // version id from the fake DB; the legacy snapshot column is null.
+    const inst = env.inserts.find((i) => i.table === "PROCESS_INSTANCES");
+    expect(inst?.values[0].processVersionId).toBe("ver-1");
+    expect(inst?.values[0].definitionSnapshot).toBeUndefined();
+  });
+
+  it("E4.5b: identical canvases dedupe — engine looks up the existing version row", async () => {
+    // Override the db so PROCESS_VERSIONS lookup returns an existing
+    // row instead of empty (simulating a re-publish of the same canvas).
+    buildService({
+      nodes: [{ id: "s", type: "startEvent" }, { id: "e", type: "endEvent" }],
+      edges: [{ id: "e1", source: "s", target: "e" }],
+    });
+    let dbSelectsForVersions = 0;
+    let dbInsertsForVersions = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (env.db as any).select = () => {
+      let routedTable: string | null = null;
+      const chain = {
+        from(table: unknown) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const name = (table as any)?.[Symbol.for("drizzle:Name")] ?? "";
+          routedTable = String(name);
+          if (routedTable === "PROCESS_VERSIONS") dbSelectsForVersions++;
+          return chain;
+        },
+        where: () => chain,
+        orderBy: () => chain,
+        limit: () => {
+          if (routedTable === "PROCESSES") {
+            return Promise.resolve([{ canvasData: {
+              nodes: [{ id: "s", type: "startEvent" }, { id: "e", type: "endEvent" }],
+              edges: [{ id: "e1", source: "s", target: "e" }],
+            } }]);
+          }
+          if (routedTable === "PROCESS_VERSIONS") {
+            return Promise.resolve([{ id: "existing-ver" }]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return chain;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (env.db as any).insert = () => ({
+      values() {
+        dbInsertsForVersions++;
+        return {
+          returning() { return Promise.resolve([{ id: "should-not-be-used" }]); },
+        };
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    service = new EngineService(env.db as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect(out.status).toBe("completed");
+    expect(dbSelectsForVersions).toBeGreaterThan(0);
+    expect(dbInsertsForVersions).toBe(0); // reused existing row
+    const inst = env.inserts.find((i) => i.table === "PROCESS_INSTANCES");
+    expect(inst?.values[0].processVersionId).toBe("existing-ver");
   });
 
   it("E4: exclusive gateway routes via matching condition (startInstance with vars)", async () => {

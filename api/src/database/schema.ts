@@ -237,6 +237,64 @@ export const processes = pgTable(
   (t) => [index("PROCESS_TENANT_IDX").on(t.tenantId)],
 );
 
+// ─── PROCESS_VERSIONS ───────────────────────────────────────────────
+// Content-addressed snapshots of a process canvas. Replaces inlining
+// the full DEFINITION_SNAPSHOT into every PROCESS_INSTANCES row:
+// identical canvases dedupe by (processId, hash), and instances reference
+// the version by FK instead of carrying their own ~50KB jsonb copy.
+//
+// Why a separate table (vs leaving the snapshot inline)?
+//   • Storage: 1000 instances of the same process were 50MB of
+//     duplicated jsonb; with this table they're 1 × 50KB + 1000 × 16-
+//     byte FK.
+//   • Versioning UX: "show me v3 of this process" becomes a real
+//     query instead of "find any instance from that period and read
+//     its snapshot column".
+//   • Migration story: when a future feature wants to re-execute an
+//     old instance against a new version, the version pointer is the
+//     hand-off point.
+//
+// Backward compat: PROCESS_INSTANCES.DEFINITION_SNAPSHOT stays as a
+// nullable column. New instances populate PROCESS_VERSION_ID instead;
+// the engine's reader prefers the FK and falls back to the inline
+// snapshot for rows created before this phase.
+
+export const processVersions = pgTable(
+  "PROCESS_VERSIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    processId: uuid("PROCESS_ID")
+      .notNull()
+      .references(() => processes.id, { onDelete: "cascade" }),
+    /** SHA-256 hex of the canonicalised canvas. (processId, hash)
+     *  is unique — re-publishing an unchanged canvas reuses the row. */
+    hash: varchar("HASH", { length: 64 }).notNull(),
+    canvasData: jsonb("CANVAS_DATA").notNull(),
+    /** Monotonically increasing version number scoped to the process.
+     *  Computed at insert time as `MAX(version) + 1` for the process,
+     *  starting at 1. Nullable for the brief window before the next
+     *  insert can compute it; in practice always populated. */
+    version: integer("VERSION"),
+    publishedBy: uuid("PUBLISHED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    publishedAt: timestamp("PUBLISHED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("PROC_VER_PROCESS_HASH_IDX").on(t.processId, t.hash),
+    index("PROC_VER_TENANT_PUBLISHED_IDX").on(t.tenantId, t.publishedAt.desc()),
+    index("PROC_VER_PROCESS_VERSION_IDX").on(t.processId, t.version),
+  ],
+);
+
 // ─── BUSINESS_DOCUMENTS (reusable templates) ────────────────────────
 
 export const businessDocuments = pgTable(
@@ -438,12 +496,20 @@ export const processInstances = pgTable(
     startedBy: uuid("STARTED_BY")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    // Frozen copy of the process canvas at start time. The interpreter
-    // executes against this — never the live `processes.canvas_data` —
-    // so an in-flight instance is unaffected by edits to the design.
-    // Required for determinism, audit, and replay. Type is loose
-    // (jsonb) but the EngineCanvas projection narrows it at read time.
-    definitionSnapshot: jsonb("DEFINITION_SNAPSHOT").notNull(),
+    // Frozen copy of the process canvas at start time (legacy). New
+    // instances reference PROCESS_VERSIONS via processVersionId; this
+    // column stays for backward compatibility with rows created before
+    // E4.5b. Made nullable to allow new rows to skip it. The engine's
+    // canvas reader prefers the version FK and falls back to this.
+    definitionSnapshot: jsonb("DEFINITION_SNAPSHOT"),
+    /** FK into the deduplicated PROCESS_VERSIONS table. Populated for
+     *  every instance started after E4.5b; null for legacy rows. The
+     *  pair (definitionHash, processVersionId) is redundant once all
+     *  rows are migrated — kept until then for a safe rollback. */
+    processVersionId: uuid("PROCESS_VERSION_ID").references(
+      () => processVersions.id,
+      { onDelete: "restrict" },
+    ),
     // SHA-256 hex of the canonicalised snapshot. Forward-compat hook
     // for a future content-addressed PROCESS_DEFINITIONS table — lets
     // us dedupe identical snapshots and answer "which logical version

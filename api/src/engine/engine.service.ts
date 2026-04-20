@@ -37,6 +37,7 @@ import {
   instanceEvents,
   instanceTokens,
   processInstances,
+  processVersions,
   processes,
 } from "../database/schema";
 
@@ -115,13 +116,25 @@ export class EngineService {
     const canvas = projectCanvas(proc.canvasData);
     const startNode = findStartEvent(canvas);
 
-    // Hash the canonicalised snapshot so a future PROCESS_DEFINITIONS
-    // table can dedupe by content. JSON.stringify with sorted keys is
-    // good-enough canonicalisation for a hash; we don't need to be
-    // round-trip identical, just stable for the same input.
+    // Hash the canonicalised snapshot — used both as the
+    // PROCESS_VERSIONS dedupe key and stored on PROCESS_INSTANCES for
+    // forensic / future migration tooling.
     const snapshot = canonicalise(canvas);
     const definitionHash = sha256Hex(JSON.stringify(snapshot));
     const initialVariables = args.variables ?? {};
+
+    // Resolve (or create) the deduplicated PROCESS_VERSIONS row first.
+    // Outside the txn so the upsert race between two concurrent starts
+    // resolves at the unique-constraint boundary, not by holding a
+    // long advisory lock. If both inserters race, the loser falls
+    // through to the SELECT branch — same row id either way.
+    const versionId = await this.getOrCreateProcessVersion({
+      processId: args.processId,
+      tenantId: args.tenantId,
+      userId: args.userId,
+      hash: definitionHash,
+      canvas: snapshot,
+    });
 
     return this.db.transaction(async (tx) => {
       // 1. Create the instance row.
@@ -133,7 +146,9 @@ export class EngineService {
           startedBy: args.userId,
           status: "running",
           variables: initialVariables,
-          definitionSnapshot: snapshot as unknown as Record<string, unknown>,
+          // Legacy DEFINITION_SNAPSHOT column stays null for new rows;
+          // canvas now lives in PROCESS_VERSIONS keyed by versionId.
+          processVersionId: versionId,
           definitionHash,
         })
         .returning({ id: processInstances.id });
@@ -598,10 +613,11 @@ export class EngineService {
         args.tenantId,
       );
 
-      // Pull the canvas from the frozen DEFINITION_SNAPSHOT — the live
-      // process may have been edited since this instance started, but
-      // execution always honours the snapshot.
-      const canvas = projectCanvas(instRow.definitionSnapshot);
+      // Pull the canvas via the version FK (preferred) or the legacy
+      // inline snapshot. The live process may have been edited since
+      // this instance started, but execution always honours the
+      // versioned snapshot.
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
 
       // 1. Audit task-completed FIRST so it acts as the user-facing
       //    anchor in any timeline replay — the variable-set rows that
@@ -815,7 +831,10 @@ export class EngineService {
         assignedTo: instanceTokens.assignedTo,
         createdAt: instanceTokens.createdAt,
         processId: processInstances.processId,
-        definitionSnapshot: processInstances.definitionSnapshot,
+        // Prefer the versioned canvas; fall back to the legacy inline
+        // snapshot for instances created before E4.5b.
+        versionedCanvas: processVersions.canvasData,
+        legacySnapshot: processInstances.definitionSnapshot,
         processName: processes.name,
       })
       .from(instanceTokens)
@@ -824,12 +843,16 @@ export class EngineService {
         eq(processInstances.id, instanceTokens.instanceId),
       )
       .innerJoin(processes, eq(processes.id, processInstances.processId))
+      .leftJoin(
+        processVersions,
+        eq(processVersions.id, processInstances.processVersionId),
+      )
       .where(whereExpr)
       .orderBy(desc(instanceTokens.createdAt))
       .limit(200);
 
     return rows.map((r) => {
-      const canvas = projectCanvas(r.definitionSnapshot);
+      const canvas = projectCanvas(r.versionedCanvas ?? r.legacySnapshot);
       const node = canvas.nodes.find((n) => n.id === r.currentNodeId);
       const nodeData = node?.data ?? null;
       const nodeLabel =
@@ -915,6 +938,7 @@ export class EngineService {
     version: number;
     variables: unknown;
     definitionSnapshot: unknown;
+    processVersionId: string | null;
   }> {
     const rows = await tx
       .select({
@@ -922,6 +946,7 @@ export class EngineService {
         version: processInstances.version,
         variables: processInstances.variables,
         definitionSnapshot: processInstances.definitionSnapshot,
+        processVersionId: processInstances.processVersionId,
       })
       .from(processInstances)
       .where(
@@ -1023,6 +1048,8 @@ export class EngineService {
   }): Promise<{
     id: string;
     processId: string;
+    processVersionId: string | null;
+    definitionHash: string;
     status: "running" | "completed" | "failed" | "cancelled";
     variables: Record<string, unknown>;
     startedBy: string;
@@ -1094,6 +1121,8 @@ export class EngineService {
     return {
       id: inst.id,
       processId: inst.processId,
+      processVersionId: inst.processVersionId,
+      definitionHash: inst.definitionHash,
       status: inst.status,
       variables: (inst.variables as Record<string, unknown>) ?? {},
       startedBy: inst.startedBy,
@@ -1228,6 +1257,105 @@ export class EngineService {
         tokensCancelled: cancelledCount,
       };
     });
+  }
+
+  /** Idempotent get-or-create on PROCESS_VERSIONS keyed by
+   *  (processId, hash). Two concurrent startInstance calls for the
+   *  same process race; the unique constraint resolves the race.
+   *  We do not run this inside the calling txn — the (likely)
+   *  failed-insert + retry would bloat the txn's write set, and the
+   *  read-after-failure needs to see the winner's commit anyway. */
+  private async getOrCreateProcessVersion(args: {
+    processId: string;
+    tenantId: string;
+    userId: string;
+    hash: string;
+    canvas: EngineCanvas;
+  }): Promise<string> {
+    const existing = await this.db
+      .select({ id: processVersions.id })
+      .from(processVersions)
+      .where(
+        and(
+          eq(processVersions.processId, args.processId),
+          eq(processVersions.hash, args.hash),
+        ),
+      )
+      .limit(1);
+    if (existing[0]) return existing[0].id;
+
+    // Compute the next monotonic version number for this process.
+    // A small race here means two concurrent inserts could compute
+    // the same N; the (processId, hash) unique index still protects
+    // dedup correctness, and the version number is best-effort
+    // metadata (the hash is the canonical identity).
+    const maxRow = await this.db
+      .select({ v: processVersions.version })
+      .from(processVersions)
+      .where(eq(processVersions.processId, args.processId))
+      .orderBy(desc(processVersions.version))
+      .limit(1);
+    const nextVersion = (maxRow[0]?.v ?? 0) + 1;
+
+    try {
+      const [row] = await this.db
+        .insert(processVersions)
+        .values({
+          tenantId: args.tenantId,
+          processId: args.processId,
+          hash: args.hash,
+          canvasData: args.canvas as unknown as Record<string, unknown>,
+          version: nextVersion,
+          publishedBy: args.userId,
+        })
+        .returning({ id: processVersions.id });
+      return row.id;
+    } catch (err) {
+      // Unique-constraint race: a concurrent inserter beat us. Re-read.
+      const refetch = await this.db
+        .select({ id: processVersions.id })
+        .from(processVersions)
+        .where(
+          and(
+            eq(processVersions.processId, args.processId),
+            eq(processVersions.hash, args.hash),
+          ),
+        )
+        .limit(1);
+      if (refetch[0]) return refetch[0].id;
+      throw err;
+    }
+  }
+
+  /** Resolve the canvas to execute against for an instance. New
+   *  instances reference PROCESS_VERSIONS via processVersionId;
+   *  legacy rows (pre-E4.5b) still carry the snapshot inline.
+   *  Either path returns the same EngineCanvas projection. */
+  private async loadCanvasForInstance(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    instance: { processVersionId: string | null; definitionSnapshot: unknown },
+  ): Promise<EngineCanvas> {
+    if (instance.processVersionId) {
+      const rows = await tx
+        .select({ canvasData: processVersions.canvasData })
+        .from(processVersions)
+        .where(eq(processVersions.id, instance.processVersionId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) {
+        throw new NotFoundException(
+          `Process version ${instance.processVersionId} not found.`,
+        );
+      }
+      return projectCanvas(row.canvasData);
+    }
+    if (instance.definitionSnapshot) {
+      return projectCanvas(instance.definitionSnapshot);
+    }
+    throw new BadRequestException(
+      "Instance has no canvas reference (neither version nor inline snapshot).",
+    );
   }
 
   /** Load a process row scoped to the tenant, validating that it has
