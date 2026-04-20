@@ -71,7 +71,8 @@ export type EngineCanvas = {
 
 /** Hard cap on advance-loop iterations per call. A well-formed E2
  *  process terminates in O(nodes) hops; if we exceed this it's a cycle
- *  or runaway model error and we fail loudly rather than spin. */
+ *  or runaway model error and we fail loudly rather than spin. The
+ *  comparison is `>=` so the cap is exactly this many hops. */
 const MAX_ADVANCE_HOPS = 1000;
 
 /** Flow-typed edges the interpreter will *not* traverse. Message flows
@@ -161,7 +162,12 @@ export class EngineService {
       // 4. Drive the token through the graph until it hits a wait state
       //    or an end event. The advance helper writes its own audit
       //    rows on every node-entered/edge-taken/node-exited transition.
-      const { tokenStatus, hops } = await this.advanceToken({
+      //    Mid-walk modeling errors (dead-ends, cycles) come back as
+      //    `tokenStatus="failed"` with an `errorMessage` rather than
+      //    throwing — that way the audit trail commits with the txn
+      //    and the user can debug a broken process from INSTANCE_EVENTS
+      //    instead of being told only "400 bad request".
+      const advance = await this.advanceToken({
         tx,
         tenantId: args.tenantId,
         instanceId: inst.id,
@@ -171,22 +177,41 @@ export class EngineService {
         canvas,
       });
 
-      // 5. If the token completed, the whole instance is done (E2: only
-      //    one token per instance). E3+ will need to count remaining
-      //    active/waiting tokens before flipping status.
+      // 5. Flip the instance to its terminal state (E2: one token per
+      //    instance, so token status drives instance status directly).
+      //    E3+ will count remaining active/waiting tokens before this.
       let instanceStatus: "running" | "completed" | "failed" = "running";
-      if (tokenStatus === "completed") {
+      if (advance.tokenStatus === "completed") {
         await tx
           .update(processInstances)
-          .set({ status: "completed", completedAt: new Date() })
+          .set({
+            status: "completed",
+            completedAt: new Date(),
+          })
           .where(eq(processInstances.id, inst.id));
         await tx.insert(instanceEvents).values({
           tenantId: args.tenantId,
           instanceId: inst.id,
           eventType: "instance-completed",
-          payload: { hops },
+          payload: { hops: advance.hops },
         });
         instanceStatus = "completed";
+      } else if (advance.tokenStatus === "failed") {
+        await tx
+          .update(processInstances)
+          .set({
+            status: "failed",
+            errorMessage: advance.errorMessage ?? null,
+            completedAt: new Date(),
+          })
+          .where(eq(processInstances.id, inst.id));
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: inst.id,
+          eventType: "instance-failed",
+          payload: { hops: advance.hops, message: advance.errorMessage },
+        });
+        instanceStatus = "failed";
       }
 
       // Event-count + token-count are convenient for the UI; one extra
@@ -205,7 +230,7 @@ export class EngineService {
         tenantId: args.tenantId,
         instanceId: inst.id,
         status: instanceStatus,
-        hops,
+        hops: advance.hops,
       });
 
       return {
@@ -240,41 +265,49 @@ export class EngineService {
     tokenVersion: number;
     currentNodeId: string;
     canvas: EngineCanvas;
-  }): Promise<{ tokenStatus: "completed" | "waiting"; hops: number }> {
+  }): Promise<{
+    tokenStatus: "completed" | "waiting" | "failed";
+    hops: number;
+    errorMessage?: string;
+  }> {
     const nodesById = new Map(args.canvas.nodes.map((n) => [n.id, n]));
     let nodeId = args.currentNodeId;
     let version = args.tokenVersion;
     let hops = 0;
 
     while (true) {
-      if (++hops > MAX_ADVANCE_HOPS) {
+      hops++;
+      if (hops >= MAX_ADVANCE_HOPS) {
+        const message = `Advance loop exceeded ${MAX_ADVANCE_HOPS} hops at node ${nodeId} (likely cycle).`;
         await this.markTokenFailed(
           args.tx,
           args.tenantId,
           args.instanceId,
           args.tokenId,
           version,
-          `Advance loop exceeded ${MAX_ADVANCE_HOPS} hops at node ${nodeId}.`,
+          nodeId,
+          message,
         );
-        throw new BadRequestException(
-          `Process likely contains a cycle: token exceeded ${MAX_ADVANCE_HOPS} hops.`,
-        );
+        return { tokenStatus: "failed", hops, errorMessage: message };
       }
 
       const node = nodesById.get(nodeId);
       if (!node) {
         // Snapshot integrity bug — should be unreachable because edges
         // were validated to point at known nodes when the snapshot was
-        // taken. Surface it loudly rather than silently terminate.
+        // taken. Record the failure into the audit trail and let the
+        // caller commit a `failed` instance.
+        const message = `Token landed on unknown node id ${nodeId}.`;
         await this.markTokenFailed(
           args.tx,
           args.tenantId,
           args.instanceId,
           args.tokenId,
           version,
-          `Token landed on unknown node id ${nodeId}.`,
+          nodeId,
+          message,
         );
-        throw new BadRequestException(`Unknown node id in snapshot: ${nodeId}`);
+        return { tokenStatus: "failed", hops, errorMessage: message };
       }
 
       await args.tx.insert(instanceEvents).values({
@@ -321,21 +354,23 @@ export class EngineService {
         eventType: "node-exited",
       });
 
-      const next = pickNextEdge(args.canvas, nodeId);
+      const next = pickNextEdge(args.canvas, nodeId, this.logger, node.type);
       if (!next) {
         // Dead-end node that isn't an end event. Treat as a structural
-        // error — E2 doesn't know how else to terminate.
+        // modeling error — record it in the audit and let the caller
+        // mark the instance failed (instead of throwing and losing the
+        // event trail to txn rollback).
+        const message = `Node ${nodeId} (${node.type}) has no outgoing sequence flow and is not an end event.`;
         await this.markTokenFailed(
           args.tx,
           args.tenantId,
           args.instanceId,
           args.tokenId,
           version,
-          `Node ${nodeId} has no outgoing sequence flow and is not an end event.`,
+          nodeId,
+          message,
         );
-        throw new BadRequestException(
-          `Node ${nodeId} (${node.type}) has no outgoing flow.`,
-        );
+        return { tokenStatus: "failed", hops, errorMessage: message };
       }
 
       await args.tx.insert(instanceEvents).values({
@@ -394,13 +429,9 @@ export class EngineService {
     return next;
   }
 
-  /** Mark a token as failed and write the matching audit rows. Used
-   *  when the interpreter hits an unrecoverable structural error — we
-   *  want the audit trail before throwing the exception that aborts
-   *  the txn. NOTE: because we throw afterwards, the txn rolls back
-   *  and these writes are discarded. They run anyway so that if a
-   *  caller catches without re-throwing in the future, the trail is
-   *  intact for the partial work. */
+  /** Mark a token as failed and write the matching audit rows. The
+   *  caller now returns `tokenStatus: "failed"` rather than throwing,
+   *  so the txn commits with the failure trail intact. */
   private async markTokenFailed(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tx: any,
@@ -408,6 +439,7 @@ export class EngineService {
     instanceId: string,
     tokenId: string,
     version: number,
+    nodeId: string,
     message: string,
   ): Promise<void> {
     try {
@@ -416,13 +448,14 @@ export class EngineService {
         errorMessage: message,
       });
     } catch {
-      // Already conflicted — nothing useful to do; the structural
-      // error we're about to throw is the real story.
+      // Concurrent mutator already moved the token; the audit-event
+      // insert below still records the failure for diagnosability.
     }
     await tx.insert(instanceEvents).values({
       tenantId,
       instanceId,
       tokenId,
+      nodeId,
       eventType: "error",
       payload: { message },
     });
@@ -542,30 +575,58 @@ export function findStartEvent(canvas: EngineCanvas): EngineNode {
 /** Pick the next sequence-flow edge from a node. E2 implements the
  *  simplest reasonable rule: the first sequence-flow outgoing. E4 will
  *  replace this for gateways with FEEL evaluation + default-flow
- *  fallback; for non-gateway nodes the "first outgoing" choice is
- *  correct (a non-gateway with multiple outgoing is malformed BPMN
- *  but we silently pick one rather than fail in MVP). */
+ *  fallback. For non-gateway nodes a multi-outgoing topology is
+ *  malformed BPMN — we still pick the first edge so the instance can
+ *  finish, but log a warning so it shows up in ops. */
 export function pickNextEdge(
   canvas: EngineCanvas,
   fromNodeId: string,
+  logger?: { warn?: (msg: string) => void },
+  fromNodeType?: string,
 ): EngineEdge | null {
   const out = canvas.edges.filter(
     (e) =>
       e.source === fromNodeId &&
       !NON_SEQUENCE_FLOW_TYPES.has(e.data?.flowType ?? ""),
   );
+  if (out.length > 1 && fromNodeType && !fromNodeType.endsWith("Gateway")) {
+    logger?.warn?.(
+      `Node ${fromNodeId} (${fromNodeType}) has ${out.length} outgoing sequence flows; picking ${out[0].id}. Use a gateway to disambiguate.`,
+    );
+  }
   return out[0] ?? null;
 }
 
+/** Canonicalise a canvas so two semantically-equal snapshots produce
+ *  the same SHA-256. We sort node/edge arrays by id and sort every
+ *  nested object's keys recursively before stringification — without
+ *  the recursive sort, two edges `{condition, isDefault}` vs
+ *  `{isDefault, condition}` would hash differently even though the
+ *  graph is identical. Arrays inside `data` keep their order (it's
+ *  meaningful for things like multi-instance loop characteristics). */
 function canonicalise(canvas: EngineCanvas): EngineCanvas {
-  // Sort node + edge arrays by id for a stable hash regardless of the
-  // order React Flow happened to serialise them in. We don't sort `data`
-  // keys recursively — the JSON.stringify call doesn't either, and the
-  // canvas writer is internally consistent enough for our use.
   return {
-    nodes: [...canvas.nodes].sort((a, b) => a.id.localeCompare(b.id)),
-    edges: [...canvas.edges].sort((a, b) => a.id.localeCompare(b.id)),
+    nodes: [...canvas.nodes]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((n) => ({ ...n, data: n.data ? sortKeysDeep(n.data) : undefined })),
+    edges: [...canvas.edges]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((e) => ({ ...e, data: e.data ? sortKeysDeep(e.data) : undefined })),
   };
+}
+
+function sortKeysDeep<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((v) => sortKeysDeep(v)) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[k] = sortKeysDeep((value as Record<string, unknown>)[k]);
+    }
+    return sorted as unknown as T;
+  }
+  return value;
 }
 
 function sha256Hex(input: string): string {

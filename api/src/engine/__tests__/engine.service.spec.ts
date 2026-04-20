@@ -350,7 +350,7 @@ describe("EngineService.startInstance", () => {
     ).rejects.toThrow(/no top-level start/);
   });
 
-  it("rejects a process with a disconnected (no outgoing flow) non-end node", async () => {
+  it("dead-end node: instance commits with status=failed and audit trail intact", async () => {
     buildService({
       nodes: [
         { id: "s", type: "startEvent" },
@@ -359,9 +359,25 @@ describe("EngineService.startInstance", () => {
       edges: [{ id: "e1", source: "s", target: "t" }],
     });
 
-    await expect(
-      service.startInstance({ processId: "p", tenantId: "t", userId: "u" }),
-    ).rejects.toThrow(/no outgoing flow/);
+    const out = await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+    });
+
+    expect(out.status).toBe("failed");
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    // Audit must include the error + instance-failed events.
+    expect(events).toContain("error");
+    expect(events).toContain("instance-failed");
+    // Instance row was flipped to failed with errorMessage populated.
+    const instUpdate = env.updates.find(
+      (u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed",
+    );
+    expect(instUpdate).toBeDefined();
+    expect(instUpdate?.set.errorMessage).toMatch(/no outgoing/);
   });
 
   it("rejects a process with no canvas at all", async () => {
@@ -369,6 +385,30 @@ describe("EngineService.startInstance", () => {
     await expect(
       service.startInstance({ processId: "p", tenantId: "t", userId: "u" }),
     ).rejects.toThrow(/no canvas/);
+  });
+
+  it("rejects a process belonging to a different tenant (404)", async () => {
+    // Build a fake DB whose process row exists but the loadProcessForInstance
+    // tenant filter excludes it (we simulate by returning empty rows).
+    env = makeFakeTx(undefined);
+    // Override the top-level select to return zero rows — i.e. the
+    // (id, tenantId) WHERE didn't match any row.
+    env.db.select = () => ({
+      from: () => ({
+        where: () => ({
+          limit: () => Promise.resolve([]),
+        }),
+      }),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    service = new EngineService(env.db as any);
+    await expect(
+      service.startInstance({
+        processId: "proc-other",
+        tenantId: "tenant-mine",
+        userId: "u",
+      }),
+    ).rejects.toThrow(/Process not found/);
   });
 
   it("writes a deterministic definitionHash that depends on canvas content", async () => {
