@@ -13,8 +13,13 @@ import {
   findStartEvent,
   pickNextEdge,
   projectCanvas,
+  resolveDirectUserAssignee,
   type EngineCanvas,
+  type EngineNode,
 } from "../engine.service";
+
+const UUID_A = "11111111-1111-4111-8111-111111111111";
+const UUID_B = "22222222-2222-4222-8222-222222222222";
 
 // ─── Pure helpers ────────────────────────────────────────────────────
 
@@ -291,11 +296,49 @@ describe("EngineService.startInstance", () => {
     env = makeFakeTx(null);
   });
 
-  it("runs start → user task → end straight to completion (E2 happy path)", async () => {
+  it("runs start → end straight to completion (no wait states)", async () => {
     buildService({
       nodes: [
         { id: "s", type: "startEvent" },
-        { id: "t", type: "userTask" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [{ id: "e1", source: "s", target: "e" }],
+    });
+
+    const out = await service.startInstance({
+      processId: "proc-1",
+      tenantId: "tenant-1",
+      userId: "user-1",
+    });
+
+    expect(out.instanceId).toBe("inst-1");
+    expect(out.status).toBe("completed");
+
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(events).toEqual([
+      "instance-started",
+      "token-created",
+      "node-entered", // start
+      "node-exited",
+      "edge-taken",
+      "node-entered", // end
+      "node-exited",
+      "token-completed",
+      "instance-completed",
+    ]);
+
+    const tokenUpdates = env.updates.filter((u) => u.table === "INSTANCE_TOKENS");
+    expect(tokenUpdates.at(-1)?.set.status).toBe("completed");
+    expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "completed")).toBe(true);
+  });
+
+  it("E3: userTask suspends the token; instance stays running with audit ending at token-waiting", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
         { id: "e", type: "endEvent" },
       ],
       edges: [
@@ -310,11 +353,8 @@ describe("EngineService.startInstance", () => {
       userId: "user-1",
     });
 
-    expect(out.instanceId).toBe("inst-1");
-    expect(out.status).toBe("completed");
+    expect(out.status).toBe("running");
 
-    // Audit sequence — collect all event types in order across all
-    // INSTANCE_EVENTS inserts (each insert is a single-row values).
     const events = env.inserts
       .filter((i) => i.table === "INSTANCE_EVENTS")
       .map((i) => i.values[0].eventType as string);
@@ -325,18 +365,43 @@ describe("EngineService.startInstance", () => {
       "node-exited",
       "edge-taken",
       "node-entered", // userTask
-      "node-exited",
-      "edge-taken",
-      "node-entered", // end
-      "node-exited",
-      "token-completed",
-      "instance-completed",
+      "token-waiting",
     ]);
 
-    // Token reached `completed` and the instance was flipped too.
-    const tokenUpdates = env.updates.filter((u) => u.table === "INSTANCE_TOKENS");
-    expect(tokenUpdates.at(-1)?.set.status).toBe("completed");
-    expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "completed")).toBe(true);
+    // Token was flipped to waiting + assigned to UUID_A.
+    const tokenUpdate = env.updates.find(
+      (u) => u.table === "INSTANCE_TOKENS" && u.set.status === "waiting",
+    );
+    expect(tokenUpdate?.set.waitingFor).toBe("userTask");
+    expect(tokenUpdate?.set.assignedTo).toBe(UUID_A);
+    // Instance row was NOT flipped to completed/failed.
+    expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && (u.set.status === "completed" || u.set.status === "failed"))).toBe(false);
+  });
+
+  it("E3: userTask without a directUser assignment leaves assignedTo null", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "t", type: "userTask" }, // no assignment field at all
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "t" },
+        { id: "e2", source: "t", target: "e" },
+      ],
+    });
+
+    const out = await service.startInstance({
+      processId: "proc-1",
+      tenantId: "tenant-1",
+      userId: "user-1",
+    });
+
+    expect(out.status).toBe("running");
+    const tokenUpdate = env.updates.find(
+      (u) => u.table === "INSTANCE_TOKENS" && u.set.status === "waiting",
+    );
+    expect(tokenUpdate?.set.assignedTo).toBeNull();
   });
 
   it("rejects a process whose canvas has no start event", async () => {
@@ -354,7 +419,9 @@ describe("EngineService.startInstance", () => {
     buildService({
       nodes: [
         { id: "s", type: "startEvent" },
-        { id: "t", type: "userTask" }, // dead end, not an end event
+        // serviceTask still passes through in E3 (E5 wires its handler).
+        // userTask would suspend, never hitting the dead-end path.
+        { id: "t", type: "serviceTask" },
       ],
       edges: [{ id: "e1", source: "s", target: "t" }],
     });
@@ -454,5 +521,316 @@ describe("EngineService.startInstance", () => {
     await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
     const hashC = (env.inserts.find((i) => i.table === "PROCESS_INSTANCES")?.values[0].definitionHash) as string;
     expect(hashC).not.toBe(hashA);
+  });
+});
+
+// ─── E3: assignee resolution + completeTask flow ────────────────────
+
+describe("resolveDirectUserAssignee", () => {
+  const node = (data?: Record<string, unknown>): EngineNode => ({
+    id: "t",
+    type: "userTask",
+    data,
+  });
+
+  it("returns the userId for a directUser assignment with a UUID", () => {
+    expect(
+      resolveDirectUserAssignee(
+        node({ assignment: { type: "directUser", value: UUID_A } }),
+      ),
+    ).toBe(UUID_A);
+  });
+
+  it("returns null for unsupported strategies (candidateGroup, expression, aiRouted)", () => {
+    for (const type of ["candidateGroup", "expression", "aiRouted"]) {
+      expect(
+        resolveDirectUserAssignee(node({ assignment: { type, value: UUID_A } })),
+      ).toBeNull();
+    }
+  });
+
+  it("returns null when the value is not a UUID", () => {
+    expect(
+      resolveDirectUserAssignee(
+        node({ assignment: { type: "directUser", value: "not-a-uuid" } }),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when there is no assignment at all", () => {
+    expect(resolveDirectUserAssignee(node(undefined))).toBeNull();
+    expect(resolveDirectUserAssignee(node({}))).toBeNull();
+  });
+});
+
+/** Focused fake-DB for completeTask: serves a stateful waiting token +
+ *  instance row to the engine's `loadWaitingTokenForCompletion` and
+ *  `loadInstanceById`, then records every insert/update so the test
+ *  can assert on the resume audit trail. */
+function makeCompleteTaskEnv(opts: {
+  tokenAssignedTo: string | null;
+  tokenStatus?: "active" | "waiting" | "completed" | "failed";
+  waitingFor?: string | null;
+  canvas: unknown;
+  variables?: Record<string, unknown>;
+}) {
+  const tokenRow = {
+    id: "tok-waiting",
+    tenantId: "tenant-1",
+    instanceId: "inst-1",
+    currentNodeId: "t",
+    status: opts.tokenStatus ?? "waiting",
+    waitingFor: opts.waitingFor ?? "userTask",
+    assignedTo: opts.tokenAssignedTo,
+    version: 5,
+  };
+  const instanceRow = {
+    id: "inst-1",
+    version: 2,
+    variables: opts.variables ?? {},
+    definitionSnapshot: opts.canvas,
+  };
+
+  const inserts: { table: string; values: Record<string, unknown>[] }[] = [];
+  const updates: { table: string; set: Record<string, unknown> }[] = [];
+
+  const tableName = (table: unknown): string => {
+    if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+      // @ts-expect-error — drizzle internal
+      return table[Symbol.for("drizzle:Name")] as string;
+    }
+    return "unknown";
+  };
+
+  const tx = {
+    insert(table: unknown) {
+      const name = tableName(table);
+      return {
+        values(rows: Record<string, unknown> | Record<string, unknown>[]) {
+          inserts.push({ table: name, values: Array.isArray(rows) ? rows : [rows] });
+          return {
+            returning() { return Promise.resolve([{}]); },
+            then(resolve: (v: unknown) => unknown) { return resolve(undefined); },
+          };
+        },
+      };
+    },
+    update(table: unknown) {
+      const name = tableName(table);
+      return {
+        set(values: Record<string, unknown>) {
+          if (name === "INSTANCE_TOKENS" && typeof values.version === "number") {
+            tokenRow.version = values.version;
+            if (typeof values.status === "string") tokenRow.status = values.status as typeof tokenRow.status;
+          }
+          if (name === "PROCESS_INSTANCES" && typeof values.version === "number") {
+            instanceRow.version = values.version;
+          }
+          return {
+            where(_cond: unknown) {
+              return {
+                returning() {
+                  updates.push({ table: name, set: values });
+                  return Promise.resolve([{ id: name === "INSTANCE_TOKENS" ? tokenRow.id : instanceRow.id }]);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+    select(_cols?: unknown) {
+      // Two stateful selects: one for INSTANCE_TOKENS (load token),
+      // one for PROCESS_INSTANCES (load instance). The fake routes by
+      // the first table reference observed.
+      let routedTable: string | null = null;
+      const chain = {
+        from(table: unknown) {
+          routedTable = tableName(table);
+          return chain;
+        },
+        where(_cond: unknown) { return chain; },
+        limit() {
+          if (routedTable === "INSTANCE_TOKENS") {
+            return Promise.resolve([tokenRow]);
+          }
+          if (routedTable === "PROCESS_INSTANCES") {
+            return Promise.resolve([instanceRow]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return chain;
+    },
+  };
+
+  const db = {
+    transaction<T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> { return fn(tx); },
+  };
+
+  return { db, tx, inserts, updates, tokenRow, instanceRow };
+}
+
+describe("EngineService.completeTask", () => {
+  const happyCanvas = {
+    nodes: [
+      { id: "s", type: "startEvent" },
+      { id: "t", type: "userTask" },
+      { id: "e", type: "endEvent" },
+    ],
+    edges: [
+      { id: "e1", source: "s", target: "t" },
+      { id: "e2", source: "t", target: "e" },
+    ],
+  };
+
+  it("completes a waiting task assigned to the caller and runs to instance-completed", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+
+    const out = await service.completeTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+      formData: { approval: "yes" },
+    });
+
+    expect(out.instanceStatus).toBe("completed");
+    expect(out.tokenStatus).toBe("completed");
+
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    // Resume audit trail: variable-set + task-completed + token-resumed,
+    // then the advance from the userTask off through the end event.
+    expect(events).toEqual([
+      "variable-set",
+      "task-completed",
+      "token-resumed",
+      // resumed advance: userTask's node-exited → edge-taken → end's
+      // entered/exited/token-completed → instance-completed.
+      "node-exited",
+      "edge-taken",
+      "node-entered",
+      "node-exited",
+      "token-completed",
+      "instance-completed",
+    ]);
+
+    // Variables were merged onto the instance.
+    const varUpdate = env.updates.find(
+      (u) => u.table === "PROCESS_INSTANCES" && u.set.variables !== undefined,
+    );
+    expect(varUpdate?.set.variables).toEqual({ approval: "yes" });
+  });
+
+  it("rejects completion when the caller is not the assignee (403)", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await expect(
+      service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_B,
+      }),
+    ).rejects.toThrow(/assigned to another user/);
+  });
+
+  it("allows any tenant user to complete an unassigned task", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: null, canvas: happyCanvas });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    const out = await service.completeTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      userId: UUID_B,
+    });
+    expect(out.instanceStatus).toBe("completed");
+  });
+
+  it("rejects when token is not in waiting state", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: null,
+      tokenStatus: "completed",
+      waitingFor: null,
+      canvas: happyCanvas,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await expect(
+      service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_A,
+      }),
+    ).rejects.toThrow(/not waiting/);
+  });
+
+  it("rejects cross-tenant token access (404)", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: null, canvas: happyCanvas });
+    // Override the select chain so the (tokenId, tenantId) WHERE
+    // matches nothing.
+    env.tx.select = () => ({
+      from: () => ({
+        where: () => ({
+          limit: () => Promise.resolve([]),
+        }),
+      }),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await expect(
+      service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-other",
+        userId: UUID_A,
+      }),
+    ).rejects.toThrow(/Task not found/);
+  });
+
+  it("when no formData is provided, no variable-set events are written", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await service.completeTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+    });
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(events).not.toContain("variable-set");
+    expect(events[0]).toBe("task-completed");
+  });
+
+  it("if the task is followed by another userTask, instance stays running and re-suspends", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: UUID_A,
+      canvas: {
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask" }, // completing this one
+          { id: "t2", type: "userTask" }, // re-suspends here
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "t2" },
+          { id: "e3", source: "t2", target: "e" },
+        ],
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    const out = await service.completeTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+    });
+    expect(out.instanceStatus).toBe("running");
+    expect(out.tokenStatus).toBe("waiting");
   });
 });

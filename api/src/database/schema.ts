@@ -344,7 +344,15 @@ export const processInstances = pgTable(
       .notNull()
       .defaultNow(),
     completedAt: timestamp("COMPLETED_AT", { withTimezone: true }),
+    // Optimistic-locking guard, mirrors INSTANCE_TOKENS.VERSION. Needed
+    // now that E3 introduces concurrent paths that flip instance state
+    // (task completion can transition running → completed; cancel will
+    // race in a future phase).
+    version: integer("VERSION").notNull().default(0),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
