@@ -295,11 +295,14 @@ function makeFakeTx(canvas: unknown) {
       };
       return chain;
     },
-    insert(_table: unknown) {
-      // Non-tx insert path is used for PROCESS_VERSIONS create. Return
-      // a synthetic id so the engine can wire it onto the instance.
+    insert(table: unknown) {
+      // Non-tx insert path is used for PROCESS_VERSIONS create. Mirror
+      // the tx fake's recording so test assertions on env.inserts can
+      // observe it.
+      const name = dbTableName(table);
       return {
-        values() {
+        values(rows: Record<string, unknown> | Record<string, unknown>[]) {
+          inserts.push({ table: name, values: Array.isArray(rows) ? rows : [rows] });
           return {
             returning() {
               return Promise.resolve([{ id: "ver-1" }]);
@@ -513,6 +516,43 @@ describe("EngineService.startInstance", () => {
         userId: "u",
       }),
     ).rejects.toThrow(/Process not found/);
+  });
+
+  it("E4.5 polish: engineConfig.redactedVariableKeys survives canonicalise + outbox redaction", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [{ id: "e1", source: "s", target: "e" }],
+      engineConfig: { redactedVariableKeys: ["ssn"] },
+    });
+    await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+      variables: { ssn: "123-45-6789", amount: 500 },
+    });
+    // The canvas as written into PROCESS_VERSIONS must carry the
+    // engineConfig — otherwise PII redaction is silently broken on
+    // every later read (the bug E4.5 QA caught).
+    const verInsert = env.inserts.find(
+      (i) => i.table === "PROCESS_VERSIONS",
+    );
+    const verCanvas = verInsert?.values[0].canvasData as Record<string, unknown>;
+    expect(verCanvas.engineConfig).toEqual({ redactedVariableKeys: ["ssn"] });
+
+    // The instance-completed outbox row's `variables` field must
+    // redact `ssn` while keeping `amount` raw, so webhook receivers
+    // can't reconstruct the sensitive value.
+    const completedOutbox = env.inserts.find(
+      (i) =>
+        i.table === "OUTBOX_EVENTS" &&
+        i.values[0].eventType === "instance-completed",
+    );
+    const payload = completedOutbox?.values[0].payload as Record<string, unknown>;
+    expect((payload.variables as Record<string, unknown>).ssn).toBe("<redacted>");
+    expect((payload.variables as Record<string, unknown>).amount).toBe(500);
   });
 
   it("E4.5c: startInstance writes an OUTBOX_EVENTS row alongside instance-started audit", async () => {

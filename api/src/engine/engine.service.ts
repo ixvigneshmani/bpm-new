@@ -242,6 +242,7 @@ export class EngineService {
           instanceId: inst.id,
           eventType: "instance-completed",
           payload: { hops: advance.hops, variables: initialVariables },
+          redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
         instanceStatus = "completed";
       } else if (advance.tokenStatus === "failed") {
@@ -1326,7 +1327,12 @@ export class EngineService {
    *  `pending` rows and enqueues per-subscription delivery jobs.
    *
    *  Transactional with the audit row above the call site, so a
-   *  rollback discards both — no half-emitted events. */
+   *  rollback discards both — no half-emitted events.
+   *
+   *  PII safety: if the payload includes a `variables` object and the
+   *  caller passes `redactedKeys`, listed keys are replaced with
+   *  "<redacted>" before the row is written. Without this, the audit
+   *  trail is sanitised but webhook receivers still get raw values. */
   private async emitOutbox(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tx: any,
@@ -1336,14 +1342,33 @@ export class EngineService {
       instanceId?: string;
       eventType: string;
       payload: Record<string, unknown>;
+      redactedKeys?: ReadonlyArray<string> | Set<string>;
     },
   ): Promise<void> {
+    let payload = args.payload;
+    if (args.redactedKeys && payload && typeof payload === "object") {
+      const keys =
+        args.redactedKeys instanceof Set
+          ? args.redactedKeys
+          : new Set(args.redactedKeys);
+      // Only the top-level `variables` field is treated as the
+      // PII-bearing surface. Other payload fields are engine-emitted
+      // metadata (hops, message, edge id) and don't carry user data.
+      const vars = payload.variables;
+      if (vars && typeof vars === "object" && !Array.isArray(vars)) {
+        const redacted: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(vars)) {
+          redacted[k] = keys.has(k) ? "<redacted>" : v;
+        }
+        payload = { ...payload, variables: redacted };
+      }
+    }
     await tx.insert(outboxEvents).values({
       tenantId: args.tenantId,
       processId: args.processId ?? null,
       instanceId: args.instanceId ?? null,
       eventType: args.eventType,
-      payload: args.payload,
+      payload,
     });
   }
 
@@ -1602,6 +1627,12 @@ export function pickNextEdge(
  *  graph is identical. Arrays inside `data` keep their order (it's
  *  meaningful for things like multi-instance loop characteristics). */
 function canonicalise(canvas: EngineCanvas): EngineCanvas {
+  // Preserve `engineConfig` through the snapshot pipeline. Earlier
+  // versions stripped it, which silently broke PII redaction: the
+  // engine wrote the canvas to PROCESS_VERSIONS without engineConfig,
+  // then `loadCanvasForInstance` read it back empty, and every
+  // `redactedKeys.has(key)` check returned false. Bug found by E4.5
+  // QA — keep this preservation.
   return {
     nodes: [...canvas.nodes]
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -1609,6 +1640,9 @@ function canonicalise(canvas: EngineCanvas): EngineCanvas {
     edges: [...canvas.edges]
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((e) => ({ ...e, data: e.data ? sortKeysDeep(e.data) : undefined })),
+    ...(canvas.engineConfig
+      ? { engineConfig: sortKeysDeep(canvas.engineConfig) }
+      : {}),
   };
 }
 

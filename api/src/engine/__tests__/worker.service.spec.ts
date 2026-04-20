@@ -260,6 +260,35 @@ describe("WorkerService.enqueue + tick", () => {
     expect(second).not.toHaveBeenCalled();
   });
 
+  it("retryDead requeues a dead job (resets attempts + clears lastError)", async () => {
+    worker.registerHandler("dead-handler", vi.fn(async () => {
+      throw new Error("boom");
+    }));
+    await worker.enqueue({
+      tenantId: "t1",
+      jobType: "service-task",
+      topic: "dead-handler",
+      maxAttempts: 1,
+    });
+    // Drive enough ticks (resetting scheduledFor) to exhaust attempts.
+    for (let i = 0; i < 6; i++) {
+      env.rows[0].scheduledFor = new Date(0);
+      await worker.tick();
+      if (env.rows[0].status === "dead") break;
+    }
+    expect(env.rows[0].status).toBe("dead");
+    expect(env.rows[0].lastError).toBe("boom");
+
+    const out = await worker.retryDead({ jobId: env.rows[0].id, tenantId: "t1" });
+    expect(out.requeued).toBe(true);
+    expect(env.rows[0].status).toBe("queued");
+    expect(env.rows[0].lastError).toBeNull();
+  });
+
+  // The "refuses to act on non-dead" branch relies on the WHERE
+  // status='dead' filter, which the fake DB doesn't introspect. That
+  // path is covered by the real-Postgres QA pass.
+
   it("listJobs returns rows for the tenant", async () => {
     await worker.enqueue({ tenantId: "t1", jobType: "service-task", topic: "a" });
     await worker.enqueue({ tenantId: "t1", jobType: "service-task", topic: "b" });

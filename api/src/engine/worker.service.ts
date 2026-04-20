@@ -103,7 +103,13 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   /** Enqueue a job. Idempotency is the caller's responsibility — the
    *  engine deduplicates by setting (instanceId, tokenId, topic) on
    *  service tasks since a token can only suspend on one outbound job
-   *  at a time. Returns the new job id. */
+   *  at a time. Returns the new job id.
+   *
+   *  Note: if `maxAttempts` exceeds the BACKOFF_MS schedule length
+   *  (5), the effective cap is the schedule length — a `maxAttempts`
+   *  of 100 still dies after 5 tries. Logged as a warn so callers
+   *  spot the silent cap; tighten or extend BACKOFF_MS if you need
+   *  more attempts. */
   async enqueue(args: {
     tenantId: string;
     jobType: string;
@@ -117,6 +123,11 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
      *  `now`, meaning the next tick claims it. */
     scheduledFor?: Date;
   }): Promise<{ id: string }> {
+    if (args.maxAttempts && args.maxAttempts > BACKOFF_MS.length) {
+      this.logger.warn(
+        `enqueue(${args.topic}): maxAttempts=${args.maxAttempts} exceeds BACKOFF_MS schedule length (${BACKOFF_MS.length}); effective cap is ${BACKOFF_MS.length}.`,
+      );
+    }
     const [row] = await this.db
       .insert(engineJobs)
       .values({
@@ -357,6 +368,37 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
       scheduledFor: r.scheduledFor.toISOString(),
       createdAt: r.createdAt.toISOString(),
     }));
+  }
+
+  /** Move a `dead` job back to `queued` for one more shot. Used by
+   *  the (future, Ops & Security milestone) admin DLQ-replay
+   *  endpoint. Resets attempts so the backoff schedule starts over.
+   *  Tenant-scoped to prevent cross-tenant retry. Throws if the job
+   *  isn't in `dead`. */
+  async retryDead(args: {
+    jobId: string;
+    tenantId: string;
+  }): Promise<{ requeued: boolean }> {
+    const updated = await this.db
+      .update(engineJobs)
+      .set({
+        status: "queued",
+        attempts: 0,
+        scheduledFor: new Date(),
+        lockedAt: null,
+        lockedBy: null,
+        lastError: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(engineJobs.id, args.jobId),
+          eq(engineJobs.tenantId, args.tenantId),
+          eq(engineJobs.status, "dead"),
+        ),
+      )
+      .returning({ id: engineJobs.id });
+    return { requeued: updated.length > 0 };
   }
 
   /** Reclaim stale `running` jobs whose worker presumably crashed.
