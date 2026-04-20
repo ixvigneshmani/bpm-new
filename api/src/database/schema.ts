@@ -329,6 +329,11 @@ export const processInstances = pgTable(
     // Required for determinism, audit, and replay. Type is loose
     // (jsonb) but the EngineCanvas projection narrows it at read time.
     definitionSnapshot: jsonb("DEFINITION_SNAPSHOT").notNull(),
+    // SHA-256 hex of the canonicalised snapshot. Forward-compat hook
+    // for a future content-addressed PROCESS_DEFINITIONS table — lets
+    // us dedupe identical snapshots and answer "which logical version
+    // did this instance run?" without a separate version column.
+    definitionHash: varchar("DEFINITION_HASH", { length: 64 }).notNull(),
     status: processInstanceStatusEnum("STATUS").notNull().default("running"),
     // Use a SQL-side default so raw inserts (seeds, admin tooling) that
     // omit VARIABLES don't trip the NOT NULL — Drizzle's `.default({})`
@@ -406,6 +411,8 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "token-completed",
   "token-waiting",
   "token-resumed",
+  "task-claimed",
+  "task-completed",
   "variable-set",
   "error",
 ]);
@@ -424,6 +431,11 @@ export const instanceEvents = pgTable(
     // and may have been deleted by the time we read; nullable + no FK
     // back to INSTANCE_TOKENS keeps the audit trail immutable.
     tokenId: uuid("TOKEN_ID"),
+    // Actor who triggered the event, when there is one (instance-start,
+    // task-claim, task-complete, cancel, variable-set from a UI action).
+    // Null for autonomous events (node-entered, edge-taken, timer fires).
+    // Nullable + no FK so user deletion can't break the audit trail.
+    userId: uuid("USER_ID"),
     nodeId: varchar("NODE_ID", { length: 255 }),
     eventType: instanceEventTypeEnum("EVENT_TYPE").notNull(),
     // Per-event payload: edge id for edge-taken, variable name+value
