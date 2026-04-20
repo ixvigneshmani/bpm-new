@@ -857,6 +857,110 @@ describe("EngineService.completeTask", () => {
     ).rejects.toThrow(/Concurrent token update/);
   });
 
+  it("cancelled instance + already-terminal idempotent cancel", async () => {
+    // Build a richer fake to cover cancelInstance: needs select on
+    // PROCESS_INSTANCES (with status + version), select on
+    // INSTANCE_TOKENS (live tokens), updates on both.
+    const inst = { id: "inst-1", status: "running" as string, version: 0 };
+    const liveTokens = [
+      { id: "tok-1", version: 1, currentNodeId: "t" },
+      { id: "tok-2", version: 0, currentNodeId: "t2" },
+    ];
+    const inserts: { table: string; values: Record<string, unknown>[] }[] = [];
+    const tableName = (table: unknown): string => {
+      if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+        // @ts-expect-error — drizzle internal
+        return table[Symbol.for("drizzle:Name")] as string;
+      }
+      return "unknown";
+    };
+    const tx = {
+      insert(table: unknown) {
+        const name = tableName(table);
+        return {
+          values(rows: Record<string, unknown> | Record<string, unknown>[]) {
+            inserts.push({ table: name, values: Array.isArray(rows) ? rows : [rows] });
+            return {
+              returning: () => Promise.resolve([{}]),
+              then: (resolve: (v: unknown) => unknown) => resolve(undefined),
+            };
+          },
+        };
+      },
+      update(table: unknown) {
+        const name = tableName(table);
+        return {
+          set(values: Record<string, unknown>) {
+            if (name === "PROCESS_INSTANCES" && typeof values.version === "number") {
+              inst.version = values.version;
+              if (typeof values.status === "string") inst.status = values.status;
+            }
+            if (name === "INSTANCE_TOKENS" && typeof values.version === "number") {
+              const tokId = liveTokens[0]?.id; // fake doesn't introspect WHERE; ok
+              if (tokId) liveTokens[0].version = values.version;
+            }
+            return {
+              where: () => ({
+                returning: () => Promise.resolve([{ id: name === "INSTANCE_TOKENS" ? "tok-1" : inst.id }]),
+              }),
+            };
+          },
+        };
+      },
+      select() {
+        let routed: string | null = null;
+        const chain = {
+          from(table: unknown) {
+            routed = tableName(table);
+            return chain;
+          },
+          where: () => chain,
+          orderBy: () => chain,
+          limit: () => {
+            if (routed === "PROCESS_INSTANCES") return Promise.resolve([inst]);
+            if (routed === "INSTANCE_TOKENS") return Promise.resolve(liveTokens);
+            return Promise.resolve([]);
+          },
+          then: (resolve: (v: unknown) => unknown) => {
+            if (routed === "INSTANCE_TOKENS") return resolve(liveTokens);
+            if (routed === "PROCESS_INSTANCES") return resolve([inst]);
+            return resolve([]);
+          },
+        };
+        return chain;
+      },
+    };
+    const db = {
+      transaction<T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> { return fn(tx); },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(db as any);
+
+    const out = await service.cancelInstance({
+      instanceId: "inst-1",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+      reason: "wrong process",
+    });
+
+    expect(out.status).toBe("cancelled");
+    expect(out.tokensCancelled).toBeGreaterThan(0);
+    const events = inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(events).toContain("error"); // per cancelled token
+    expect(events).toContain("instance-cancelled");
+
+    // Second call on the now-cancelled instance: idempotent no-op.
+    const out2 = await service.cancelInstance({
+      instanceId: "inst-1",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+    });
+    expect(out2.status).toBe("cancelled");
+    expect(out2.tokensCancelled).toBe(0);
+  });
+
   it("if the task is followed by another userTask, instance stays running and re-suspends", async () => {
     const env = makeCompleteTaskEnv({
       tokenAssignedTo: UUID_A,

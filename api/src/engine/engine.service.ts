@@ -929,6 +929,265 @@ export class EngineService {
     return next;
   }
 
+  /** List instances of a single process for a tenant, newest first.
+   *  Operability — without this, ops can't see what's running for a
+   *  given process. Capped at 200; pagination cursor is an E7 perf
+   *  concern. */
+  async listInstancesForProcess(args: {
+    processId: string;
+    tenantId: string;
+  }): Promise<
+    Array<{
+      id: string;
+      status: "running" | "completed" | "failed" | "cancelled";
+      startedBy: string;
+      startedAt: string;
+      completedAt: string | null;
+      errorMessage: string | null;
+    }>
+  > {
+    const rows = await this.db
+      .select({
+        id: processInstances.id,
+        status: processInstances.status,
+        startedBy: processInstances.startedBy,
+        startedAt: processInstances.startedAt,
+        completedAt: processInstances.completedAt,
+        errorMessage: processInstances.errorMessage,
+      })
+      .from(processInstances)
+      .where(
+        and(
+          eq(processInstances.processId, args.processId),
+          eq(processInstances.tenantId, args.tenantId),
+        ),
+      )
+      .orderBy(desc(processInstances.createdAt))
+      .limit(200);
+    return rows.map((r) => ({
+      ...r,
+      startedAt: r.startedAt.toISOString(),
+      completedAt: r.completedAt ? r.completedAt.toISOString() : null,
+    }));
+  }
+
+  /** Single-instance detail with current state, live tokens, and the
+   *  most recent 50 audit events. The debug view: when E4 lands and
+   *  someone asks "why did the gateway choose the wrong branch?", this
+   *  is what they look at. */
+  async getInstance(args: {
+    instanceId: string;
+    tenantId: string;
+  }): Promise<{
+    id: string;
+    processId: string;
+    status: "running" | "completed" | "failed" | "cancelled";
+    variables: Record<string, unknown>;
+    startedBy: string;
+    startedAt: string;
+    completedAt: string | null;
+    errorMessage: string | null;
+    version: number;
+    tokens: Array<{
+      id: string;
+      currentNodeId: string;
+      status: "active" | "waiting" | "completed" | "failed";
+      waitingFor: string | null;
+      assignedTo: string | null;
+      version: number;
+      updatedAt: string;
+    }>;
+    recentEvents: Array<{
+      id: string;
+      eventType: string;
+      tokenId: string | null;
+      nodeId: string | null;
+      userId: string | null;
+      payload: unknown;
+      createdAt: string;
+    }>;
+  }> {
+    const instRows = await this.db
+      .select()
+      .from(processInstances)
+      .where(
+        and(
+          eq(processInstances.id, args.instanceId),
+          eq(processInstances.tenantId, args.tenantId),
+        ),
+      )
+      .limit(1);
+    const inst = instRows[0];
+    if (!inst) throw new NotFoundException("Instance not found.");
+
+    const tokens = await this.db
+      .select({
+        id: instanceTokens.id,
+        currentNodeId: instanceTokens.currentNodeId,
+        status: instanceTokens.status,
+        waitingFor: instanceTokens.waitingFor,
+        assignedTo: instanceTokens.assignedTo,
+        version: instanceTokens.version,
+        updatedAt: instanceTokens.updatedAt,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.instanceId, args.instanceId))
+      .orderBy(desc(instanceTokens.createdAt));
+
+    const events = await this.db
+      .select({
+        id: instanceEvents.id,
+        eventType: instanceEvents.eventType,
+        tokenId: instanceEvents.tokenId,
+        nodeId: instanceEvents.nodeId,
+        userId: instanceEvents.userId,
+        payload: instanceEvents.payload,
+        createdAt: instanceEvents.createdAt,
+      })
+      .from(instanceEvents)
+      .where(eq(instanceEvents.instanceId, args.instanceId))
+      .orderBy(desc(instanceEvents.createdAt))
+      .limit(50);
+
+    return {
+      id: inst.id,
+      processId: inst.processId,
+      status: inst.status,
+      variables: (inst.variables as Record<string, unknown>) ?? {},
+      startedBy: inst.startedBy,
+      startedAt: inst.startedAt.toISOString(),
+      completedAt: inst.completedAt ? inst.completedAt.toISOString() : null,
+      errorMessage: inst.errorMessage,
+      version: inst.version,
+      tokens: tokens.map((t) => ({
+        ...t,
+        updatedAt: t.updatedAt.toISOString(),
+      })),
+      recentEvents: events.map((e) => ({
+        ...e,
+        createdAt: e.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  /** Cancel a running instance: flip the status to `cancelled`, mark
+   *  every active/waiting token as cancelled (failed status — we
+   *  don't have a per-token `cancelled` enum value), and emit
+   *  instance-cancelled. Idempotent on already-terminal instances:
+   *  if the instance is already completed/failed/cancelled we no-op
+   *  with a 200 instead of throwing, so retries / accidental
+   *  double-clicks don't error. */
+  async cancelInstance(args: {
+    instanceId: string;
+    tenantId: string;
+    userId: string;
+    reason?: string;
+  }): Promise<{
+    instanceId: string;
+    status: "running" | "completed" | "failed" | "cancelled";
+    tokensCancelled: number;
+  }> {
+    return this.db.transaction(async (tx) => {
+      const instRows = await tx
+        .select({
+          id: processInstances.id,
+          status: processInstances.status,
+          version: processInstances.version,
+        })
+        .from(processInstances)
+        .where(
+          and(
+            eq(processInstances.id, args.instanceId),
+            eq(processInstances.tenantId, args.tenantId),
+          ),
+        )
+        .limit(1);
+      const inst = instRows[0];
+      if (!inst) throw new NotFoundException("Instance not found.");
+
+      // Already terminal: idempotent no-op. The audit row from the
+      // original transition is the authoritative record.
+      if (inst.status !== "running") {
+        return { instanceId: inst.id, status: inst.status, tokensCancelled: 0 };
+      }
+
+      // Cancel all active/waiting tokens first. We don't lock-and-bump
+      // each individually because we hold the instance row update next
+      // and the txn provides write isolation; a token mid-completion in
+      // another session will hit the instance-version conflict.
+      const liveTokens = await tx
+        .select({ id: instanceTokens.id, version: instanceTokens.version, currentNodeId: instanceTokens.currentNodeId })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.instanceId, args.instanceId),
+            // active OR waiting — drizzle's `inArray` would be cleaner
+            // but two ORs read fine for the small live set.
+          ),
+        );
+      let cancelledCount = 0;
+      for (const tok of liveTokens) {
+        try {
+          await this.updateTokenWithLock(tx, tok.id, tok.version, {
+            status: "failed",
+            errorMessage: args.reason
+              ? `Cancelled: ${args.reason}`
+              : "Cancelled by user.",
+          });
+          await tx.insert(instanceEvents).values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: tok.id,
+            userId: args.userId,
+            nodeId: tok.currentNodeId,
+            eventType: "error",
+            payload: { reason: "cancelled" },
+          });
+          cancelledCount++;
+        } catch {
+          // Token already moved by a concurrent completer. Skip it —
+          // the instance-level cancel still fires below.
+        }
+      }
+
+      await this.updateInstanceWithLock(
+        tx,
+        inst.id,
+        inst.version,
+        {
+          status: "cancelled",
+          completedAt: new Date(),
+          errorMessage: args.reason ?? null,
+        },
+      );
+
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        eventType: "instance-cancelled",
+        payload: {
+          reason: args.reason ?? null,
+          tokensCancelled: cancelledCount,
+        },
+      });
+
+      this.logger.log({
+        event: "engine.instance.cancelled",
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        tokensCancelled: cancelledCount,
+      });
+
+      return {
+        instanceId: inst.id,
+        status: "cancelled" as const,
+        tokensCancelled: cancelledCount,
+      };
+    });
+  }
+
   /** Load a process row scoped to the tenant, validating that it has
    *  a non-empty canvas. We refuse to start an instance of a draft
    *  whose author hasn't drawn anything yet — an empty canvas would

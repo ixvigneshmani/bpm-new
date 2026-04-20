@@ -287,6 +287,45 @@ export const processDocuments = pgTable(
 
 // ─── AI_INTERACTIONS (scaffold call history) ────────────────────────
 
+// ─── IDEMPOTENCY_KEYS ───────────────────────────────────────────────
+// Replay-safe POST endpoints. Client sends an Idempotency-Key header;
+// the first request stores its serialised response keyed by
+// (tenant, endpoint, key). Subsequent requests with the same key
+// short-circuit and return the cached response — so retries (network
+// flakes, mobile reconnects, queue redelivery) never double-create
+// instances or double-complete tasks. Stripe-style.
+//
+// `expiresAt` lets a future cleanup job sweep stale entries; 24h is
+// the canonical industry default and big enough to absorb any sensible
+// retry window.
+
+export const idempotencyKeys = pgTable(
+  "IDEMPOTENCY_KEYS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    endpoint: varchar("ENDPOINT", { length: 64 }).notNull(),
+    key: varchar("KEY", { length: 255 }).notNull(),
+    requestHash: varchar("REQUEST_HASH", { length: 64 }).notNull(),
+    responseStatus: integer("RESPONSE_STATUS").notNull(),
+    responseJson: jsonb("RESPONSE_JSON"),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("EXPIRES_AT", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("IDEMP_TENANT_ENDPOINT_KEY_IDX").on(
+      t.tenantId,
+      t.endpoint,
+      t.key,
+    ),
+    index("IDEMP_EXPIRES_IDX").on(t.expiresAt),
+  ],
+);
+
 export const aiInteractionStatusEnum = pgEnum("AI_INTERACTION_STATUS", [
   "success",
   "error",

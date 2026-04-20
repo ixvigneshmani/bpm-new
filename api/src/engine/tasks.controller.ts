@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   ParseUUIDPipe,
   Post,
@@ -14,11 +15,15 @@ import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { CompleteTaskDto } from "./dto/complete-task.dto";
 import { ListTasksDto } from "./dto/list-tasks.dto";
 import { EngineService } from "./engine.service";
+import { IdempotencyService } from "./idempotency.service";
 
 @Controller("tasks")
 @UseGuards(JwtAuthGuard)
 export class TasksController {
-  constructor(private readonly engine: EngineService) {}
+  constructor(
+    private readonly engine: EngineService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   /** GET /tasks            → "my inbox" (assigned to me OR unassigned)
    *  GET /tasks?assignedTo=<uuid> → exact-assignee view
@@ -41,18 +46,31 @@ export class TasksController {
    *  Submits the form output for a waiting user-task token, advances
    *  the token off the user-task node, and returns the new instance
    *  + token status. The body's `formData` (optional) is merged into
-   *  the instance variable bag with optimistic locking. */
+   *  the instance variable bag with optimistic locking.
+   *
+   *  Replay safety: pass `Idempotency-Key` to make retries idempotent
+   *  — without this, a network retry would 409 against the optimistic
+   *  lock (since the original request already advanced the token);
+   *  with it, the retry returns the original response. */
   @Post(":id/complete")
   complete(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: CompleteTaskDto,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    return this.engine.completeTask({
-      tokenId: id,
+    return this.idempotency.wrap({
       tenantId: req.user.tenantId,
-      userId: req.user.sub,
-      formData: dto.formData,
+      endpoint: "complete-task",
+      key: idempotencyKey,
+      requestBody: { tokenId: id, formData: dto.formData ?? null },
+      handler: () =>
+        this.engine.completeTask({
+          tokenId: id,
+          tenantId: req.user.tenantId,
+          userId: req.user.sub,
+          formData: dto.formData,
+        }),
     });
   }
 }
