@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
+import { apiGet } from "../../lib/api";
 import { useSidebar } from "./sidebar-context";
 
 type NavItem = {
@@ -9,7 +11,44 @@ type NavItem = {
   count?: number;
 };
 
-const navGroups: { label: string; items: NavItem[] }[] = [
+/** Hook for the live counts shown in the sidebar (My Tasks + Running).
+ *  Polled every 30s so badges stay reasonably current without push.
+ *  Fails silently — a network blip shouldn't blank the badges. */
+function useSidebarCounts(): { tasks: number; running: number } {
+  const [counts, setCounts] = useState({ tasks: 0, running: 0 });
+  useEffect(() => {
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const [tasks, running] = await Promise.all([
+          apiGet<unknown[]>("/tasks").catch(() => []),
+          apiGet<unknown[]>("/instances?status=running").catch(() => []),
+        ]);
+        if (alive) {
+          setCounts({
+            tasks: Array.isArray(tasks) ? tasks.length : 0,
+            running: Array.isArray(running) ? running.length : 0,
+          });
+        }
+      } catch {
+        // ignore — keep prior counts
+      }
+    };
+    refresh();
+    const id = window.setInterval(refresh, 30_000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
+  return counts;
+}
+
+/** Static nav structure. Counts are filled in at render time from
+ *  the live useSidebarCounts() hook so the badges reflect actual
+ *  inbox + running totals. Items with no `count` are stat-less. */
+function buildNavGroups(counts: { tasks: number; running: number }): { label: string; items: NavItem[] }[] {
+  return [
   {
     label: "My Work",
     items: [
@@ -22,19 +61,8 @@ const navGroups: { label: string; items: NavItem[] }[] = [
         name: "My Tasks",
         href: "/tasks",
         icon: <><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></>,
-        count: 5,
-      },
-      {
-        name: "Approvals",
-        href: "/approvals",
-        icon: <><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></>,
-        count: 18,
-      },
-      {
-        name: "Inbox",
-        href: "/inbox",
-        icon: <><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22 6 12 13 2 6" /></>,
-        count: 3,
+        // Omit the badge when zero — empty inboxes shouldn't display a "0" pill.
+        ...(counts.tasks > 0 ? { count: counts.tasks } : {}),
       },
     ],
   },
@@ -47,19 +75,10 @@ const navGroups: { label: string; items: NavItem[] }[] = [
         icon: <><rect x="2" y="2" width="20" height="20" rx="2" /><path d="M7 8h4v4H7z" /><path d="M15 8h2" /><path d="M15 12h2" /><circle cx="16" cy="16" r="2" /><path d="M11 10h4" /></>,
       },
       {
-        name: "All Processes",
-        href: "/processes",
-        icon: <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />,
-      },
-      {
         name: "Running",
         href: "/running",
         icon: <polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
-      },
-      {
-        name: "Drafts",
-        href: "/drafts",
-        icon: <><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></>,
+        ...(counts.running > 0 ? { count: counts.running } : {}),
       },
     ],
   },
@@ -84,11 +103,14 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     ],
   },
 ];
+}
 
 export default function Sidebar() {
   const { collapsed, mobileOpen, closeMobile } = useSidebar();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const counts = useSidebarCounts();
+  const navGroups = buildNavGroups(counts);
 
   const location = useLocation();
 

@@ -1,13 +1,21 @@
 import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useReactFlow } from "@xyflow/react";
 import { useStore } from "zustand";
 import useCanvasStore from "../../store/canvas-store";
 import { serializeCanvasToBpmn } from "../../lib/bpmn/serialize";
 import { parseBpmnToCanvas } from "../../lib/bpmn/parse";
 
-type Props = { onOpenAi?: () => void };
+type Props = {
+  onOpenAi?: () => void;
+  /** When set, the toolbar shows a "Start instance" button that
+   *  POSTs /processes/:id/instances and navigates to the new instance
+   *  detail page. Hidden on the new-process draft view (no id yet). */
+  processId?: string;
+};
 
-export default function CanvasToolbar({ onOpenAi }: Props = {}) {
+export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
+  const navigate = useNavigate();
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const deleteSelected = useCanvasStore((s) => s.deleteSelected);
   const selectedNodeId = useCanvasStore((s) => s.selectedNodeId);
@@ -18,7 +26,37 @@ export default function CanvasToolbar({ onOpenAi }: Props = {}) {
   const futureStates = useStore(useCanvasStore.temporal, (state) => state.futureStates);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState<null | "export" | "import">(null);
+  const [busy, setBusy] = useState<null | "export" | "import" | "start">(null);
+
+  const handleStartInstance = async () => {
+    if (!processId || busy) return;
+    setBusy("start");
+    try {
+      // Generate an idempotency key per click so a double-click can't
+      // create two instances even if the network blips. The engine
+      // returns the cached response on the second call.
+      const idempotencyKey = crypto.randomUUID();
+      const res = await fetch(`/api/processes/${processId}/instances`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("flowpro_token") ?? ""}`,
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message ?? `HTTP ${res.status}`);
+      }
+      const out = (await res.json()) as { instanceId: string; status: string };
+      navigate(`/instances/${out.instanceId}`);
+    } catch (e) {
+      alert(`Failed to start instance: ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const handleExport = async () => {
     if (busy) return;
@@ -286,6 +324,44 @@ export default function CanvasToolbar({ onOpenAi }: Props = {}) {
           <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
         </svg>
       </button>
+
+      {/* Start instance — only shown for saved processes (id in URL).
+       *  Drafts (`/designer/new`) hide this since the process must
+       *  exist before an instance can be started. */}
+      {processId && (
+        <>
+          {divider}
+          <button
+            onClick={handleStartInstance}
+            disabled={busy !== null}
+            title="Start a new instance of this process"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "0 10px",
+              height: 32,
+              border: "none",
+              borderRadius: 6,
+              background: busy === "start"
+                ? "#A5B4FC"
+                : "linear-gradient(135deg, #4F46E5, #6366F1)",
+              color: "#fff",
+              fontSize: 12,
+              fontWeight: 600,
+              fontFamily: "inherit",
+              cursor: busy ? "not-allowed" : "pointer",
+              boxShadow: "0 1px 2px rgba(79,70,229,0.25)",
+              transition: "all 0.15s ease",
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            {busy === "start" ? "Starting…" : "Start instance"}
+          </button>
+        </>
+      )}
 
       {/* Hidden file input for import */}
       <input

@@ -59,6 +59,9 @@ function CanvasInner() {
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null);
   const { screenToFlowPosition } = useReactFlow();
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  // Pulled from the store (set by DesignCanvasPage's useParams) so the
+  // toolbar can hide its Start-instance button on the new-process draft.
+  const canvasProcessId = useCanvasStore((s) => s.processId);
 
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const rawNodes = useCanvasStore((s) => s.nodes);
@@ -409,7 +412,7 @@ function CanvasInner() {
               borderRadius: 8,
             }}
           />
-          <CanvasToolbar onOpenAi={() => setAiDialogOpen(true)} />
+          <CanvasToolbar onOpenAi={() => setAiDialogOpen(true)} processId={canvasProcessId ?? undefined} />
         </ReactFlow>
 
         {aiDialogOpen && <AiScaffoldDialog onClose={() => setAiDialogOpen(false)} />}

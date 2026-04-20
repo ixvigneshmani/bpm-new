@@ -5,6 +5,9 @@ import DashboardLayout from "./pages/DashboardLayout";
 import DashboardPage from "./pages/DashboardPage";
 import ProcessListPage from "./pages/ProcessListPage";
 import DesignCanvasPage from "./pages/DesignCanvasPage";
+import TasksInboxPage from "./pages/TasksInboxPage";
+import InstancesListPage from "./pages/InstancesListPage";
+import InstanceDetailPage from "./pages/InstanceDetailPage";
 
 export function App() {
   return (
@@ -23,6 +26,9 @@ export function App() {
         <Route path="designer" element={<ProcessListPage />} />
         <Route path="designer/new" element={<DesignCanvasPage />} />
         <Route path="designer/:id" element={<DesignCanvasPage />} />
+        <Route path="tasks" element={<TasksInboxPage />} />
+        <Route path="running" element={<InstancesListPage />} />
+        <Route path="instances/:id" element={<InstanceDetailPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/home" replace />} />
     </Routes>

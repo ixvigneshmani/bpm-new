@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -6,6 +7,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from "@nestjs/common";
@@ -22,6 +24,28 @@ export class InstancesController {
     private readonly engine: EngineService,
     private readonly idempotency: IdempotencyService,
   ) {}
+
+  /** GET /instances?status=<status>
+   *  Tenant-wide list of instances (newest first, capped at 200).
+   *  Optional `status` query filters to one of running/completed/
+   *  failed/cancelled. Used by the "Running" page to show what's in
+   *  flight without picking a process first. */
+  @Get()
+  list(
+    @Req() req: AuthenticatedRequest,
+    @Query("status") status?: string,
+  ) {
+    const allowed = ["running", "completed", "failed", "cancelled"] as const;
+    if (status && !allowed.includes(status as (typeof allowed)[number])) {
+      throw new BadRequestException(
+        `status must be one of: ${allowed.join(", ")}`,
+      );
+    }
+    return this.engine.listInstancesForTenant({
+      tenantId: req.user.tenantId,
+      status: status as (typeof allowed)[number] | undefined,
+    });
+  }
 
   /** GET /instances/:id
    *  Single-instance detail: state, variables, live tokens, last 50

@@ -1442,6 +1442,55 @@ export class EngineService {
     }));
   }
 
+  /** List instances across the tenant, newest first. The "Running"
+   *  page calls this to show what's in flight without picking a
+   *  process first. Optional `status` filter narrows to a single
+   *  state ('running'/'completed'/'failed'/'cancelled'). Capped at
+   *  200; pagination cursor is the E7 perf concern.
+   *
+   *  Includes the parent process name + the user who started the
+   *  instance so the UI can render a single row without follow-up
+   *  GETs (small N+1 cost on the join is fine for the 200-row cap). */
+  async listInstancesForTenant(args: {
+    tenantId: string;
+    status?: "running" | "completed" | "failed" | "cancelled";
+  }): Promise<
+    Array<{
+      id: string;
+      processId: string;
+      processName: string;
+      status: "running" | "completed" | "failed" | "cancelled";
+      startedBy: string;
+      startedAt: string;
+      completedAt: string | null;
+      errorMessage: string | null;
+    }>
+  > {
+    const conds = [eq(processInstances.tenantId, args.tenantId)];
+    if (args.status) conds.push(eq(processInstances.status, args.status));
+    const rows = await this.db
+      .select({
+        id: processInstances.id,
+        processId: processInstances.processId,
+        processName: processes.name,
+        status: processInstances.status,
+        startedBy: processInstances.startedBy,
+        startedAt: processInstances.startedAt,
+        completedAt: processInstances.completedAt,
+        errorMessage: processInstances.errorMessage,
+      })
+      .from(processInstances)
+      .innerJoin(processes, eq(processes.id, processInstances.processId))
+      .where(and(...conds))
+      .orderBy(desc(processInstances.createdAt))
+      .limit(200);
+    return rows.map((r) => ({
+      ...r,
+      startedAt: r.startedAt.toISOString(),
+      completedAt: r.completedAt ? r.completedAt.toISOString() : null,
+    }));
+  }
+
   /** Single-instance detail with current state, live tokens, and the
    *  most recent 50 audit events. The debug view: when E4 lands and
    *  someone asks "why did the gateway choose the wrong branch?", this
