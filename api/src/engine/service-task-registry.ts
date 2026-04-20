@@ -98,11 +98,12 @@ export class ServiceTaskRegistry {
 export const noopHandler: ServiceTaskHandler = async () => ({});
 
 /** Logs the input + returns it unchanged. Useful for debugging the
- *  variable-flow pipeline without external side effects. */
+ *  variable-flow pipeline without external side effects. Uses
+ *  `debug` (not `log`) so production logs aren't flooded by routine
+ *  service-task traffic — bump `LOG_LEVEL=debug` to see it. */
 export const logHandler: ServiceTaskHandler = async (input) => {
-  // Use Logger directly so the output is structured + tenant-tagged.
   const logger = new Logger("ServiceTask:log");
-  logger.log({
+  logger.debug?.({
     instanceId: input.instanceId,
     tokenId: input.tokenId,
     variables: input.variables,
@@ -110,6 +111,23 @@ export const logHandler: ServiceTaskHandler = async (input) => {
   });
   return {};
 };
+
+/** Identifier-shaped variable name regex. Permissive enough for
+ *  typical canvas vocabulary (`approval_status`, `email.subject`)
+ *  but rejects strings with leading digits or structural punctuation.
+ *  The dot is allowed for readability — variables are flat in the
+ *  bag, dots are just label characters here. */
+const SAFE_VARIABLE_KEY_RE = /^[A-Za-z_][\w.-]{0,63}$/;
+/** Names we never accept regardless of regex shape. `__proto__`
+ *  matches the regex above (starts with `_`, all underscores) but
+ *  shows up as an own property on the result object — confusing
+ *  downstream and an obvious red flag in audit logs. `constructor`
+ *  / `prototype` are similar JS-shaped footguns. */
+const FORBIDDEN_VARIABLE_KEYS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 
 /** Sets a variable: reads `key` and `value` from `nodeData.input`
  *  (canvas-defined static input on the service task) and writes them
@@ -122,6 +140,16 @@ export const setVariableHandler: ServiceTaskHandler = async (input) => {
   if (!key) {
     throw new Error(
       "set-variable handler: nodeData.input.key (string) is required.",
+    );
+  }
+  if (FORBIDDEN_VARIABLE_KEYS.has(key) || !SAFE_VARIABLE_KEY_RE.test(key)) {
+    // Reject prototype-pollution-shaped names (`__proto__`,
+    // `constructor`, `prototype`) and anything with structural JS
+    // punctuation. The variables bag is consumed downstream as-is;
+    // a hostile key would surface in audit + outbox payloads and
+    // confuse consumers.
+    throw new Error(
+      `set-variable handler: key "${key}" must match ${SAFE_VARIABLE_KEY_RE} and not be a reserved name.`,
     );
   }
   return { [key]: cfg.value ?? null };

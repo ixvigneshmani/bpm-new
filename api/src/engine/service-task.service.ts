@@ -21,7 +21,7 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
-import { EngineService } from "./engine.service";
+import { EngineService, parseDurationToMs } from "./engine.service";
 import {
   logHandler,
   noopHandler,
@@ -40,6 +40,32 @@ type ServiceTaskJobInput = {
   nodeData: Record<string, unknown>;
   variables: Record<string, unknown>;
 };
+
+/** Default timeout per service-task handler call. Caps the worker
+ *  slot a single bad handler can hold. Override per node via
+ *  `data.resilience.timeout` (ISO 8601 duration string, e.g. "PT60S"). */
+const DEFAULT_HANDLER_TIMEOUT_MS = 30_000;
+/** Hard ceiling — even an explicit per-node timeout can't exceed this
+ *  without conflicting with the WorkerService stale-job reclaim
+ *  threshold (5 min). A handler that genuinely needs longer should
+ *  switch to a webhook-callback async pattern. */
+const MAX_HANDLER_TIMEOUT_MS = 4 * 60 * 1_000;
+
+/** Resolve `nodeData.resilience.timeout` (ISO 8601 duration like
+ *  "PT30S") into a millisecond cap, falling back to the default and
+ *  hard-clamped to MAX_HANDLER_TIMEOUT_MS. Invalid strings fall back
+ *  silently — handler still runs, with the default timeout. */
+function resolveHandlerTimeoutMs(nodeData: Record<string, unknown>): number {
+  const res = nodeData.resilience as { timeout?: unknown } | undefined;
+  const raw = res?.timeout;
+  if (typeof raw === "string") {
+    const ms = parseDurationToMs(raw);
+    if (ms !== null && ms > 0) {
+      return Math.min(ms, MAX_HANDLER_TIMEOUT_MS);
+    }
+  }
+  return DEFAULT_HANDLER_TIMEOUT_MS;
+}
 
 @Injectable()
 export class ServiceTaskService implements OnModuleInit {
@@ -101,7 +127,19 @@ export class ServiceTaskService implements OnModuleInit {
       variables: input.variables ?? {},
     };
 
-    const result = await handler(handlerInput);
+    // Race the handler against a timeout. Without this, a hung
+    // `fetch` (or any async handler that never resolves) ties up
+    // a worker slot until the 5-min stale-reclaim sweep — five
+    // bad handlers would freeze the queue.
+    const timeoutMs = resolveHandlerTimeoutMs(input.nodeData);
+    const handlerPromise = handler(handlerInput);
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Handler "${input.userTopic}" exceeded ${timeoutMs}ms timeout`)),
+        timeoutMs,
+      ).unref?.(),
+    );
+    const result = await Promise.race([handlerPromise, timeoutPromise]);
 
     // Resume the token. We pass the handler's return value — the
     // engine shallow-merges it into instance.variables and continues

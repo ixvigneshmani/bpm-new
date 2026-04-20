@@ -102,7 +102,14 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
    *  registration wins; re-registering the same topic logs a warning. */
   registerHandler(topic: string, handler: JobHandler, onDead?: JobOnDead): void {
     if (this.handlers.has(topic)) {
-      this.logger.warn(`Worker handler for "${topic}" re-registered; ignoring.`);
+      // First-wins: ignore the new handler AND ignore its onDead. The
+      // old log just said "ignoring" which left it ambiguous whether
+      // onDead was applied; spell out both so re-registration bugs
+      // ("I rebound my handler but the dead path still uses the old
+      // hook") are visible in logs.
+      this.logger.warn(
+        `Worker handler for "${topic}" already registered; both handler + onDead are ignored (first-wins).`,
+      );
       return;
     }
     this.handlers.set(topic, handler);
@@ -132,13 +139,30 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
      *  for retry-after semantics or future timer events. Defaults to
      *  `now`, meaning the next tick claims it. */
     scheduledFor?: Date;
+    /** Optional Drizzle transaction — when the caller is already
+     *  inside a txn (e.g. EngineService suspending a token on a
+     *  serviceTask), pass it so the ENGINE_JOBS insert participates
+     *  in the SAME commit as the token+audit writes. Without this the
+     *  job row commits on a separate connection and a parallel worker
+     *  tick can race the engine's commit, claim the job, then call
+     *  back into completeServiceTask before the token is visible
+     *  as `waiting/service-task` — observable as spurious
+     *  "Token is not waiting" failures + retries.
+     *
+     *  Empirically the race window is narrow today, but threading
+     *  the txn makes correctness structural rather than timing-
+     *  dependent (the worker can't possibly see the job until the
+     *  outer commit lands). */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx?: any;
   }): Promise<{ id: string }> {
     if (args.maxAttempts && args.maxAttempts > BACKOFF_MS.length) {
       this.logger.warn(
         `enqueue(${args.topic}): maxAttempts=${args.maxAttempts} exceeds BACKOFF_MS schedule length (${BACKOFF_MS.length}); effective cap is ${BACKOFF_MS.length}.`,
       );
     }
-    const [row] = await this.db
+    const conn = args.tx ?? this.db;
+    const [row] = await conn
       .insert(engineJobs)
       .values({
         tenantId: args.tenantId,

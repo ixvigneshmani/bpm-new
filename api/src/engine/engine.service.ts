@@ -34,6 +34,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import {
+  engineJobs,
   instanceEvents,
   instanceTokens,
   outboxEvents,
@@ -41,6 +42,7 @@ import {
   processVersions,
   processes,
 } from "../database/schema";
+import { inArray } from "drizzle-orm";
 import { SERVICE_TASK_TOPIC } from "./service-task-registry";
 import { WorkerService } from "./worker.service";
 
@@ -487,11 +489,14 @@ export class EngineService {
             eventType: "token-waiting",
             payload: { waitingFor: "service-task", topic: userTopic },
           });
-          // Enqueue the worker job. We pass the entire visible
-          // variable bag as input so handlers can read whatever they
-          // need; output (the handler's return value) is shallow-merged
-          // back into instance.variables on completion.
+          // Enqueue the worker job IN THE SAME TXN as the token+audit
+          // writes above. Without `tx:`, the ENGINE_JOBS row commits
+          // on a separate connection and a parallel worker tick can
+          // race the engine's commit, claim the job, and call
+          // completeServiceTask before the token is visible as
+          // `waiting/service-task`.
           await this.worker.enqueue({
+            tx: args.tx,
             tenantId: args.tenantId,
             jobType: "service-task",
             topic: SERVICE_TASK_TOPIC,
@@ -503,8 +508,6 @@ export class EngineService {
               nodeData: node.data ?? {},
               variables: args.variables,
             },
-            // Service tasks default to 3 attempts. Override per-node
-            // (E5 uses node.data.resilience.retry.count if set).
             maxAttempts: resolveServiceTaskMaxAttempts(node) ?? 3,
           });
           return { tokenStatus: "waiting", hops };
@@ -1055,16 +1058,27 @@ export class EngineService {
         payload: { reason: "service-task-dead", message: args.reason },
       });
 
-      await this.updateInstanceWithLock(
-        tx,
-        tokenRow.instanceId,
-        instRow.version,
-        {
-          status: "failed",
-          errorMessage: args.reason,
-          completedAt: new Date(),
-        },
-      );
+      // Instance flip can race with a concurrent cancel/complete that
+      // already moved the instance to a terminal state. The
+      // optimistic-lock conflict on .version surfaces as
+      // ConflictException — catch it and skip the instance update +
+      // outbox emit. The token-level audit above already records the
+      // service-task failure; the instance's existing terminal state
+      // is the authoritative outcome.
+      try {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instRow.version,
+          {
+            status: "failed",
+            errorMessage: args.reason,
+            completedAt: new Date(),
+          },
+        );
+      } catch {
+        return;
+      }
       await tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
@@ -1598,6 +1612,31 @@ export class EngineService {
         },
       );
 
+      // Cancel any in-flight jobs tied to this instance. Without this,
+      // service-task jobs that were queued/running when the user
+      // cancels keep ticking; their handlers eventually call back into
+      // completeServiceTask, find the instance cancelled, and throw,
+      // burning retry slots and generating spurious error logs.
+      // Marking them `dead` short-circuits that loop. Status='running'
+      // jobs aren't aborted mid-execution (we can't), but the
+      // failServiceTaskFromWorker idempotency above handles their
+      // post-completion writes by no-op'ing on the already-terminal
+      // instance.
+      const cancelledJobs = await tx
+        .update(engineJobs)
+        .set({
+          status: "dead",
+          lastError: "Instance cancelled.",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(engineJobs.instanceId, args.instanceId),
+            inArray(engineJobs.status, ["queued", "running"]),
+          ),
+        )
+        .returning({ id: engineJobs.id });
+
       await tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: args.instanceId,
@@ -1606,6 +1645,7 @@ export class EngineService {
         payload: {
           reason: args.reason ?? null,
           tokensCancelled: cancelledCount,
+          jobsCancelled: cancelledJobs.length,
         },
       });
       await this.emitOutbox(tx, {
@@ -1616,6 +1656,7 @@ export class EngineService {
           reason: args.reason ?? null,
           cancelledBy: args.userId,
           tokensCancelled: cancelledCount,
+          jobsCancelled: cancelledJobs.length,
         },
       });
 
@@ -2191,6 +2232,22 @@ export function resolveDirectUserAssignee(
     return null;
   }
   return value;
+}
+
+/** Parse a small ISO 8601 duration (the subset BPMN canvases emit
+ *  for SLA + timeout fields) into milliseconds. Supports the
+ *  `PT<n>H<n>M<n>S` form and any subset thereof — e.g. `PT30S`,
+ *  `PT5M`, `PT1H30M`. Returns null if the input is malformed; callers
+ *  fall back to a sane default. We deliberately don't pull a full
+ *  ISO 8601 lib for a one-shot use case. */
+export function parseDurationToMs(iso: string): number | null {
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(iso.trim());
+  if (!m) return null;
+  const h = m[1] ? parseInt(m[1], 10) : 0;
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const s = m[3] ? parseFloat(m[3]) : 0;
+  const total = h * 3_600_000 + min * 60_000 + s * 1_000;
+  return total > 0 ? total : null;
 }
 
 function sortKeysDeep<T>(value: T): T {

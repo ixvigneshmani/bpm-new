@@ -1363,6 +1363,84 @@ describe("EngineService.completeTask", () => {
     ).rejects.toThrow(/Concurrent token update/);
   });
 
+  it("E5 polish: cancelInstance also marks queued/running ENGINE_JOBS dead", async () => {
+    // Standalone fake — captures every UPDATE so we can verify the
+    // engine_jobs UPDATE is issued during the cancel flow.
+    const inst = { id: "inst-1", status: "running", version: 0 };
+    const liveTokens: Array<{ id: string; version: number; currentNodeId: string }> = [
+      { id: "tok-1", version: 0, currentNodeId: "svc" },
+    ];
+    const updates: { table: string; set: Record<string, unknown> }[] = [];
+    const tableName = (table: unknown): string => {
+      if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+        // @ts-expect-error — drizzle internal
+        return table[Symbol.for("drizzle:Name")] as string;
+      }
+      return "unknown";
+    };
+    const tx = {
+      insert: (_table: unknown) => ({
+        values: () => ({
+          returning: () => Promise.resolve([{}]),
+          then: (r: (v: unknown) => unknown) => r(undefined),
+        }),
+      }),
+      update: (table: unknown) => {
+        const name = tableName(table);
+        return {
+          set: (values: Record<string, unknown>) => {
+            updates.push({ table: name, set: values });
+            return {
+              where: () => ({
+                returning: () => {
+                  if (name === "ENGINE_JOBS") {
+                    return Promise.resolve([{ id: "job-1" }, { id: "job-2" }]);
+                  }
+                  return Promise.resolve([{ id: "x" }]);
+                },
+              }),
+            };
+          },
+        };
+      },
+      select: () => {
+        let routed: string | null = null;
+        const chain = {
+          from: (table: unknown) => {
+            routed = tableName(table);
+            return chain;
+          },
+          where: () => chain,
+          orderBy: () => chain,
+          limit: () => Promise.resolve(routed === "PROCESS_INSTANCES" ? [inst] : []),
+          then: (r: (v: unknown) => unknown) => {
+            if (routed === "INSTANCE_TOKENS") return r(liveTokens);
+            return r([]);
+          },
+        };
+        return chain;
+      },
+    };
+    const db = {
+      transaction: <T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> => fn(tx),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(db as any, makeFakeWorker() as any);
+
+    const out = await service.cancelInstance({
+      instanceId: "inst-1",
+      tenantId: "t",
+      userId: UUID_A,
+    });
+    expect(out.status).toBe("cancelled");
+    // The ENGINE_JOBS UPDATE was issued with status=dead.
+    const jobUpdate = updates.find(
+      (u) => u.table === "ENGINE_JOBS" && u.set.status === "dead",
+    );
+    expect(jobUpdate).toBeDefined();
+    expect(jobUpdate?.set.lastError).toBe("Instance cancelled.");
+  });
+
   it("cancelled instance + already-terminal idempotent cancel", async () => {
     // Build a richer fake to cover cancelInstance: needs select on
     // PROCESS_INSTANCES (with status + version), select on

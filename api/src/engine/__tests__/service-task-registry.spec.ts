@@ -86,4 +86,23 @@ describe("Built-in service-task handlers", () => {
       setVariableHandler(baseInput({ nodeData: { input: { value: 1 } } })),
     ).rejects.toThrow(/key.*required/);
   });
+
+  it("setVariableHandler rejects prototype-pollution-shaped keys", async () => {
+    for (const bad of ["__proto__", "constructor", "1leadingDigit", "with space", "with;punct"]) {
+      await expect(
+        setVariableHandler(
+          baseInput({ nodeData: { input: { key: bad, value: "x" } } }),
+        ),
+      ).rejects.toThrow(/must match/);
+    }
+  });
+
+  it("setVariableHandler accepts standard variable names", async () => {
+    for (const ok of ["amount", "approval_status", "form.email", "x-y-z", "_private"]) {
+      const out = await setVariableHandler(
+        baseInput({ nodeData: { input: { key: ok, value: 1 } } }),
+      );
+      expect(out).toEqual({ [ok]: 1 });
+    }
+  });
 });
