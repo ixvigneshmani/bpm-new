@@ -182,6 +182,7 @@ export class EngineService {
         tokenVersion: token.version,
         currentNodeId: startNode.id,
         canvas,
+        variables: initialVariables,
       });
 
       // 5. Flip the instance to its terminal state (E2: one token per
@@ -281,6 +282,12 @@ export class EngineService {
     tokenVersion: number;
     currentNodeId: string;
     canvas: EngineCanvas;
+    /** Read-only snapshot of the instance variable bag. Required so
+     *  exclusiveGateway condition expressions (E4) and future
+     *  service-task input mappings (E5) can evaluate against process
+     *  state without re-reading the DB on every hop. Pass the merged
+     *  bag from completeTask, or `initialVariables` from startInstance. */
+    variables: Record<string, unknown>;
     resumeFromWait?: boolean;
   }): Promise<{
     tokenStatus: "completed" | "waiting" | "failed";
@@ -403,9 +410,9 @@ export class EngineService {
       }
       isResuming = false;
 
-      // Pass-through. E4 inserts gateway evaluation here, E5 wires
-      // the service-task handler registry — both still emit a single
-      // node-exited and pick the next edge afterward.
+      // Pass-through node-exited. Gateways still emit a single
+      // node-exited; the difference is in *which* outgoing edge gets
+      // picked below.
       await args.tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: args.instanceId,
@@ -414,7 +421,41 @@ export class EngineService {
         eventType: "node-exited",
       });
 
-      const next = pickNextEdge(args.canvas, nodeId, this.logger, node.type);
+      // Edge selection: exclusive gateway → first-true-condition with
+      // default-flow fallback (E4). Other gateway types fall through
+      // to the simple "first outgoing" picker until later phases land
+      // their semantics. The picker is wrapped here so a gateway that
+      // can't find any matching branch fails the instance with a
+      // diagnostic message rather than silently going off-rails.
+      let next: EngineEdge | null;
+      if (node.type === "exclusiveGateway") {
+        const gw = pickExclusiveGatewayEdge(
+          args.canvas,
+          nodeId,
+          args.variables,
+          this.logger,
+        );
+        if (gw.kind === "matched") {
+          next = gw.edge;
+        } else {
+          const message =
+            gw.kind === "no-match"
+              ? `Exclusive gateway ${nodeId}: no outgoing condition matched and no default flow defined.`
+              : `Exclusive gateway ${nodeId}: condition eval failed (${gw.reason}).`;
+          await this.markTokenFailed(
+            args.tx,
+            args.tenantId,
+            args.instanceId,
+            args.tokenId,
+            version,
+            nodeId,
+            message,
+          );
+          return { tokenStatus: "failed", hops, errorMessage: message };
+        }
+      } else {
+        next = pickNextEdge(args.canvas, nodeId, this.logger, node.type);
+      }
       if (!next) {
         // Dead-end node that isn't an end event. Treat as a structural
         // modeling error — record it in the audit and let the caller
@@ -639,6 +680,7 @@ export class EngineService {
         tokenVersion,
         currentNodeId: tokenRow.currentNodeId,
         canvas,
+        variables: mergedVariables,
         resumeFromWait: true,
       });
 
@@ -1340,6 +1382,150 @@ function canonicalise(canvas: EngineCanvas): EngineCanvas {
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((e) => ({ ...e, data: e.data ? sortKeysDeep(e.data) : undefined })),
   };
+}
+
+/** Result of evaluating an exclusive gateway:
+ *  • `matched`  — picked an outgoing edge (matching condition or default).
+ *  • `no-match` — no condition truthy AND no default flow defined.
+ *  • `eval-error` — a condition expression threw / was rejected.
+ *  Caller (advanceToken) maps the latter two to a failed instance with
+ *  the diagnostic recorded in INSTANCE_EVENTS. */
+export type GatewayPickResult =
+  | { kind: "matched"; edge: EngineEdge; matchedAt: number; reason: "condition" | "default" }
+  | { kind: "no-match" }
+  | { kind: "eval-error"; reason: string };
+
+/** Pick the outgoing edge an exclusive gateway should follow:
+ *  1. Walk outgoing sequence flows in declaration order.
+ *  2. Take the first whose `data.condition` evaluates truthy.
+ *  3. If none match, take the edge marked `data.isDefault: true`.
+ *  4. If none match and no default → return no-match (caller fails).
+ *
+ *  Edges with no condition are skipped during step 2 — they can only
+ *  be selected as the default in step 3. This matches BPMN 2.0 spec
+ *  (§13.3.2): conditional flows and default flow are distinct kinds. */
+export function pickExclusiveGatewayEdge(
+  canvas: EngineCanvas,
+  fromNodeId: string,
+  variables: Record<string, unknown>,
+  logger?: { warn?: (msg: string) => void; debug?: (msg: string) => void },
+): GatewayPickResult {
+  const out = canvas.edges.filter(
+    (e) =>
+      e.source === fromNodeId &&
+      !NON_SEQUENCE_FLOW_TYPES.has(e.data?.flowType ?? ""),
+  );
+  let matchedAt = 0;
+  for (const edge of out) {
+    const cond = edge.data?.condition;
+    if (typeof cond !== "string" || cond.trim() === "") {
+      matchedAt++;
+      continue;
+    }
+    let result: boolean;
+    try {
+      result = evalCondition(cond, variables);
+    } catch (err) {
+      return { kind: "eval-error", reason: (err as Error).message };
+    }
+    logger?.debug?.(
+      `gateway ${fromNodeId}: edge ${edge.id} condition "${cond}" → ${result}`,
+    );
+    if (result) {
+      return { kind: "matched", edge, matchedAt, reason: "condition" };
+    }
+    matchedAt++;
+  }
+  // No conditional flow matched. Look for a default flow.
+  const def = out.find((e) => e.data?.isDefault === true);
+  if (def) {
+    return { kind: "matched", edge: def, matchedAt: out.indexOf(def), reason: "default" };
+  }
+  return { kind: "no-match" };
+}
+
+/** Identifiers we hard-block in condition expressions because they
+ *  expose a sandbox escape: globals, prototype walking, dynamic code
+ *  execution, control-flow statements. A truly hostile expression
+ *  would need to slip past *all* of these. We pair this with a
+ *  character-allowlist below for defence-in-depth.
+ *
+ *  This is "good enough for trusted-tenant authoring" — the same
+ *  trust model FlowPro applies to AI-generated canvases. A future
+ *  hardening pass can swap to a real FEEL parser (jsonata, etc.). */
+const FORBIDDEN_CONDITION_TOKENS_RE =
+  /\b(this|window|globalThis|process|global|require|import|export|eval|Function|constructor|prototype|__proto__|arguments|new|class|async|await|yield|throw|while|for|do|if|else|return|var|let|const|delete|void|typeof|instanceof|in)\b/;
+
+/** Allowed character set: alphanumerics + identifier chars +
+ *  arithmetic/comparison/logical operators + parens + dot/bracket
+ *  member access + comma + whitespace + string quotes. Anything
+ *  outside this is structural code, not an expression. */
+const ALLOWED_CONDITION_CHAR_RE = /^[\w\s\d.,\[\]()+\-*/%<>=!&|"'`]+$/;
+
+/** Maximum source length for a condition. Real BPMN conditions are
+ *  short; a runaway 10KB expression is almost certainly an attack
+ *  or a stuck AI generation. */
+const MAX_CONDITION_LENGTH = 500;
+
+/** JS-identifier check: only top-level vars whose key is a valid
+ *  identifier can be passed as a Function() parameter. Keys with
+ *  hyphens, spaces, etc. are dropped from the eval scope (the
+ *  condition still runs; it just can't reference those names
+ *  directly — callers in trouble can rename keys). */
+const VALID_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
+
+/** Evaluate a FEEL-lite condition string against an instance variable
+ *  bag. Returns boolean. Throws BadRequestException on:
+ *    • disallowed character
+ *    • forbidden identifier (sink risk)
+ *    • length cap exceeded
+ *    • runtime error (ReferenceError on unknown var, TypeError, …)
+ *
+ *  This is NOT a full FEEL implementation — just enough JS expression
+ *  surface to express the conditions a business analyst writes
+ *  ("amount > 1000 && approved", "form.status === 'urgent'"). The
+ *  sandbox is the static analyser, not the runtime — `new Function`
+ *  itself runs without its own isolate. */
+export function evalCondition(
+  expr: string,
+  variables: Record<string, unknown>,
+): boolean {
+  if (typeof expr !== "string") {
+    throw new BadRequestException("Condition is not a string.");
+  }
+  if (expr.length > MAX_CONDITION_LENGTH) {
+    throw new BadRequestException(
+      `Condition longer than ${MAX_CONDITION_LENGTH} characters.`,
+    );
+  }
+  if (!ALLOWED_CONDITION_CHAR_RE.test(expr)) {
+    throw new BadRequestException(
+      `Condition contains disallowed character: "${expr}"`,
+    );
+  }
+  if (FORBIDDEN_CONDITION_TOKENS_RE.test(expr)) {
+    throw new BadRequestException(
+      `Condition contains forbidden identifier: "${expr}"`,
+    );
+  }
+  const safeKeys = Object.keys(variables).filter((k) =>
+    VALID_IDENTIFIER_RE.test(k),
+  );
+  const safeValues = safeKeys.map((k) => variables[k]);
+  try {
+    // Body is wrapped in `Boolean(...)` so a truthy non-bool
+    // ("yes", 1, etc.) coerces predictably and a thrown ReferenceError
+    // for an unknown identifier surfaces as a clean BadRequest.
+    const fn = new Function(
+      ...safeKeys,
+      `"use strict"; return Boolean(${expr});`,
+    );
+    return fn(...safeValues) === true;
+  } catch (err) {
+    throw new BadRequestException(
+      `Condition eval failed: ${(err as Error).message}`,
+    );
+  }
 }
 
 /** Resolve a userTask node's `data.assignment` to a concrete userId

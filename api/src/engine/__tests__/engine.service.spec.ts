@@ -10,7 +10,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   EngineService,
+  evalCondition,
   findStartEvent,
+  pickExclusiveGatewayEdge,
   pickNextEdge,
   projectCanvas,
   resolveDirectUserAssignee,
@@ -479,6 +481,91 @@ describe("EngineService.startInstance", () => {
     ).rejects.toThrow(/Process not found/);
   });
 
+  it("E4: exclusive gateway routes via matching condition (startInstance with vars)", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "gw", type: "exclusiveGateway" },
+        { id: "approve", type: "endEvent" },
+        { id: "review", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "gw" },
+        { id: "e2", source: "gw", target: "approve", data: { condition: "amount < 1000" } },
+        { id: "e3", source: "gw", target: "review", data: { isDefault: true } },
+      ],
+    });
+
+    const out = await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+      variables: { amount: 500 },
+    });
+
+    expect(out.status).toBe("completed");
+    // Verify the gateway took the condition branch (e2 → approve), not
+    // the default. The audit edge-taken events tell us which way it went.
+    const edgeIds = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS" && i.values[0].eventType === "edge-taken")
+      .map((i) => (i.values[0].payload as Record<string, unknown>).edgeId as string);
+    expect(edgeIds).toContain("e2");
+    expect(edgeIds).not.toContain("e3");
+  });
+
+  it("E4: exclusive gateway falls through to default when no condition matches", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "gw", type: "exclusiveGateway" },
+        { id: "approve", type: "endEvent" },
+        { id: "review", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "gw" },
+        { id: "e2", source: "gw", target: "approve", data: { condition: "amount < 100" } },
+        { id: "e3", source: "gw", target: "review", data: { isDefault: true } },
+      ],
+    });
+    const out = await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+      variables: { amount: 5000 },
+    });
+    expect(out.status).toBe("completed");
+    const edgeIds = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS" && i.values[0].eventType === "edge-taken")
+      .map((i) => (i.values[0].payload as Record<string, unknown>).edgeId as string);
+    expect(edgeIds).toContain("e3"); // default branch
+    expect(edgeIds).not.toContain("e2");
+  });
+
+  it("E4: exclusive gateway with no match and no default → instance failed", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "gw", type: "exclusiveGateway" },
+        { id: "approve", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "gw" },
+        { id: "e2", source: "gw", target: "approve", data: { condition: "amount < 100" } },
+      ],
+    });
+    const out = await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+      variables: { amount: 5000 },
+    });
+    expect(out.status).toBe("failed");
+    const instUpdate = env.updates.find(
+      (u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed",
+    );
+    expect(instUpdate?.set.errorMessage).toMatch(/no outgoing condition matched/);
+  });
+
   it("writes a deterministic definitionHash that depends on canvas content", async () => {
     const canvasA = {
       nodes: [
@@ -522,6 +609,169 @@ describe("EngineService.startInstance", () => {
     await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
     const hashC = (env.inserts.find((i) => i.table === "PROCESS_INSTANCES")?.values[0].definitionHash) as string;
     expect(hashC).not.toBe(hashA);
+  });
+});
+
+// ─── E4: condition eval + exclusive-gateway edge selection ──────────
+
+describe("evalCondition", () => {
+  it("evaluates simple comparisons against top-level vars", () => {
+    expect(evalCondition("amount > 1000", { amount: 5000 })).toBe(true);
+    expect(evalCondition("amount > 1000", { amount: 500 })).toBe(false);
+    expect(evalCondition("amount === 0", { amount: 0 })).toBe(true);
+  });
+
+  it("supports boolean combinators", () => {
+    expect(
+      evalCondition("amount > 100 && approved", { amount: 200, approved: true }),
+    ).toBe(true);
+    expect(
+      evalCondition("amount > 100 && approved", { amount: 200, approved: false }),
+    ).toBe(false);
+    expect(
+      evalCondition("amount > 100 || approved", { amount: 50, approved: true }),
+    ).toBe(true);
+  });
+
+  it("coerces truthy/falsy values to boolean predictably", () => {
+    expect(evalCondition("approved", { approved: "yes" })).toBe(true);
+    expect(evalCondition("approved", { approved: 0 })).toBe(false);
+    expect(evalCondition("approved", { approved: null })).toBe(false);
+  });
+
+  it("supports string equality", () => {
+    expect(
+      evalCondition("status === 'urgent'", { status: "urgent" }),
+    ).toBe(true);
+    expect(
+      evalCondition("status === 'urgent'", { status: "normal" }),
+    ).toBe(false);
+  });
+
+  it("supports nested member access via dot", () => {
+    expect(
+      evalCondition("form.amount > 1000", { form: { amount: 2000 } }),
+    ).toBe(true);
+  });
+
+  it("rejects forbidden identifiers (prototype walking, globals, code-eval)", () => {
+    for (const expr of [
+      "this.x > 0",
+      "process.env.SECRET === 'x'",
+      "constructor === 1",
+      "__proto__ === null",
+      "eval('1 > 0')",
+      "new Date() > 0",
+      "Function('return 1')() === 1",
+    ]) {
+      expect(() => evalCondition(expr, {})).toThrow(/forbidden/);
+    }
+  });
+
+  it("rejects disallowed characters (semicolons, braces)", () => {
+    expect(() => evalCondition("amount > 0; alert(1)", { amount: 1 })).toThrow(
+      /disallowed character/,
+    );
+    expect(() => evalCondition("{} === {}", {})).toThrow(/disallowed character/);
+    // Note: bare assignment `amount = 999` is allowed by the char filter
+    // but is harmless — strict-mode `new Function` makes the parameter
+    // reassignment local, no mutation leaks back to the variable bag.
+    // The result is truthy (999), which is correct boolean coercion.
+  });
+
+  it("rejects expressions over the length cap", () => {
+    expect(() => evalCondition("a" + " > 0".repeat(1000), {})).toThrow(/longer than/);
+  });
+
+  it("surfaces runtime errors (unknown identifier) as BadRequest", () => {
+    expect(() => evalCondition("unknownVar > 0", {})).toThrow(
+      /Condition eval failed/,
+    );
+  });
+
+  it("ignores variable keys that aren't valid JS identifiers", () => {
+    // "user-id" can't be a Function param; valid keys are still in scope.
+    const vars = { "user-id": "abc", amount: 100 };
+    expect(evalCondition("amount > 50", vars)).toBe(true);
+  });
+});
+
+describe("pickExclusiveGatewayEdge", () => {
+  const gatewayCanvas = (
+    edges: Array<{ id: string; target: string; condition?: string; isDefault?: boolean }>,
+  ): EngineCanvas => ({
+    nodes: [
+      { id: "gw", type: "exclusiveGateway" },
+      { id: "a", type: "endEvent" },
+      { id: "b", type: "endEvent" },
+      { id: "c", type: "endEvent" },
+    ],
+    edges: edges.map((e) => ({
+      id: e.id,
+      source: "gw",
+      target: e.target,
+      data: { condition: e.condition, isDefault: e.isDefault },
+    })),
+  });
+
+  it("picks the first edge whose condition evaluates truthy", () => {
+    const canvas = gatewayCanvas([
+      { id: "e1", target: "a", condition: "amount > 1000" },
+      { id: "e2", target: "b", condition: "amount > 100" },
+      { id: "e3", target: "c", isDefault: true },
+    ]);
+    const result = pickExclusiveGatewayEdge(canvas, "gw", { amount: 500 });
+    expect(result.kind).toBe("matched");
+    if (result.kind === "matched") {
+      expect(result.edge.id).toBe("e2");
+      expect(result.reason).toBe("condition");
+    }
+  });
+
+  it("falls through to default flow when no condition matches", () => {
+    const canvas = gatewayCanvas([
+      { id: "e1", target: "a", condition: "amount > 1000" },
+      { id: "e2", target: "b", condition: "amount > 100" },
+      { id: "e3", target: "c", isDefault: true },
+    ]);
+    const result = pickExclusiveGatewayEdge(canvas, "gw", { amount: 50 });
+    expect(result.kind).toBe("matched");
+    if (result.kind === "matched") {
+      expect(result.edge.id).toBe("e3");
+      expect(result.reason).toBe("default");
+    }
+  });
+
+  it("returns no-match when nothing matches and no default exists", () => {
+    const canvas = gatewayCanvas([
+      { id: "e1", target: "a", condition: "amount > 1000" },
+      { id: "e2", target: "b", condition: "amount > 100" },
+    ]);
+    const result = pickExclusiveGatewayEdge(canvas, "gw", { amount: 50 });
+    expect(result.kind).toBe("no-match");
+  });
+
+  it("returns eval-error when a condition throws", () => {
+    const canvas = gatewayCanvas([
+      { id: "e1", target: "a", condition: "this === bad" },
+      { id: "e2", target: "b", isDefault: true },
+    ]);
+    const result = pickExclusiveGatewayEdge(canvas, "gw", {});
+    expect(result.kind).toBe("eval-error");
+  });
+
+  it("skips edges with no condition during matching, considers them only as default", () => {
+    // First edge has no condition (and isn't default) — should be skipped,
+    // not silently picked.
+    const canvas = gatewayCanvas([
+      { id: "e1", target: "a" }, // no condition, no default
+      { id: "e2", target: "b", condition: "amount > 100" },
+    ]);
+    const result = pickExclusiveGatewayEdge(canvas, "gw", { amount: 200 });
+    expect(result.kind).toBe("matched");
+    if (result.kind === "matched") {
+      expect(result.edge.id).toBe("e2");
+    }
   });
 });
 
