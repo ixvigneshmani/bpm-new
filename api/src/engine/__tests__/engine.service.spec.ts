@@ -515,6 +515,22 @@ describe("EngineService.startInstance", () => {
     ).rejects.toThrow(/Process not found/);
   });
 
+  it("E4.5c: startInstance writes an OUTBOX_EVENTS row alongside instance-started audit", async () => {
+    buildService({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [{ id: "e1", source: "s", target: "e" }],
+    });
+    await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    const outboxRows = env.inserts.filter((i) => i.table === "OUTBOX_EVENTS");
+    const outboxTypes = outboxRows.map((i) => i.values[0].eventType as string);
+    // start + complete events both go to the outbox.
+    expect(outboxTypes).toContain("instance-started");
+    expect(outboxTypes).toContain("instance-completed");
+  });
+
   it("E4.5b: startInstance writes processVersionId (PROCESS_VERSIONS dedup path)", async () => {
     buildService({
       nodes: [
@@ -1320,6 +1336,69 @@ describe("EngineService.completeTask", () => {
     });
     expect(out2.status).toBe("cancelled");
     expect(out2.tokensCancelled).toBe(0);
+  });
+
+  it("E4.5c: PII redaction replaces value in variable-set audit when key is in canvas.engineConfig", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: UUID_A,
+      canvas: {
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+        ],
+        engineConfig: { redactedVariableKeys: ["ssn"] },
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await service.completeTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+      formData: { ssn: "123-45-6789", approval: "yes" },
+    });
+    const variableSetRows = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS" && i.values[0].eventType === "variable-set")
+      .map((i) => i.values[0].payload as Record<string, unknown>);
+    const ssnRow = variableSetRows.find((p) => p.key === "ssn");
+    const approvalRow = variableSetRows.find((p) => p.key === "approval");
+    expect(ssnRow?.value).toBe("<redacted>");
+    expect(ssnRow?.redacted).toBe(true);
+    expect(approvalRow?.value).toBe("yes");
+    expect(approvalRow?.redacted).toBeUndefined();
+  });
+
+  it("E4.5c: completeTask emits a task-completed outbox row", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: UUID_A,
+      canvas: {
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+        ],
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await service.completeTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      userId: UUID_A,
+    });
+    const outboxTypes = env.inserts
+      .filter((i) => i.table === "OUTBOX_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(outboxTypes).toContain("task-completed");
   });
 
   it("if the task is followed by another userTask, instance stays running and re-suspends", async () => {

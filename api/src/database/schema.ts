@@ -345,6 +345,98 @@ export const processDocuments = pgTable(
 
 // ─── AI_INTERACTIONS (scaffold call history) ────────────────────────
 
+// ─── WEBHOOK_SUBSCRIPTIONS ──────────────────────────────────────────
+// Tenant-configured HTTP endpoints that should be notified on engine
+// lifecycle events (instance-started, task-completed, etc.). Matching
+// happens by event type with optional process scope. Each fire is
+// HMAC-signed using the per-subscription secret so receivers can
+// verify the request came from us.
+//
+// Dispatch: the engine writes a row into OUTBOX_EVENTS (transactional
+// with the audit row). A worker handler reads the outbox, looks up
+// matching subscriptions, enqueues one ENGINE_JOBS row per (event ×
+// subscription), and the worker delivers + retries with backoff.
+
+export const webhookSubscriptionStatusEnum = pgEnum(
+  "WEBHOOK_SUB_STATUS",
+  ["active", "paused", "disabled"],
+);
+
+export const webhookSubscriptions = pgTable(
+  "WEBHOOK_SUBSCRIPTIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** Optional: scope to a single process. Null = tenant-wide. */
+    processId: uuid("PROCESS_ID").references(() => processes.id, {
+      onDelete: "cascade",
+    }),
+    name: varchar("NAME", { length: 255 }).notNull(),
+    url: varchar("URL", { length: 2048 }).notNull(),
+    /** Comma-separated list of INSTANCE_EVENT_TYPE values to fire on,
+     *  or "*" for all. Free-form to keep the schema simple; the
+     *  dispatcher splits + matches at runtime. */
+    eventTypes: text("EVENT_TYPES").notNull().default("*"),
+    /** Shared secret used for the X-Engine-Signature HMAC. Stored
+     *  plaintext today; encrypt-at-rest is on the security backlog. */
+    secret: varchar("SECRET", { length: 128 }).notNull(),
+    status: webhookSubscriptionStatusEnum("STATUS").notNull().default("active"),
+    createdBy: uuid("CREATED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("WEBHOOK_SUB_TENANT_IDX").on(t.tenantId),
+    index("WEBHOOK_SUB_PROCESS_IDX").on(t.processId),
+  ],
+);
+
+// ─── OUTBOX_EVENTS ──────────────────────────────────────────────────
+// Transactional outbox for engine lifecycle events. The engine writes
+// a row here in the SAME txn as the corresponding INSTANCE_EVENTS
+// audit row, guaranteeing at-least-once delivery semantics: if the
+// txn commits, both audit + outbox land; if it rolls back, neither do.
+// The dispatcher reads `pending` rows on a separate tick and
+// publishes via WEBHOOK_SUBSCRIPTIONS / future Kafka / etc.
+
+export const outboxEventStatusEnum = pgEnum("OUTBOX_EVENT_STATUS", [
+  "pending",
+  "dispatched",
+  "failed",
+]);
+
+export const outboxEvents = pgTable(
+  "OUTBOX_EVENTS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    processId: uuid("PROCESS_ID"),
+    instanceId: uuid("INSTANCE_ID"),
+    eventType: varchar("EVENT_TYPE", { length: 64 }).notNull(),
+    payload: jsonb("PAYLOAD").notNull(),
+    status: outboxEventStatusEnum("STATUS").notNull().default("pending"),
+    dispatchedAt: timestamp("DISPATCHED_AT", { withTimezone: true }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // Hot path for the dispatcher: pending rows oldest first.
+    index("OUTBOX_STATUS_CREATED_IDX").on(t.status, t.createdAt),
+    index("OUTBOX_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
+  ],
+);
+
 // ─── ENGINE_JOBS ────────────────────────────────────────────────────
 // Durable async work queue. The interpreter enqueues a job whenever
 // a node needs side-effects that shouldn't block the request thread

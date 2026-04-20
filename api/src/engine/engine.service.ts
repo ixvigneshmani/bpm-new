@@ -36,6 +36,7 @@ import { DATABASE, type Database } from "../database/database.module";
 import {
   instanceEvents,
   instanceTokens,
+  outboxEvents,
   processInstances,
   processVersions,
   processes,
@@ -75,6 +76,15 @@ export type EngineEdge = {
 export type EngineCanvas = {
   nodes: EngineNode[];
   edges: EngineEdge[];
+  /** Optional engine-specific config bag at the canvas root.
+   *  E4.5c: `redactedVariableKeys` lists variable names whose values
+   *  must be replaced with `<redacted>` in INSTANCE_EVENTS payloads.
+   *  Match is exact on the top-level key. The value itself still goes
+   *  into `instance.variables` so the engine can use it; only the
+   *  audit trail is sanitised. */
+  engineConfig?: {
+    redactedVariableKeys?: string[];
+  };
 };
 
 /** Hard cap on advance-loop iterations per call. A well-formed E2
@@ -153,13 +163,21 @@ export class EngineService {
         })
         .returning({ id: processInstances.id });
 
-      // 2. Audit: instance-started.
+      // 2. Audit + outbox: instance-started. Outbox row goes in the
+      //    same txn so subscriber delivery is at-least-once-on-commit.
       await tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: inst.id,
         userId: args.userId,
         eventType: "instance-started",
         payload: { processId: args.processId, definitionHash },
+      });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        processId: args.processId,
+        instanceId: inst.id,
+        eventType: "instance-started",
+        payload: { definitionHash, startedBy: args.userId },
       });
 
       // 3. Place the initial token on the start event.
@@ -218,6 +236,13 @@ export class EngineService {
           eventType: "instance-completed",
           payload: { hops: advance.hops },
         });
+        await this.emitOutbox(tx, {
+          tenantId: args.tenantId,
+          processId: args.processId,
+          instanceId: inst.id,
+          eventType: "instance-completed",
+          payload: { hops: advance.hops, variables: initialVariables },
+        });
         instanceStatus = "completed";
       } else if (advance.tokenStatus === "failed") {
         await tx
@@ -230,6 +255,13 @@ export class EngineService {
           .where(eq(processInstances.id, inst.id));
         await tx.insert(instanceEvents).values({
           tenantId: args.tenantId,
+          instanceId: inst.id,
+          eventType: "instance-failed",
+          payload: { hops: advance.hops, message: advance.errorMessage },
+        });
+        await this.emitOutbox(tx, {
+          tenantId: args.tenantId,
+          processId: args.processId,
           instanceId: inst.id,
           eventType: "instance-failed",
           payload: { hops: advance.hops, message: advance.errorMessage },
@@ -632,6 +664,16 @@ export class EngineService {
         nodeId: tokenRow.currentNodeId,
         eventType: "task-completed",
       });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        eventType: "task-completed",
+        payload: {
+          tokenId: args.tokenId,
+          nodeId: tokenRow.currentNodeId,
+          completedBy: args.userId,
+        },
+      });
 
       // 2. Shallow-merge form output into the instance variable bag.
       //    NOTE: shallow only — `{form: {address: {line1: ...}}}` from
@@ -652,6 +694,12 @@ export class EngineService {
           instanceVersion,
           { variables: mergedVariables },
         );
+        // PII redaction: any key listed in canvas.engineConfig.
+        // redactedVariableKeys gets its value replaced with the
+        // sentinel string in the audit payload. The value still lives
+        // in instance.variables; only the event trail is sanitised so
+        // someone reading the audit can't reconstruct sensitive data.
+        const redactedKeys = new Set(canvas.engineConfig?.redactedVariableKeys ?? []);
         for (const key of Object.keys(args.formData)) {
           await tx.insert(instanceEvents).values({
             tenantId: args.tenantId,
@@ -659,7 +707,9 @@ export class EngineService {
             tokenId: args.tokenId,
             userId: args.userId,
             eventType: "variable-set",
-            payload: { key, value: args.formData[key] },
+            payload: redactedKeys.has(key)
+              ? { key, value: "<redacted>", redacted: true }
+              : { key, value: args.formData[key] },
           });
         }
       }
@@ -1242,6 +1292,16 @@ export class EngineService {
           tokensCancelled: cancelledCount,
         },
       });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-cancelled",
+        payload: {
+          reason: args.reason ?? null,
+          cancelledBy: args.userId,
+          tokensCancelled: cancelledCount,
+        },
+      });
 
       this.logger.log({
         event: "engine.instance.cancelled",
@@ -1256,6 +1316,34 @@ export class EngineService {
         status: "cancelled" as const,
         tokensCancelled: cancelledCount,
       };
+    });
+  }
+
+  /** Write a row to OUTBOX_EVENTS in the current txn. Called by every
+   *  engine lifecycle transition that's interesting to external
+   *  subscribers (instance-started/completed/failed/cancelled,
+   *  task-completed). The OutboxService dispatcher tick reads
+   *  `pending` rows and enqueues per-subscription delivery jobs.
+   *
+   *  Transactional with the audit row above the call site, so a
+   *  rollback discards both — no half-emitted events. */
+  private async emitOutbox(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    args: {
+      tenantId: string;
+      processId?: string;
+      instanceId?: string;
+      eventType: string;
+      payload: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    await tx.insert(outboxEvents).values({
+      tenantId: args.tenantId,
+      processId: args.processId ?? null,
+      instanceId: args.instanceId ?? null,
+      eventType: args.eventType,
+      payload: args.payload,
     });
   }
 
@@ -1445,7 +1533,19 @@ export function projectCanvas(raw: unknown): EngineCanvas {
         : undefined,
     });
   }
-  return { nodes, edges };
+  // Preserve engineConfig if present + well-shaped. We only read
+  // `redactedVariableKeys` today (E4.5c) — everything else is dropped.
+  let engineConfig: EngineCanvas["engineConfig"];
+  const ec = (obj.engineConfig as Record<string, unknown> | undefined);
+  if (ec && typeof ec === "object") {
+    const raw = ec.redactedVariableKeys;
+    if (Array.isArray(raw)) {
+      const keys = raw.filter((k): k is string => typeof k === "string");
+      if (keys.length > 0) engineConfig = { redactedVariableKeys: keys };
+    }
+  }
+
+  return { nodes, edges, ...(engineConfig ? { engineConfig } : {}) };
 }
 
 /** Find the single start event. Process scopes (pool / lane / sub-
