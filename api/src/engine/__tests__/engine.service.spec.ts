@@ -9,9 +9,11 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  applyMapping,
   EngineService,
   evalCondition,
   findStartEvent,
+  getByPath,
   pickExclusiveGatewayEdge,
   pickNextEdge,
   projectCanvas,
@@ -625,6 +627,48 @@ describe("EngineService.startInstance", () => {
     expect(((job.input as Record<string, unknown>).variables as Record<string, unknown>).customer).toBe("Alice");
   });
 
+  it("E5 mappings: inputMappings projects only the listed vars to the handler", async () => {
+    env = makeFakeTx({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        {
+          id: "svc",
+          type: "serviceTask",
+          data: {
+            implementation: { type: "externalWorker", config: { jobType: "noop" } },
+            inputMappings: {
+              contactId: "$customer.id",
+              kind: "external", // literal pass-through
+            },
+          },
+        },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "svc" },
+        { id: "e2", source: "svc", target: "e" },
+      ],
+    });
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    service = new EngineService(env.db as any, fakeWorker as any);
+    await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+      variables: {
+        customer: { id: "c-7", email: "a@b.c" },
+        secret: "should-not-leak",
+      },
+    });
+    const job = fakeWorker.enqueued[0];
+    const handlerVars = (job.input as Record<string, unknown>).variables as Record<string, unknown>;
+    // Only the mapped keys are visible to the handler — `secret`
+    // and `customer.email` are filtered out.
+    expect(handlerVars).toEqual({ contactId: "c-7", kind: "external" });
+    expect("secret" in handlerVars).toBe(false);
+  });
+
   it("E5: serviceTask without an implementation falls back to noop topic (warn, no failure)", async () => {
     env = makeFakeTx({
       nodes: [
@@ -865,6 +909,81 @@ describe("EngineService.startInstance", () => {
     await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
     const hashC = (env.inserts.find((i) => i.table === "PROCESS_INSTANCES")?.values[0].definitionHash) as string;
     expect(hashC).not.toBe(hashA);
+  });
+});
+
+// ─── E5 mappings: getByPath + applyMapping ──────────────────────────
+
+describe("getByPath", () => {
+  it("returns top-level value", () => {
+    expect(getByPath({ a: 1 }, "a")).toBe(1);
+  });
+
+  it("walks dot-separated nested keys", () => {
+    expect(getByPath({ a: { b: { c: 42 } } }, "a.b.c")).toBe(42);
+  });
+
+  it("returns undefined for missing segments", () => {
+    expect(getByPath({ a: 1 }, "a.b.c")).toBeUndefined();
+    expect(getByPath({ a: { b: 1 } }, "a.c")).toBeUndefined();
+  });
+
+  it("returns undefined for non-object source", () => {
+    expect(getByPath(null, "a")).toBeUndefined();
+    expect(getByPath("string", "a")).toBeUndefined();
+  });
+
+  it("empty path returns the source unchanged", () => {
+    expect(getByPath({ a: 1 }, "")).toEqual({ a: 1 });
+  });
+});
+
+describe("applyMapping", () => {
+  const source = {
+    customer: { id: "c-1", email: "a@b.c" },
+    amount: 500,
+    flag: true,
+  };
+
+  it("$-prefixed strings project from source paths", () => {
+    expect(
+      applyMapping(
+        { contactId: "$customer.id", total: "$amount" },
+        source,
+      ),
+    ).toEqual({ contactId: "c-1", total: 500 });
+  });
+
+  it("{from: ...} object form is equivalent to $-prefix", () => {
+    expect(
+      applyMapping(
+        { email: { from: "customer.email" } },
+        source,
+      ),
+    ).toEqual({ email: "a@b.c" });
+  });
+
+  it("non-prefixed strings + numbers + booleans pass through as literals", () => {
+    expect(
+      applyMapping(
+        { kind: "external", priority: 5, urgent: true },
+        source,
+      ),
+    ).toEqual({ kind: "external", priority: 5, urgent: true });
+  });
+
+  it("missing source paths are omitted from the result (not set as undefined)", () => {
+    const out = applyMapping(
+      { good: "$customer.id", bad: "$does.not.exist" },
+      source,
+    );
+    expect(out).toEqual({ good: "c-1" });
+    expect("bad" in out).toBe(false);
+  });
+
+  it("undefined / empty mappings yield {}", () => {
+    expect(applyMapping(undefined, source)).toEqual({});
+    expect(applyMapping({}, source)).toEqual({});
   });
 });
 
@@ -1652,6 +1771,57 @@ describe("EngineService.completeTask", () => {
       .filter((i) => i.table === "INSTANCE_EVENTS" && i.values[0].eventType === "variable-set")
       .map((i) => i.values[0].payload as Record<string, unknown>);
     expect(varEvents.every((p) => p.source === "service-task")).toBe(true);
+  });
+
+  it("E5 mappings: outputMappings reshape the handler result before merging into vars", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: null,
+      tokenStatus: "waiting",
+      waitingFor: "service-task",
+      canvas: {
+        nodes: [
+          { id: "s", type: "startEvent" },
+          {
+            id: "svc",
+            type: "serviceTask",
+            data: {
+              outputMappings: {
+                ticketId: "$response.id",
+                stage: "$response.status",
+              },
+            },
+          },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "svc" },
+          { id: "e2", source: "svc", target: "e" },
+        ],
+      },
+    });
+    env.tokenRow.currentNodeId = "svc";
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, fakeWorker as any);
+
+    await service.completeServiceTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      result: {
+        response: { id: "T-99", status: "open", privateField: "leaks-without-mapping" },
+      },
+    });
+
+    // The instance variable update should ONLY contain the mapped
+    // keys — `response.privateField` doesn't surface anywhere.
+    const varUpdate = env.updates.find(
+      (u) => u.table === "PROCESS_INSTANCES" && u.set.variables !== undefined,
+    );
+    const vars = varUpdate?.set.variables as Record<string, unknown>;
+    expect(vars.ticketId).toBe("T-99");
+    expect(vars.stage).toBe("open");
+    expect("response" in vars).toBe(false);
+    expect("privateField" in vars).toBe(false);
   });
 
   it("E5: completeServiceTask refuses a token not waiting on a service task", async () => {

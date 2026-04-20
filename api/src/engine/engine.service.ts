@@ -489,6 +489,19 @@ export class EngineService {
             eventType: "token-waiting",
             payload: { waitingFor: "service-task", topic: userTopic },
           });
+          // Apply the canvas-defined input mapping. If
+          // `data.inputMappings` is set, project from instance
+          // variables to the explicit subset the handler should see;
+          // otherwise pass the full bag (backward compat). This is
+          // the canvas's contract about which variables are visible
+          // to integrations — keeps PII and unrelated state out of
+          // handler scope by default-deny.
+          const inputMappings = (node.data as Record<string, unknown> | undefined)
+            ?.inputMappings as Record<string, MappingEntry> | undefined;
+          const handlerInput = inputMappings
+            ? applyMapping(inputMappings, args.variables)
+            : args.variables;
+
           // Enqueue the worker job IN THE SAME TXN as the token+audit
           // writes above. Without `tx:`, the ENGINE_JOBS row commits
           // on a separate connection and a parallel worker tick can
@@ -506,7 +519,7 @@ export class EngineService {
               userTopic,
               nodeId,
               nodeData: node.data ?? {},
-              variables: args.variables,
+              variables: handlerInput,
             },
             maxAttempts: resolveServiceTaskMaxAttempts(node) ?? 3,
           });
@@ -909,12 +922,23 @@ export class EngineService {
         payload: { kind: "service-task-result" },
       });
 
+      // Apply the canvas-defined output mapping (if any) to project
+      // the handler's result shape onto the variable bag's vocabulary.
+      // Without a mapping the result merges flat — backward compat
+      // for canvases authored before E5.1.
+      const node = canvas.nodes.find((n) => n.id === tokenRow.currentNodeId);
+      const outputMappings = (node?.data as Record<string, unknown> | undefined)
+        ?.outputMappings as Record<string, MappingEntry> | undefined;
+      const projectedResult: Record<string, unknown> = outputMappings
+        ? applyMapping(outputMappings, args.result ?? {})
+        : (args.result ?? {});
+
       let instanceVersion = instRow.version;
       const merged = {
         ...((instRow.variables as Record<string, unknown> | null) ?? {}),
-        ...(args.result ?? {}),
+        ...projectedResult,
       };
-      if (args.result && Object.keys(args.result).length > 0) {
+      if (Object.keys(projectedResult).length > 0) {
         instanceVersion = await this.updateInstanceWithLock(
           tx,
           tokenRow.instanceId,
@@ -924,7 +948,7 @@ export class EngineService {
         const redactedKeys = new Set(
           canvas.engineConfig?.redactedVariableKeys ?? [],
         );
-        for (const key of Object.keys(args.result)) {
+        for (const key of Object.keys(projectedResult)) {
           await tx.insert(instanceEvents).values({
             tenantId: args.tenantId,
             instanceId: tokenRow.instanceId,
@@ -933,7 +957,7 @@ export class EngineService {
             eventType: "variable-set",
             payload: redactedKeys.has(key)
               ? { key, value: "<redacted>", redacted: true, source: "service-task" }
-              : { key, value: args.result[key], source: "service-task" },
+              : { key, value: projectedResult[key], source: "service-task" },
           });
         }
       }
@@ -2232,6 +2256,66 @@ export function resolveDirectUserAssignee(
     return null;
   }
   return value;
+}
+
+/** A single mapping entry on a serviceTask node:
+ *  - string starting with "$" → source path into the source bag
+ *    (variables for input, handler result for output). Stored as
+ *    "$customer.id" — leading "$" stripped at apply time.
+ *  - { from: "customer.id" } → equivalent object form. Lets canvases
+ *    that don't want the "$" sigil convention express the same.
+ *  - any other literal → passed through verbatim (string/number/bool
+ *    constants, useful for static input enrichment). */
+export type MappingEntry = string | number | boolean | null | { from?: string };
+
+/** Apply a `Record<targetKey, MappingEntry>` map by projecting from
+ *  `source`. Missing source paths produce `undefined` values (omitted
+ *  from the result). Used in two places:
+ *    • input mapping: engine projects from instance.variables before
+ *      enqueuing the worker job, so handlers see only the data the
+ *      canvas explicitly exposes.
+ *    • output mapping: engine projects from the handler result
+ *      before merging into instance.variables, so handler-internal
+ *      shape doesn't leak into the canvas vocabulary.
+ *  Returns a new flat object. */
+export function applyMapping(
+  mappings: Record<string, MappingEntry> | undefined,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!mappings || typeof mappings !== "object") return {};
+  const out: Record<string, unknown> = {};
+  for (const [target, entry] of Object.entries(mappings)) {
+    let value: unknown;
+    if (typeof entry === "string" && entry.startsWith("$")) {
+      value = getByPath(source, entry.slice(1));
+    } else if (entry && typeof entry === "object" && "from" in entry) {
+      const path = (entry as { from?: unknown }).from;
+      if (typeof path === "string") value = getByPath(source, path);
+    } else {
+      // Literal — pass through (string without $, number, boolean, null).
+      value = entry;
+    }
+    if (value !== undefined) out[target] = value;
+  }
+  return out;
+}
+
+/** Resolve a dot-separated path inside a nested record. Returns
+ *  undefined for any missing segment. Doesn't follow prototype chain
+ *  (uses Object.prototype.hasOwnProperty implicitly via `in`).
+ *  Bracket notation isn't supported — variables are flat by
+ *  convention; if a value is itself nested the path drills in. */
+export function getByPath(source: unknown, path: string): unknown {
+  if (!source || typeof source !== "object") return undefined;
+  if (path === "") return source;
+  const parts = path.split(".");
+  let cur: unknown = source;
+  for (const part of parts) {
+    if (!cur || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+    if (cur === undefined) return undefined;
+  }
+  return cur;
 }
 
 /** Parse a small ISO 8601 duration (the subset BPMN canvases emit
