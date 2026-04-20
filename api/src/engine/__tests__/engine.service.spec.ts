@@ -366,6 +366,7 @@ describe("EngineService.startInstance", () => {
       "edge-taken",
       "node-entered", // userTask
       "token-waiting",
+      "task-claimed", // auto-claim because directUser assignment resolved
     ]);
 
     // Token was flipped to waiting + assigned to UUID_A.
@@ -619,18 +620,33 @@ function makeCompleteTaskEnv(opts: {
       const name = tableName(table);
       return {
         set(values: Record<string, unknown>) {
-          if (name === "INSTANCE_TOKENS" && typeof values.version === "number") {
-            tokenRow.version = values.version;
-            if (typeof values.status === "string") tokenRow.status = values.status as typeof tokenRow.status;
+          // Simulate an optimistic-lock miss: if the test set
+          // tokenRow.simulateConflict (or instanceRow.simulateConflict)
+          // we return zero affected rows once, then clear the flag.
+          let simulateMiss = false;
+          if (name === "INSTANCE_TOKENS" && (tokenRow as Record<string, unknown>).simulateConflict) {
+            simulateMiss = true;
+            (tokenRow as Record<string, unknown>).simulateConflict = false;
           }
-          if (name === "PROCESS_INSTANCES" && typeof values.version === "number") {
-            instanceRow.version = values.version;
+          if (name === "PROCESS_INSTANCES" && (instanceRow as Record<string, unknown>).simulateConflict) {
+            simulateMiss = true;
+            (instanceRow as Record<string, unknown>).simulateConflict = false;
+          }
+          if (!simulateMiss) {
+            if (name === "INSTANCE_TOKENS" && typeof values.version === "number") {
+              tokenRow.version = values.version;
+              if (typeof values.status === "string") tokenRow.status = values.status as typeof tokenRow.status;
+            }
+            if (name === "PROCESS_INSTANCES" && typeof values.version === "number") {
+              instanceRow.version = values.version;
+            }
           }
           return {
             where(_cond: unknown) {
               return {
                 returning() {
                   updates.push({ table: name, set: values });
+                  if (simulateMiss) return Promise.resolve([]);
                   return Promise.resolve([{ id: name === "INSTANCE_TOKENS" ? tokenRow.id : instanceRow.id }]);
                 },
               };
@@ -702,11 +718,12 @@ describe("EngineService.completeTask", () => {
     const events = env.inserts
       .filter((i) => i.table === "INSTANCE_EVENTS")
       .map((i) => i.values[0].eventType as string);
-    // Resume audit trail: variable-set + task-completed + token-resumed,
-    // then the advance from the userTask off through the end event.
+    // Resume audit trail (E3 polish): task-completed first as the
+    // user-facing anchor, then per-key variable-set attributions, then
+    // token-resumed and the resumed advance through the end event.
     expect(events).toEqual([
-      "variable-set",
       "task-completed",
+      "variable-set",
       "token-resumed",
       // resumed advance: userTask's node-exited → edge-taken → end's
       // entered/exited/token-completed → instance-completed.
@@ -804,6 +821,40 @@ describe("EngineService.completeTask", () => {
       .map((i) => i.values[0].eventType as string);
     expect(events).not.toContain("variable-set");
     expect(events[0]).toBe("task-completed");
+  });
+
+  it("optimistic-lock conflict on instance variable update surfaces as 409", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
+    // Force the instance UPDATE to behave as if a concurrent writer
+    // bumped the version under us. The instance update happens during
+    // the variable-merge step in completeTask.
+    (env.instanceRow as Record<string, unknown>).simulateConflict = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await expect(
+      service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_A,
+        formData: { approval: "yes" },
+      }),
+    ).rejects.toThrow(/Concurrent instance update/);
+  });
+
+  it("optimistic-lock conflict on token resume surfaces as 409", async () => {
+    const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
+    // Token UPDATE (status=active) is the next write after audit
+    // events; force a conflict there.
+    (env.tokenRow as Record<string, unknown>).simulateConflict = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any);
+    await expect(
+      service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_A,
+      }),
+    ).rejects.toThrow(/Concurrent token update/);
   });
 
   it("if the task is followed by another userTask, instance stays running and re-suspends", async () => {

@@ -382,6 +382,22 @@ export class EngineService {
             eventType: "token-waiting",
             payload: { waitingFor: "userTask", assignedTo: assignedTo ?? null },
           });
+          // Auto-claim audit. We emit task-claimed at suspension when
+          // an assignee was resolved — the system is "claiming on
+          // behalf" of the user. Unassigned tasks stay in the queue
+          // and emit task-claimed only if/when an explicit claim
+          // endpoint lands (post-E3).
+          if (assignedTo) {
+            await args.tx.insert(instanceEvents).values({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              userId: assignedTo,
+              nodeId,
+              eventType: "task-claimed",
+              payload: { auto: true },
+            });
+          }
           return { tokenStatus: "waiting", hops };
         }
       }
@@ -546,9 +562,27 @@ export class EngineService {
       // execution always honours the snapshot.
       const canvas = projectCanvas(instRow.definitionSnapshot);
 
-      // 1. Merge form output into the instance variables. Optimistic
-      //    lock on the instance: if anyone else mutated it under us
-      //    (cancel, future timer fire), we 409.
+      // 1. Audit task-completed FIRST so it acts as the user-facing
+      //    anchor in any timeline replay — the variable-set rows that
+      //    follow are the attribution detail. Reordering this is a
+      //    behavioural contract; downstream consumers may rely on the
+      //    "what did Alice just do" event coming before its details.
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "task-completed",
+      });
+
+      // 2. Shallow-merge form output into the instance variable bag.
+      //    NOTE: shallow only — `{form: {address: {line1: ...}}}` from
+      //    one task and `{form: {address: {line2: ...}}}` from another
+      //    will clobber, not deep-merge. Callers that need to update a
+      //    nested field must read+rewrite the whole top-level key.
+      //    Optimistic lock on the instance: a concurrent cancel/timer
+      //    will 409 us and the txn rolls back cleanly.
       let instanceVersion = instRow.version;
       const mergedVariables = {
         ...(instRow.variables as Record<string, unknown> | null ?? {}),
@@ -572,18 +606,6 @@ export class EngineService {
           });
         }
       }
-
-      // 2. Audit: task-completed (the user-facing event), then flip
-      //    the token back to `active` so the advance loop can leave
-      //    the user-task node.
-      await tx.insert(instanceEvents).values({
-        tenantId: args.tenantId,
-        instanceId: tokenRow.instanceId,
-        tokenId: args.tokenId,
-        userId: args.userId,
-        nodeId: tokenRow.currentNodeId,
-        eventType: "task-completed",
-      });
 
       const tokenVersion = await this.updateTokenWithLock(
         tx,
@@ -691,7 +713,18 @@ export class EngineService {
    *    • `userIdForMine=<uuid>` — "my inbox" filter: tokens assigned
    *      to me OR unassigned (anyone-can-claim queue). The standard
    *      operator view.
-   *    • neither → all waiting tasks for the tenant. */
+   *    • neither → all waiting tasks for the tenant.
+   *
+   *  Authorisation: there is no role check today — any tenant member
+   *  can view any other member's queue with `assignedTo=<their-uuid>`.
+   *  Acceptable for MVP where the only operators are admins; tighten
+   *  when an RBAC layer lands.
+   *
+   *  Perf: the projector parses the full DEFINITION_SNAPSHOT JSONB on
+   *  every row to extract the node label. With the 200-row cap and
+   *  small canvases this is fine; once a tenant has tasks at scale
+   *  denormalise `nodeLabel` onto INSTANCE_TOKENS at suspension time
+   *  (E7 perf pass). */
   async listTasks(args: {
     tenantId: string;
     assignedTo?: string;
