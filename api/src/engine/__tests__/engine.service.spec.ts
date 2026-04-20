@@ -23,6 +23,31 @@ import {
 const UUID_A = "11111111-1111-4111-8111-111111111111";
 const UUID_B = "22222222-2222-4222-8222-222222222222";
 
+/** Stub WorkerService used to inject into EngineService in unit tests.
+ *  Records enqueued jobs so serviceTask-suspend tests can assert on
+ *  what the engine asked the worker to do. The actual job execution
+ *  is never driven from the engine spec — covered by separate
+ *  ServiceTaskService tests against a real-shape WorkerService stub. */
+function makeFakeWorker() {
+  const enqueued: Array<{
+    tenantId: string;
+    topic: string;
+    jobType: string;
+    instanceId?: string;
+    tokenId?: string;
+    input?: Record<string, unknown>;
+    maxAttempts?: number;
+  }> = [];
+  return {
+    enqueued,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    enqueue: async (args: any) => {
+      enqueued.push(args);
+      return { id: `job-${enqueued.length}` };
+    },
+  };
+}
+
 // ─── Pure helpers ────────────────────────────────────────────────────
 
 describe("projectCanvas", () => {
@@ -326,7 +351,7 @@ describe("EngineService.startInstance", () => {
   function buildService(canvas: unknown): void {
     env = makeFakeTx(canvas);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    service = new EngineService(env.db as any);
+    service = new EngineService(env.db as any, makeFakeWorker() as any);
   }
 
   beforeEach(() => {
@@ -457,9 +482,10 @@ describe("EngineService.startInstance", () => {
     buildService({
       nodes: [
         { id: "s", type: "startEvent" },
-        // serviceTask still passes through in E3 (E5 wires its handler).
-        // userTask would suspend, never hitting the dead-end path.
-        { id: "t", type: "serviceTask" },
+        // manualTask passes through (no suspend, no handler). userTask
+        // and serviceTask now both suspend, so they'd never reach the
+        // dead-end branch.
+        { id: "t", type: "manualTask" },
       ],
       edges: [{ id: "e1", source: "s", target: "t" }],
     });
@@ -508,7 +534,7 @@ describe("EngineService.startInstance", () => {
       return chain;
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    service = new EngineService(env.db as any);
+    service = new EngineService(env.db as any, makeFakeWorker() as any);
     await expect(
       service.startInstance({
         processId: "proc-other",
@@ -553,6 +579,69 @@ describe("EngineService.startInstance", () => {
     const payload = completedOutbox?.values[0].payload as Record<string, unknown>;
     expect((payload.variables as Record<string, unknown>).ssn).toBe("<redacted>");
     expect((payload.variables as Record<string, unknown>).amount).toBe(500);
+  });
+
+  it("E5: serviceTask suspends the token + enqueues a worker job (externalWorker.jobType → topic)", async () => {
+    env = makeFakeTx({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        {
+          id: "svc",
+          type: "serviceTask",
+          data: {
+            implementation: {
+              type: "externalWorker",
+              config: { jobType: "send-email" },
+            },
+          },
+        },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "svc" },
+        { id: "e2", source: "svc", target: "e" },
+      ],
+    });
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    service = new EngineService(env.db as any, fakeWorker as any);
+    const out = await service.startInstance({
+      processId: "p",
+      tenantId: "t",
+      userId: "u",
+      variables: { customer: "Alice" },
+    });
+    expect(out.status).toBe("running");
+    // Token should be waiting on a service-task.
+    const tokenUpdate = env.updates.find(
+      (u) => u.table === "INSTANCE_TOKENS" && u.set.status === "waiting",
+    );
+    expect(tokenUpdate?.set.waitingFor).toBe("service-task");
+    // Worker enqueue called with the right topic + carry-through input.
+    expect(fakeWorker.enqueued).toHaveLength(1);
+    const job = fakeWorker.enqueued[0];
+    expect(job.topic).toBe("service-task");
+    expect((job.input as Record<string, unknown>).userTopic).toBe("send-email");
+    expect(((job.input as Record<string, unknown>).variables as Record<string, unknown>).customer).toBe("Alice");
+  });
+
+  it("E5: serviceTask without an implementation falls back to noop topic (warn, no failure)", async () => {
+    env = makeFakeTx({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "svc", type: "serviceTask" }, // no data.implementation
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "svc" },
+        { id: "e2", source: "svc", target: "e" },
+      ],
+    });
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    service = new EngineService(env.db as any, fakeWorker as any);
+    await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect((fakeWorker.enqueued[0].input as Record<string, unknown>).userTopic).toBe("noop");
   });
 
   it("E4.5c: startInstance writes an OUTBOX_EVENTS row alongside instance-started audit", async () => {
@@ -639,7 +728,7 @@ describe("EngineService.startInstance", () => {
       },
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    service = new EngineService(env.db as any);
+    service = new EngineService(env.db as any, makeFakeWorker() as any);
     const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
     expect(out.status).toBe("completed");
     expect(dbSelectsForVersions).toBeGreaterThan(0);
@@ -1120,7 +1209,7 @@ describe("EngineService.completeTask", () => {
   it("completes a waiting task assigned to the caller and runs to instance-completed", async () => {
     const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
 
     const out = await service.completeTask({
       tokenId: "tok-waiting",
@@ -1162,7 +1251,7 @@ describe("EngineService.completeTask", () => {
   it("rejects completion when the caller is not the assignee (403)", async () => {
     const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await expect(
       service.completeTask({
         tokenId: "tok-waiting",
@@ -1175,7 +1264,7 @@ describe("EngineService.completeTask", () => {
   it("allows any tenant user to complete an unassigned task", async () => {
     const env = makeCompleteTaskEnv({ tokenAssignedTo: null, canvas: happyCanvas });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     const out = await service.completeTask({
       tokenId: "tok-waiting",
       tenantId: "tenant-1",
@@ -1192,7 +1281,7 @@ describe("EngineService.completeTask", () => {
       canvas: happyCanvas,
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await expect(
       service.completeTask({
         tokenId: "tok-waiting",
@@ -1214,7 +1303,7 @@ describe("EngineService.completeTask", () => {
       }),
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await expect(
       service.completeTask({
         tokenId: "tok-waiting",
@@ -1227,7 +1316,7 @@ describe("EngineService.completeTask", () => {
   it("when no formData is provided, no variable-set events are written", async () => {
     const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await service.completeTask({
       tokenId: "tok-waiting",
       tenantId: "tenant-1",
@@ -1247,7 +1336,7 @@ describe("EngineService.completeTask", () => {
     // the variable-merge step in completeTask.
     (env.instanceRow as Record<string, unknown>).simulateConflict = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await expect(
       service.completeTask({
         tokenId: "tok-waiting",
@@ -1264,7 +1353,7 @@ describe("EngineService.completeTask", () => {
     // events; force a conflict there.
     (env.tokenRow as Record<string, unknown>).simulateConflict = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await expect(
       service.completeTask({
         tokenId: "tok-waiting",
@@ -1351,7 +1440,7 @@ describe("EngineService.completeTask", () => {
       transaction<T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> { return fn(tx); },
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(db as any);
+    const service = new EngineService(db as any, makeFakeWorker() as any);
 
     const out = await service.cancelInstance({
       instanceId: "inst-1",
@@ -1395,7 +1484,7 @@ describe("EngineService.completeTask", () => {
       },
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await service.completeTask({
       tokenId: "tok-waiting",
       tenantId: "tenant-1",
@@ -1429,7 +1518,7 @@ describe("EngineService.completeTask", () => {
       },
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     await service.completeTask({
       tokenId: "tok-waiting",
       tenantId: "tenant-1",
@@ -1439,6 +1528,135 @@ describe("EngineService.completeTask", () => {
       .filter((i) => i.table === "OUTBOX_EVENTS")
       .map((i) => i.values[0].eventType as string);
     expect(outboxTypes).toContain("task-completed");
+  });
+
+  it("E5: completeServiceTask resumes a service-task-suspended token and merges result into vars", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: null,
+      tokenStatus: "waiting",
+      waitingFor: "service-task",
+      canvas: {
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "svc", type: "serviceTask" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "svc" },
+          { id: "e2", source: "svc", target: "e" },
+        ],
+      },
+    });
+    // Override the token's currentNodeId to match the serviceTask.
+    env.tokenRow.currentNodeId = "svc";
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, fakeWorker as any);
+
+    const out = await service.completeServiceTask({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      result: { emailSent: true, messageId: "msg-42" },
+    });
+    expect(out.instanceStatus).toBe("completed");
+    expect(out.tokenStatus).toBe("completed");
+
+    // Variables merged onto the instance row.
+    const varUpdate = env.updates.find(
+      (u) => u.table === "PROCESS_INSTANCES" && u.set.variables !== undefined,
+    );
+    expect(varUpdate?.set.variables).toMatchObject({
+      emailSent: true,
+      messageId: "msg-42",
+    });
+    // Per-key variable-set audit rows tagged with source.
+    const varEvents = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS" && i.values[0].eventType === "variable-set")
+      .map((i) => i.values[0].payload as Record<string, unknown>);
+    expect(varEvents.every((p) => p.source === "service-task")).toBe(true);
+  });
+
+  it("E5: completeServiceTask refuses a token not waiting on a service task", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: UUID_A,
+      tokenStatus: "waiting",
+      waitingFor: "userTask", // wrong wait kind
+      canvas: { nodes: [], edges: [] },
+    });
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, fakeWorker as any);
+    await expect(
+      service.completeServiceTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        result: {},
+      }),
+    ).rejects.toThrow(/not waiting on a service task/);
+  });
+
+  it("E5: failServiceTaskFromWorker marks token + instance failed (onDead path)", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: null,
+      tokenStatus: "waiting",
+      waitingFor: "service-task",
+      canvas: { nodes: [], edges: [] },
+    });
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, fakeWorker as any);
+
+    await service.failServiceTaskFromWorker({
+      tokenId: "tok-waiting",
+      tenantId: "tenant-1",
+      reason: "max retries exceeded",
+    });
+
+    // Token flipped to failed.
+    const tokenFail = env.updates.find(
+      (u) => u.table === "INSTANCE_TOKENS" && u.set.status === "failed",
+    );
+    expect(tokenFail?.set.errorMessage).toBe("max retries exceeded");
+    // Instance flipped to failed.
+    const instFail = env.updates.find(
+      (u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed",
+    );
+    expect(instFail).toBeDefined();
+    // Audit + outbox both written.
+    const eventTypes = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(eventTypes).toContain("error");
+    expect(eventTypes).toContain("instance-failed");
+    const outboxTypes = env.inserts
+      .filter((i) => i.table === "OUTBOX_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(outboxTypes).toContain("instance-failed");
+  });
+
+  it("E5: failServiceTaskFromWorker is idempotent if the token already moved on", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: null,
+      tokenStatus: "completed", // already done
+      waitingFor: null,
+      canvas: { nodes: [], edges: [] },
+    });
+    const fakeWorker = makeFakeWorker();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, fakeWorker as any);
+    // Should NOT throw — the dead-job retry hitting an already-done
+    // token is a no-op (the load helper returns null caught by a
+    // .catch in the engine, then early-return).
+    await expect(
+      service.failServiceTaskFromWorker({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        reason: "any",
+      }),
+    ).resolves.toBeUndefined();
+    // No state mutations.
+    const failUpdate = env.updates.find((u) => u.set.status === "failed");
+    expect(failUpdate).toBeUndefined();
   });
 
   it("if the task is followed by another userTask, instance stays running and re-suspends", async () => {
@@ -1459,7 +1677,7 @@ describe("EngineService.completeTask", () => {
       },
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const service = new EngineService(env.db as any);
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
     const out = await service.completeTask({
       tokenId: "tok-waiting",
       tenantId: "tenant-1",

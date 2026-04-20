@@ -41,6 +41,8 @@ import {
   processVersions,
   processes,
 } from "../database/schema";
+import { SERVICE_TASK_TOPIC } from "./service-task-registry";
+import { WorkerService } from "./worker.service";
 
 /** RFC4122-ish UUID matcher; we use it to defensively validate the
  *  `data.assignment.value` of a directUser before writing it into
@@ -102,7 +104,10 @@ const NON_SEQUENCE_FLOW_TYPES = new Set(["message", "association"]);
 export class EngineService {
   private readonly logger = new Logger(EngineService.name);
 
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    private readonly worker: WorkerService,
+  ) {}
 
   /** Start a new instance: load the process, snapshot its canvas, find
    *  the start event, place a token, and advance until the token reaches
@@ -453,6 +458,55 @@ export class EngineService {
               payload: { auto: true },
             });
           }
+          return { tokenStatus: "waiting", hops };
+        }
+
+        // Wait state: service task suspends the token until the
+        // worker handler completes the job and calls back into
+        // completeServiceTask. Topic resolution: the canvas's
+        // `data.implementation.config.jobType` (externalWorker
+        // strategy). If missing, we fall back to "noop" with a
+        // warning rather than failing the instance — defensive.
+        if (node.type === "serviceTask") {
+          const userTopic = resolveServiceTaskTopic(node, this.logger);
+          version = await this.updateTokenWithLock(
+            args.tx,
+            args.tokenId,
+            version,
+            {
+              status: "waiting",
+              waitingFor: "service-task",
+              currentNodeId: nodeId,
+            },
+          );
+          await args.tx.insert(instanceEvents).values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-waiting",
+            payload: { waitingFor: "service-task", topic: userTopic },
+          });
+          // Enqueue the worker job. We pass the entire visible
+          // variable bag as input so handlers can read whatever they
+          // need; output (the handler's return value) is shallow-merged
+          // back into instance.variables on completion.
+          await this.worker.enqueue({
+            tenantId: args.tenantId,
+            jobType: "service-task",
+            topic: SERVICE_TASK_TOPIC,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            input: {
+              userTopic,
+              nodeId,
+              nodeData: node.data ?? {},
+              variables: args.variables,
+            },
+            // Service tasks default to 3 attempts. Override per-node
+            // (E5 uses node.data.resilience.retry.count if set).
+            maxAttempts: resolveServiceTaskMaxAttempts(node) ?? 3,
+          });
           return { tokenStatus: "waiting", hops };
         }
       }
@@ -808,6 +862,267 @@ export class EngineService {
         tokenStatus: advance.tokenStatus,
       };
     });
+  }
+
+  /** Resume a token that was suspended on a serviceTask. Called by
+   *  ServiceTaskService when the worker handler returns successfully.
+   *  No auth check — this is worker-internal, gated by the fact that
+   *  it can only be reached via a job claim that was originally
+   *  enqueued by the engine itself.
+   *
+   *  Result is shallow-merged into instance.variables. PII redaction
+   *  applies to the per-key variable-set audit rows (same rule as
+   *  completeTask). The token then advances normally. */
+  async completeServiceTask(args: {
+    tokenId: string;
+    tenantId: string;
+    result: Record<string, unknown>;
+  }): Promise<{
+    instanceId: string;
+    instanceStatus: "running" | "completed" | "failed";
+    tokenStatus: "completed" | "waiting" | "failed";
+  }> {
+    return this.db.transaction(async (tx) => {
+      const tokenRow = await this.loadWaitingServiceTaskToken(
+        tx,
+        args.tokenId,
+        args.tenantId,
+      );
+      const instRow = await this.loadInstanceById(
+        tx,
+        tokenRow.instanceId,
+        args.tenantId,
+      );
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
+
+      // Audit anchor first, then per-key variable rows (mirrors the
+      // E3-polish completeTask ordering).
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "node-exited",
+        payload: { kind: "service-task-result" },
+      });
+
+      let instanceVersion = instRow.version;
+      const merged = {
+        ...((instRow.variables as Record<string, unknown> | null) ?? {}),
+        ...(args.result ?? {}),
+      };
+      if (args.result && Object.keys(args.result).length > 0) {
+        instanceVersion = await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instanceVersion,
+          { variables: merged },
+        );
+        const redactedKeys = new Set(
+          canvas.engineConfig?.redactedVariableKeys ?? [],
+        );
+        for (const key of Object.keys(args.result)) {
+          await tx.insert(instanceEvents).values({
+            tenantId: args.tenantId,
+            instanceId: tokenRow.instanceId,
+            tokenId: args.tokenId,
+            nodeId: tokenRow.currentNodeId,
+            eventType: "variable-set",
+            payload: redactedKeys.has(key)
+              ? { key, value: "<redacted>", redacted: true, source: "service-task" }
+              : { key, value: args.result[key], source: "service-task" },
+          });
+        }
+      }
+
+      const tokenVersion = await this.updateTokenWithLock(
+        tx,
+        args.tokenId,
+        tokenRow.version,
+        { status: "active", waitingFor: null },
+      );
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "token-resumed",
+      });
+
+      const advance = await this.advanceToken({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        tokenVersion,
+        currentNodeId: tokenRow.currentNodeId,
+        canvas,
+        variables: merged,
+        resumeFromWait: true,
+      });
+
+      let instanceStatus: "running" | "completed" | "failed" = "running";
+      if (advance.tokenStatus === "completed") {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instanceVersion,
+          { status: "completed", completedAt: new Date() },
+        );
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-completed",
+          payload: { hops: advance.hops },
+        });
+        await this.emitOutbox(tx, {
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-completed",
+          payload: { hops: advance.hops, variables: merged },
+          redactedKeys: canvas.engineConfig?.redactedVariableKeys,
+        });
+        instanceStatus = "completed";
+      } else if (advance.tokenStatus === "failed") {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instanceVersion,
+          {
+            status: "failed",
+            errorMessage: advance.errorMessage ?? null,
+            completedAt: new Date(),
+          },
+        );
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-failed",
+          payload: { hops: advance.hops, message: advance.errorMessage },
+        });
+        instanceStatus = "failed";
+      }
+
+      return {
+        instanceId: tokenRow.instanceId,
+        instanceStatus,
+        tokenStatus: advance.tokenStatus,
+      };
+    });
+  }
+
+  /** Mark a service-task-suspended token as failed because the worker
+   *  job hit the dead state (handler exhausted retries or no handler
+   *  registered). Without this hook the token would sit in `waiting`
+   *  forever. Called by ServiceTaskService.onDead. */
+  async failServiceTaskFromWorker(args: {
+    tokenId: string;
+    tenantId: string;
+    reason: string;
+  }): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const tokenRow = await this.loadWaitingServiceTaskToken(
+        tx,
+        args.tokenId,
+        args.tenantId,
+      ).catch(() => null);
+      // If the token isn't waiting on a service-task anymore (already
+      // resumed, completed, or cancelled) the dead-job is moot.
+      // Idempotent no-op so worker retries can't double-fail.
+      if (!tokenRow) return;
+
+      const instRow = await this.loadInstanceById(
+        tx,
+        tokenRow.instanceId,
+        args.tenantId,
+      );
+
+      try {
+        await this.updateTokenWithLock(tx, args.tokenId, tokenRow.version, {
+          status: "failed",
+          errorMessage: args.reason,
+        });
+      } catch {
+        // Concurrent mutation already moved it; nothing to do.
+        return;
+      }
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "error",
+        payload: { reason: "service-task-dead", message: args.reason },
+      });
+
+      await this.updateInstanceWithLock(
+        tx,
+        tokenRow.instanceId,
+        instRow.version,
+        {
+          status: "failed",
+          errorMessage: args.reason,
+          completedAt: new Date(),
+        },
+      );
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        eventType: "instance-failed",
+        payload: { reason: "service-task-dead", message: args.reason },
+      });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        eventType: "instance-failed",
+        payload: { reason: "service-task-dead", message: args.reason },
+      });
+    });
+  }
+
+  /** Variant of loadWaitingTokenForCompletion for the service-task
+   *  resume path. Validates `waitingFor === "service-task"` (vs the
+   *  user-task helper's "userTask"). No assignedTo check — service
+   *  tasks aren't user-claimable. */
+  private async loadWaitingServiceTaskToken(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    tokenId: string,
+    tenantId: string,
+  ): Promise<{
+    instanceId: string;
+    currentNodeId: string;
+    version: number;
+  }> {
+    const rows = await tx
+      .select({
+        id: instanceTokens.id,
+        instanceId: instanceTokens.instanceId,
+        currentNodeId: instanceTokens.currentNodeId,
+        status: instanceTokens.status,
+        waitingFor: instanceTokens.waitingFor,
+        version: instanceTokens.version,
+      })
+      .from(instanceTokens)
+      .where(
+        and(
+          eq(instanceTokens.id, tokenId),
+          eq(instanceTokens.tenantId, tenantId),
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    if (!row) throw new NotFoundException("Service-task token not found.");
+    if (row.status !== "waiting" || row.waitingFor !== "service-task") {
+      throw new BadRequestException(
+        `Token is not waiting on a service task (status=${row.status}, waitingFor=${row.waitingFor}).`,
+      );
+    }
+    return {
+      instanceId: row.instanceId,
+      currentNodeId: row.currentNodeId,
+      version: row.version,
+    };
   }
 
   /** Inbox query: waiting user-task tokens for a tenant, filterable by
@@ -1788,6 +2103,56 @@ export function evalCondition(
       `Condition eval failed: ${(err as Error).message}`,
     );
   }
+}
+
+/** Resolve a serviceTask node's user-defined topic for the worker
+ *  registry. E5 supports the `externalWorker` strategy
+ *  (`data.implementation = { type: "externalWorker", config: { jobType: "..." } }`).
+ *  Other strategies (rest, connector, soap, wasmModule, inlineScript)
+ *  haven't shipped a handler yet — we still suspend the token but
+ *  fall back to the `noop` handler so the instance doesn't dead-end
+ *  in `waiting`. Logged as warn. */
+export function resolveServiceTaskTopic(
+  node: EngineNode,
+  logger?: { warn?: (msg: string) => void },
+): string {
+  const data = node.data as Record<string, unknown> | undefined;
+  const impl = data?.implementation as
+    | { type?: unknown; config?: Record<string, unknown> }
+    | undefined;
+  if (!impl || typeof impl !== "object") {
+    logger?.warn?.(
+      `Service task ${node.id}: no implementation configured; using "noop".`,
+    );
+    return "noop";
+  }
+  if (impl.type !== "externalWorker") {
+    logger?.warn?.(
+      `Service task ${node.id}: implementation type "${String(impl.type)}" not supported in E5; using "noop".`,
+    );
+    return "noop";
+  }
+  const cfg = impl.config ?? {};
+  const topic = (cfg as { jobType?: unknown }).jobType;
+  if (typeof topic !== "string" || topic.trim() === "") {
+    logger?.warn?.(
+      `Service task ${node.id}: externalWorker.jobType missing; using "noop".`,
+    );
+    return "noop";
+  }
+  return topic;
+}
+
+/** Resolve `data.resilience.retry.count` if the canvas declares one;
+ *  otherwise null and the engine uses the WorkerService default. */
+export function resolveServiceTaskMaxAttempts(node: EngineNode): number | null {
+  const data = node.data as Record<string, unknown> | undefined;
+  const res = data?.resilience as { retry?: { count?: unknown } } | undefined;
+  const count = res?.retry?.count;
+  if (typeof count === "number" && count > 0 && Number.isInteger(count)) {
+    return count;
+  }
+  return null;
 }
 
 /** Resolve a userTask node's `data.assignment` to a concrete userId

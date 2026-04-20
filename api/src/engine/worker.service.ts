@@ -44,6 +44,14 @@ import { engineJobs } from "../database/schema";
  *  job after a stale-lock timeout (post-MVP — for now, manual). */
 export type JobHandler = (job: ClaimedJob) => Promise<unknown>;
 
+/** Called when a job is permanently dead (max retries exhausted, or
+ *  no handler registered for its topic). Lets handlers attached to a
+ *  business-meaningful topic propagate the failure — e.g. the
+ *  service-task handler marks the suspended token + instance failed
+ *  so a stuck workflow doesn't sit forever. Optional; topics without
+ *  one just leave the dead row in place. */
+export type JobOnDead = (job: ClaimedJob, error: string) => Promise<void>;
+
 export type ClaimedJob = {
   id: string;
   tenantId: string;
@@ -75,6 +83,7 @@ const TICK_INTERVAL_MS = 1_000;
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerService.name);
   private readonly handlers = new Map<string, JobHandler>();
+  private readonly onDeadCallbacks = new Map<string, JobOnDead>();
   private readonly workerId = `${process.pid}-${randomUUID().slice(0, 8)}`;
   private timer: NodeJS.Timeout | null = null;
   /** When false, the tick loop exits at the next iteration boundary
@@ -91,12 +100,13 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
    *  not enforced — for service tasks E5 will use `service-task:<topic>`,
    *  for webhooks E4.5c uses `webhook-dispatch`. The first
    *  registration wins; re-registering the same topic logs a warning. */
-  registerHandler(topic: string, handler: JobHandler): void {
+  registerHandler(topic: string, handler: JobHandler, onDead?: JobOnDead): void {
     if (this.handlers.has(topic)) {
       this.logger.warn(`Worker handler for "${topic}" re-registered; ignoring.`);
       return;
     }
     this.handlers.set(topic, handler);
+    if (onDead) this.onDeadCallbacks.set(topic, onDead);
     this.logger.log(`Registered worker handler: ${topic}`);
   }
 
@@ -279,6 +289,17 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(
           `Job ${job.id} (${job.topic}) → dead after ${job.attempts} attempts: ${message}`,
         );
+        const onDead = this.onDeadCallbacks.get(job.topic);
+        if (onDead) {
+          try {
+            await onDead(job, message);
+          } catch (cbErr) {
+            this.logger.error(
+              `onDead callback for ${job.topic} threw: ${(cbErr as Error).message}`,
+              (cbErr as Error).stack,
+            );
+          }
+        }
       } else {
         const delay = BACKOFF_MS[Math.min(job.attempts - 1, BACKOFF_MS.length - 1)];
         await this.markRetry(job.id, message, new Date(Date.now() + delay));
