@@ -5,6 +5,7 @@ import { AuthModule } from "./auth/auth.module";
 import { UsersModule } from "./users/users.module";
 import { ProcessesModule } from "./processes/processes.module";
 import { AiModule } from "./ai/ai.module";
+import { EngineModule } from "./engine/engine.module";
 
 const env = process.env.NODE_ENV || "development";
 
@@ -19,6 +20,7 @@ const env = process.env.NODE_ENV || "development";
     UsersModule,
     ProcessesModule,
     AiModule,
+    EngineModule,
   ],
 })
 export class AppModule {}

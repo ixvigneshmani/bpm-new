@@ -291,6 +291,87 @@ export const aiInteractionStatusEnum = pgEnum("AI_INTERACTION_STATUS", [
   "error",
 ]);
 
+// ─── Engine Enums ───────────────────────────────────────────────────
+
+export const processInstanceStatusEnum = pgEnum("PROCESS_INSTANCE_STATUS", [
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const instanceTokenStatusEnum = pgEnum("INSTANCE_TOKEN_STATUS", [
+  "active",
+  "waiting",
+  "completed",
+  "failed",
+]);
+
+// ─── PROCESS_INSTANCES ──────────────────────────────────────────────
+
+export const processInstances = pgTable(
+  "PROCESS_INSTANCES",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    processId: uuid("PROCESS_ID")
+      .notNull()
+      .references(() => processes.id, { onDelete: "cascade" }),
+    startedBy: uuid("STARTED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: processInstanceStatusEnum("STATUS").notNull().default("running"),
+    variables: jsonb("VARIABLES").notNull().default({}),
+    errorMessage: text("ERROR_MESSAGE"),
+    startedAt: timestamp("STARTED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    completedAt: timestamp("COMPLETED_AT", { withTimezone: true }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("PROC_INST_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
+    index("PROC_INST_PROCESS_IDX").on(t.processId),
+  ],
+);
+
+// ─── INSTANCE_TOKENS ────────────────────────────────────────────────
+
+export const instanceTokens = pgTable(
+  "INSTANCE_TOKENS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID")
+      .notNull()
+      .references(() => processInstances.id, { onDelete: "cascade" }),
+    currentNodeId: varchar("CURRENT_NODE_ID", { length: 255 }).notNull(),
+    status: instanceTokenStatusEnum("STATUS").notNull().default("active"),
+    waitingFor: varchar("WAITING_FOR", { length: 64 }),
+    assignedTo: uuid("ASSIGNED_TO").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    errorMessage: text("ERROR_MESSAGE"),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("TOKEN_INSTANCE_IDX").on(t.instanceId),
+    index("TOKEN_TENANT_STATUS_IDX").on(t.tenantId, t.status),
+    index("TOKEN_ASSIGNED_IDX").on(t.assignedTo, t.status),
+  ],
+);
+
 export const aiInteractions = pgTable(
   "AI_INTERACTIONS",
   {
