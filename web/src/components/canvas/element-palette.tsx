@@ -149,15 +149,19 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     ],
   },
   {
-    label: "Data",
+    label: "Artifacts",
     items: [
-      {
-        type: "dataObject", label: "Object", color: "#475467", shape: "rect",
-        icon: <><path d="M7 4h7l4 4v12a1 1 0 01-1 1H7a1 1 0 01-1-1V5a1 1 0 011-1z" fill="none" stroke="#475467" strokeWidth="1.5" /><polyline points="14 4 14 8 18 8" fill="none" stroke="#475467" strokeWidth="1.5" /></>,
-      },
       {
         type: "dataStore", label: "Store", color: "#475467", shape: "rect",
         icon: <><ellipse cx="12" cy="7" rx="6" ry="3" fill="none" stroke="#475467" strokeWidth="1.5" /><path d="M6 7v10c0 1.66 2.69 3 6 3s6-1.34 6-3V7" fill="none" stroke="#475467" strokeWidth="1.5" /></>,
+      },
+      {
+        type: "textAnnotation", label: "Note", color: "#92400E", shape: "rect",
+        icon: <><path d="M10 5h8v14h-8" fill="none" stroke="#92400E" strokeWidth="1.5" /><path d="M10 5v14" stroke="#92400E" strokeWidth="1.5" /><line x1="12" y1="9" x2="16" y2="9" stroke="#92400E" strokeWidth="1.2" /><line x1="12" y1="12" x2="16" y2="12" stroke="#92400E" strokeWidth="1.2" /><line x1="12" y1="15" x2="15" y2="15" stroke="#92400E" strokeWidth="1.2" /></>,
+      },
+      {
+        type: "group", label: "Group", color: "#475467", shape: "rect-dash",
+        icon: <rect x="4" y="5" width="16" height="14" rx="3" fill="none" stroke="#475467" strokeWidth="1.5" strokeDasharray="3 2" />,
       },
     ],
   },

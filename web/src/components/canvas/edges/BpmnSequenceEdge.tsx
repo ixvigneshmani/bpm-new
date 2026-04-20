@@ -44,17 +44,31 @@ export default function BpmnSequenceEdge({
   });
 
   const isDefault = !!(data && (data as { isDefault?: boolean }).isDefault);
-  const flowType = (data as { flowType?: "sequence" | "message" } | undefined)?.flowType ?? "sequence";
+  const flowType = (data as { flowType?: "sequence" | "message" | "association" } | undefined)?.flowType ?? "sequence";
+  const isAssociation = flowType === "association";
 
   const stroke = selected ? SELECTED_COLOR : (style as CSSProperties)?.stroke ?? DEFAULT_COLOR;
   const strokeWidth = selected ? 2.5 : ((style as CSSProperties)?.strokeWidth ?? 1.5);
 
+  // Dash patterns: message is the most prominent (large gaps), association
+  // is a tighter dot-pattern so the two read as visually distinct.
+  const strokeDasharray = flowType === "message"
+    ? "5 4"
+    : flowType === "association"
+      ? "2 3"
+      : undefined;
+
   const pathStyle: CSSProperties = {
     stroke,
     strokeWidth,
-    strokeDasharray: flowType === "message" ? "5 4" : undefined,
+    strokeDasharray,
     fill: "none",
   };
+
+  // BPMN 2.0 associations are unidirectional-by-default; we omit the
+  // arrow marker to match the convention most tools use (Camunda,
+  // bpmn.io render a plain dashed line with no arrowhead).
+  const effectiveMarkerEnd = isAssociation ? undefined : markerEnd;
 
   // Edit-on-double-click label
   const [editing, setEditing] = useState(false);
@@ -83,10 +97,10 @@ export default function BpmnSequenceEdge({
 
   return (
     <>
-      <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={pathStyle} />
+      <BaseEdge id={id} path={edgePath} markerEnd={effectiveMarkerEnd} style={pathStyle} />
 
-      {/* Default-flow slash marker */}
-      {isDefault && (
+      {/* Default-flow slash marker — only meaningful on sequence flows. */}
+      {isDefault && !isAssociation && (
         <g transform={slashOffset}>
           <line
             x1={-6} y1={-6} x2={6} y2={6}
@@ -97,7 +111,9 @@ export default function BpmnSequenceEdge({
         </g>
       )}
 
-      <EdgeLabelRenderer>
+      {/* Associations are unlabeled in BPMN — skip the inline label UI
+          entirely so users don't accidentally annotate them. */}
+      {!isAssociation && <EdgeLabelRenderer>
         <div
           className="nodrag nopan"
           style={{
@@ -159,7 +175,7 @@ export default function BpmnSequenceEdge({
             </div>
           ) : null}
         </div>
-      </EdgeLabelRenderer>
+      </EdgeLabelRenderer>}
     </>
   );
 }

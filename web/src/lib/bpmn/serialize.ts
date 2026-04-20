@@ -19,7 +19,7 @@
 
 import type { Node, Edge } from "@xyflow/react";
 import { BpmnModdle } from "bpmn-moddle";
-import { INTERNAL_TO_BPMN, getSize, isSubprocessType, COLLAPSED_SUBPROCESS_SIZE } from "./element-map";
+import { INTERNAL_TO_BPMN, getSize, isSubprocessType, isArtifactType, COLLAPSED_SUBPROCESS_SIZE } from "./element-map";
 import { poolOf as sharedPoolOf } from "./scope";
 import { absOrigin } from "./geometry";
 import { flowproDescriptor } from "./flowpro-descriptor";
@@ -128,14 +128,23 @@ export async function serializeCanvasToBpmn(
   };
 
   // ─── Partition edges: sequence flows go to the nearest common
-  //     scope, message flows are held aside for the Collaboration. ────
+  //     scope, message flows are held aside for the Collaboration,
+  //     associations live with the artifacts in their scope. ─────────
   const flowsByScope = new Map<string | null, Edge[]>();
+  const associationsByScope = new Map<string | null, Edge[]>();
   const messageFlowEdges: Edge[] = [];
   for (const e of edges) {
     if (!nodeById.has(e.source) || !nodeById.has(e.target)) continue;
     const flowType = (e.data as Record<string, unknown> | undefined)?.flowType;
     if (flowType === "message") {
       messageFlowEdges.push(e);
+      continue;
+    }
+    if (flowType === "association") {
+      const scope = commonScope(e.source, e.target);
+      const arr = associationsByScope.get(scope) || [];
+      arr.push(e);
+      associationsByScope.set(scope, arr);
       continue;
     }
     const scope = commonScope(e.source, e.target);
@@ -161,6 +170,35 @@ export async function serializeCanvasToBpmn(
     const bpmnType = n.type && INTERNAL_TO_BPMN[n.type];
     if (!bpmnType) return null;
     const data = (n.data || {}) as Record<string, unknown>;
+
+    // Artifacts (DataStore / TextAnnotation / Group) don't take `name` /
+    // incoming / outgoing — the text content lives in a child element
+    // for annotations, and the identifier comes from the ref attribute
+    // for data stores. Build them separately and short-circuit.
+    if (isArtifactType(n.type)) {
+      if (n.type === "textAnnotation") {
+        const el = mk(bpmnType, { id: n.id });
+        const body = typeof data.label === "string" ? data.label : "";
+        if (body) {
+          el.text = body;
+        }
+        return el;
+      }
+      if (n.type === "dataStore") {
+        return mk(bpmnType, {
+          id: n.id,
+          name: (data.label as string) || undefined,
+        });
+      }
+      if (n.type === "group") {
+        // Group needs a `categoryValueRef` per spec, but most tools
+        // treat the bare group with a name as valid DI-only commentary.
+        // v1 emits without the category linkage — round-trips with
+        // ourselves; external tools will see an unanchored group.
+        return mk(bpmnType, { id: n.id });
+      }
+    }
+
     const el = mk(bpmnType, {
       id: n.id,
       name: (data.label as string) || undefined,
@@ -253,8 +291,32 @@ export async function serializeCanvasToBpmn(
     }
   }
 
+  // Build bpmn:Association moddle elements alongside sequence flows so
+  // the DI BPMNEdge loop (which reads `flowElById`) can emit waypoints
+  // for them without a second code path.
+  const buildAssociation = (e: Edge): ModdleElement | null => {
+    const sourceEl = nodeElById.get(e.source);
+    const targetEl = nodeElById.get(e.target);
+    if (!sourceEl || !targetEl) return null;
+    return mk("bpmn:Association", {
+      id: e.id,
+      sourceRef: sourceEl,
+      targetRef: targetEl,
+    });
+  };
+  for (const [, scopedAssoc] of associationsByScope) {
+    for (const e of scopedAssoc) {
+      const a = buildAssociation(e);
+      if (a) flowElById.set(e.id, a);
+    }
+  }
+
   // Wire incoming/outgoing onto every flow node now that flows exist.
+  // Skip artifact types — their edges are associations tracked separately
+  // and they don't carry `incoming`/`outgoing` refs in the BPMN schema.
   for (const [id, el] of nodeElById) {
+    const n = nodeById.get(id);
+    if (isArtifactType(n?.type)) continue;
     const incoming = (incomingByNode.get(id) || [])
       .map((fid) => flowElById.get(fid))
       .filter(Boolean) as ModdleElement[];
@@ -296,12 +358,18 @@ export async function serializeCanvasToBpmn(
   // but have no flow-element semantics in BPMN, so we walk *through*
   // them and their contents land directly in the Process flowElements
   // list. The lane structure is emitted separately as a `LaneSet`.
-  const assembleScope = (parentId: string | null, laneTransparent = false): ModdleElement[] => {
-    const out: ModdleElement[] = [];
+  const assembleScope = (
+    parentId: string | null,
+    laneTransparent = false,
+  ): { flowElements: ModdleElement[]; artifacts: ModdleElement[] } => {
+    const flow: ModdleElement[] = [];
+    const arts: ModdleElement[] = [];
     const children = childrenByParent.get(parentId) || [];
     for (const n of children) {
       if (laneTransparent && n.type === "lane") {
-        out.push(...assembleScope(n.id, true));
+        const nested = assembleScope(n.id, true);
+        flow.push(...nested.flowElements);
+        arts.push(...nested.artifacts);
         continue;
       }
       const el = nodeElById.get(n.id);
@@ -310,16 +378,28 @@ export async function serializeCanvasToBpmn(
         // Subprocess children are NOT lane-transparent — a subprocess
         // owns its own scope regardless of whether it itself sits in a lane.
         const nested = assembleScope(n.id, false);
-        if (nested.length > 0) el.flowElements = nested;
+        if (nested.flowElements.length > 0) el.flowElements = nested.flowElements;
+        if (nested.artifacts.length > 0) el.artifacts = nested.artifacts;
       }
-      out.push(el);
+      // TextAnnotation + Group are BPMN Artifacts; DataStoreReference is
+      // a FlowElement per the spec.
+      if (n.type === "textAnnotation" || n.type === "group") {
+        arts.push(el);
+      } else {
+        flow.push(el);
+      }
     }
     const scopedFlows = flowsByScope.get(parentId) || [];
     for (const e of scopedFlows) {
-      const flow = flowElById.get(e.id);
-      if (flow) out.push(flow);
+      const f = flowElById.get(e.id);
+      if (f) flow.push(f);
     }
-    return out;
+    const scopedAssoc = associationsByScope.get(parentId) || [];
+    for (const e of scopedAssoc) {
+      const a = flowElById.get(e.id);
+      if (a) arts.push(a);
+    }
+    return { flowElements: flow, artifacts: arts };
   };
 
   /** Side-effect lookup populated by `buildLaneSet` so we can point
@@ -377,13 +457,15 @@ export async function serializeCanvasToBpmn(
   let diPlaneTarget: ModdleElement;
 
   if (!hasPools) {
-    const processFlowElements = assembleScope(null);
-    const processEl = mk("bpmn:Process", {
+    const scope = assembleScope(null);
+    const processAttrs: Record<string, unknown> = {
       id: processId,
       name: processName,
       isExecutable: true,
-      flowElements: processFlowElements,
-    });
+      flowElements: scope.flowElements,
+    };
+    if (scope.artifacts.length > 0) processAttrs.artifacts = scope.artifacts;
+    const processEl = mk("bpmn:Process", processAttrs);
     processesForDefinitions = [processEl];
     diPlaneTarget = processEl;
   } else {
@@ -468,12 +550,14 @@ export async function serializeCanvasToBpmn(
     for (const pool of pools) {
       const poolData = (pool.data || {}) as { label?: string; participantName?: string; processId?: string };
       const derivedProcessId = poolData.processId || `Process_${pool.id}`;
+      const scope = assembleScope(pool.id, true);
       const processAttrs: Record<string, unknown> = {
         id: derivedProcessId,
         name: poolData.label || poolData.participantName || "Process",
         isExecutable: true,
-        flowElements: assembleScope(pool.id, true),
+        flowElements: scope.flowElements,
       };
+      if (scope.artifacts.length > 0) processAttrs.artifacts = scope.artifacts;
       const laneSet = buildLaneSet(pool.id);
       if (laneSet) processAttrs.laneSets = [laneSet];
       const processEl = mk("bpmn:Process", processAttrs);

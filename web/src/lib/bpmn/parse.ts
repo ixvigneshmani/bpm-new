@@ -132,6 +132,27 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
     parentAbs: { x: number; y: number },
   ) => {
     for (const el of flowElements) {
+      // Associations live on `process.artifacts` but the caller folds
+      // them into the same walk; treat them like edges with flowType.
+      if (el.$type === "bpmn:Association") {
+        const source = el.sourceRef as { id?: string } | string | undefined;
+        const target = el.targetRef as { id?: string } | string | undefined;
+        const sourceId = typeof source === "string" ? source : source?.id;
+        const targetId = typeof target === "string" ? target : target?.id;
+        if (!el.id || !sourceId || !targetId) {
+          warnings.push(`Skipped association with missing id/source/target: ${el.id ?? "(no id)"}`);
+          continue;
+        }
+        edges.push({
+          id: el.id,
+          source: sourceId,
+          target: targetId,
+          ...DEFAULT_EDGE_VISUAL,
+          data: { flowType: "association" },
+        });
+        continue;
+      }
+
       // Sequence / message flows
       if (el.$type === "bpmn:SequenceFlow" || el.$type === "bpmn:MessageFlow") {
         const source = (el.sourceRef as { id?: string } | string | undefined);
@@ -170,6 +191,13 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
         continue;
       }
 
+      // bpmn:TextAnnotation carries its body in a child `text` element,
+      // not in `name`. Pull it into the internal `label` field so the
+      // TextAnnotationNode renders without a second code path.
+      const nodeLabel = internalType === "textAnnotation"
+        ? (typeof el.text === "string" ? el.text : "")
+        : (el.name || undefined);
+
       const shape = shapeByRef.get(el.id);
       const bounds = shape?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
       const size = getSize(internalType);
@@ -181,7 +209,7 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
         y: absY - parentAbs.y,
       };
 
-      const baseData = createDefaultNodeData(internalType, el.name || undefined) as Record<string, unknown>;
+      const baseData = createDefaultNodeData(internalType, nodeLabel) as Record<string, unknown>;
 
       if (internalType === "exclusiveGateway" || internalType === "inclusiveGateway") {
         const defaultRef = el.default;
@@ -275,8 +303,10 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
       // Recurse into subprocess children.
       if (isSubprocessType(internalType)) {
         const childFlowElements = (el.flowElements as ModdleElement[] | undefined) || [];
-        if (childFlowElements.length > 0) {
-          walkScope(childFlowElements, el.id, { x: absX, y: absY });
+        const childArtifacts = (el.artifacts as ModdleElement[] | undefined) || [];
+        const children = [...childFlowElements, ...childArtifacts];
+        if (children.length > 0) {
+          walkScope(children, el.id, { x: absX, y: absY });
         }
       }
     }
@@ -368,10 +398,16 @@ export async function parseBpmnToCanvas(xml: string): Promise<ParseResult> {
   for (const process of processes) {
     const owningParticipant = process.id ? participantByProcessId.get(process.id) : undefined;
     const rootFlowElements = (process.flowElements as ModdleElement[] | undefined) || [];
+    // Artifacts (bpmn:TextAnnotation, bpmn:Group, bpmn:Association) live
+    // on a sibling `artifacts` slot per BPMN 2.0 §10.4.5. Fold them into
+    // the single walkScope pass so parent resolution + DI lookup work
+    // identically — the walker handles them positionally.
+    const rootArtifacts = (process.artifacts as ModdleElement[] | undefined) || [];
+    const combined = [...rootFlowElements, ...rootArtifacts];
     if (owningParticipant?.id) {
-      walkScope(rootFlowElements, owningParticipant.id, poolAbsById.get(owningParticipant.id) || { x: 0, y: 0 });
+      walkScope(combined, owningParticipant.id, poolAbsById.get(owningParticipant.id) || { x: 0, y: 0 });
     } else {
-      walkScope(rootFlowElements, null, { x: 0, y: 0 });
+      walkScope(combined, null, { x: 0, y: 0 });
     }
 
     // Lanes: each LaneSet on the Process declares Lanes with

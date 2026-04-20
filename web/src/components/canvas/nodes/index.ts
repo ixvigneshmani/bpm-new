@@ -26,6 +26,9 @@ import TransactionNode from "./TransactionNode";
 import AdHocSubProcessNode from "./AdHocSubProcessNode";
 import PoolNode from "./PoolNode";
 import LaneNode from "./LaneNode";
+import DataStoreNode from "./DataStoreNode";
+import TextAnnotationNode from "./TextAnnotationNode";
+import GroupNode from "./GroupNode";
 
 export const nodeTypes = {
   startEvent: StartEventNode,
@@ -51,4 +54,7 @@ export const nodeTypes = {
   adHocSubProcess: AdHocSubProcessNode,
   pool: PoolNode,
   lane: LaneNode,
+  dataStore: DataStoreNode,
+  textAnnotation: TextAnnotationNode,
+  group: GroupNode,
 };

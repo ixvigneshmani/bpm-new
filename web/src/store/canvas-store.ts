@@ -16,6 +16,7 @@ import {
 import { nanoid } from "nanoid";
 import { createDefaultNodeData, type BpmnNodeData } from "../types/bpmn-node-data";
 import { absOrigin } from "../lib/bpmn/geometry";
+import { isArtifactType } from "../lib/bpmn/element-map";
 
 export type ProcessMeta = {
   name: string;
@@ -219,11 +220,25 @@ const useCanvasStore = create<CanvasState>()(
 
       onConnect: (connection) => {
         const id = `e-${nanoid(8)}`;
-        const { connectMode } = get();
-        // Message flows get `data.flowType: "message"` so the renderer
-        // picks the dashed open-arrow style and the serializer emits
-        // bpmn:MessageFlow at Collaboration scope.
-        const data = connectMode === "message" ? { flowType: "message" } : undefined;
+        const { connectMode, nodes } = get();
+        // Artifact endpoint → auto-infer association (BPMN 2.0 §10.4.5).
+        // Data stores, text annotations, and groups can't participate in
+        // sequence or message flows, so the only valid edge kind is a
+        // dashed bpmn:Association. Detection by endpoint type removes a
+        // third connect-mode toggle from the toolbar.
+        const byId = new Map(nodes.map((n) => [n.id, n]));
+        const src = connection.source ? byId.get(connection.source) : undefined;
+        const tgt = connection.target ? byId.get(connection.target) : undefined;
+        const touchesArtifact =
+          isArtifactType(src?.type) || isArtifactType(tgt?.type);
+
+        let data: Record<string, unknown> | undefined;
+        if (touchesArtifact) {
+          data = { flowType: "association" };
+        } else if (connectMode === "message") {
+          data = { flowType: "message" };
+        }
+
         set({
           edges: addEdge(
             { ...connection, id, ...DEFAULT_EDGE_VISUAL, ...(data ? { data } : {}) },

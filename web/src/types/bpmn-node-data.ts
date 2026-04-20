@@ -470,6 +470,30 @@ export type LaneData = BaseNodeData & {
   isHorizontal?: boolean;
 };
 
+/* ─── Data artifacts + annotations (P8) ─── */
+
+/** Data store — `bpmn:DataStoreReference`. External system of record
+ *  (DB, ERP, Salesforce) that tasks read from / write to. We do NOT
+ *  model `bpmn:DataObject` in FlowPro because the process's business
+ *  document schema (processMeta.businessDoc) already captures the
+ *  in-process data, and FlowPro's AI + future engine bind to that
+ *  schema rather than to BPMN DataObject references. */
+export type DataStoreData = BaseNodeData & {
+  bpmnType: "dataStore";
+};
+
+/** Text annotation — `bpmn:TextAnnotation`. Free-form sticky-note pinned
+ *  to a node via an association edge. Label re-purposed as the body. */
+export type TextAnnotationData = BaseNodeData & {
+  bpmnType: "textAnnotation";
+};
+
+/** Group — `bpmn:Group` + `bpmn:CategoryValue`. Visual-only clustering
+ *  of nodes; groups do NOT influence parentId or flow scope. */
+export type GroupData = BaseNodeData & {
+  bpmnType: "group";
+};
+
 /* ─── Discriminated union ─── */
 
 export type BpmnNodeData =
@@ -492,6 +516,9 @@ export type BpmnNodeData =
   | AdHocSubProcessData
   | PoolData
   | LaneData
+  | DataStoreData
+  | TextAnnotationData
+  | GroupData
   | ExclusiveGatewayData
   | ParallelGatewayData
   | InclusiveGatewayData
@@ -525,6 +552,9 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
     adHocSubProcess: "Ad-hoc Subprocess",
     pool: "Pool",
     lane: "Lane",
+    dataStore: "Data Store",
+    textAnnotation: "Note",
+    group: "Group",
   };
 
   const base: BaseNodeData = {
@@ -612,6 +642,12 @@ export function createDefaultNodeData(bpmnType: string, label?: string): BpmnNod
       } as PoolData;
     case "lane":
       return { ...base, bpmnType: "lane", isHorizontal: true } as LaneData;
+    case "dataStore":
+      return { ...base, bpmnType: "dataStore" } as DataStoreData;
+    case "textAnnotation":
+      return { ...base, bpmnType: "textAnnotation" } as TextAnnotationData;
+    case "group":
+      return { ...base, bpmnType: "group" } as GroupData;
     default:
       return base;
   }
@@ -652,4 +688,7 @@ export const NODE_THEMES: Record<string, NodeTheme> = {
   adHocSubProcess:  { color: "#B45309", bgLight: "#FFFBEB", bgSelected: "#FEF3C7", borderLight: "#FCD34D", label: "Ad-hoc Subprocess",   iconBg: "#FEF3C7" },
   pool:             { color: "#1D4ED8", bgLight: "#EFF6FF", bgSelected: "#DBEAFE", borderLight: "#93C5FD", label: "Pool",                iconBg: "#DBEAFE" },
   lane:             { color: "#1D4ED8", bgLight: "#F8FAFC", bgSelected: "#F1F5F9", borderLight: "#CBD5E1", label: "Lane",                iconBg: "#F1F5F9" },
+  dataStore:        { color: "#475467", bgLight: "#F8FAFC", bgSelected: "#F1F5F9", borderLight: "#CBD5E1", label: "Data Store",          iconBg: "#F1F5F9" },
+  textAnnotation:   { color: "#92400E", bgLight: "#FFFBEB", bgSelected: "#FEF3C7", borderLight: "#FCD34D", label: "Text Annotation",     iconBg: "#FEF3C7" },
+  group:            { color: "#475467", bgLight: "transparent", bgSelected: "#F8FAFC", borderLight: "#CBD5E1", label: "Group",           iconBg: "#F1F5F9" },
 };

@@ -30,6 +30,9 @@ export const DEFAULT_SIZE: Record<string, { width: number; height: number }> = {
   adHocSubProcess: { width: 360, height: 200 },
   pool: { width: 800, height: 240 },
   lane: { width: 770, height: 120 },
+  dataStore: { width: 60, height: 54 },
+  textAnnotation: { width: 180, height: 70 },
+  group: { width: 320, height: 200 },
 };
 
 /** Collapsed subprocess shapes render as task-sized boxes; use this when
@@ -51,6 +54,19 @@ export function isSubprocessType(type: string | undefined): boolean {
  *  helper before walking the flow-node path. */
 export function isSwimlaneType(type: string | undefined): boolean {
   return type === "pool" || type === "lane";
+}
+
+/** Data artifacts + annotations (BPMN 2.0 §10.4). These live alongside
+ *  flow nodes in the process but serialize as `bpmn:DataStoreReference`
+ *  / `bpmn:TextAnnotation` / `bpmn:Group` and are NOT valid endpoints
+ *  for sequence or message flows. DataObject is intentionally omitted
+ *  — FlowPro represents in-process data via `processMeta.businessDoc`. */
+export function isArtifactType(type: string | undefined): boolean {
+  return (
+    type === "dataStore" ||
+    type === "textAnnotation" ||
+    type === "group"
+  );
 }
 
 /** Any node that acts as a container for others (influences parentId
@@ -85,6 +101,11 @@ export const INTERNAL_TO_BPMN: Record<string, string> = {
   eventSubProcess: "bpmn:SubProcess",
   transaction: "bpmn:Transaction",
   adHocSubProcess: "bpmn:AdHocSubProcess",
+  // Artifacts. DataStore uses the reference form directly (every BPMN
+  // tool draws the reference, not the declaration).
+  dataStore: "bpmn:DataStoreReference",
+  textAnnotation: "bpmn:TextAnnotation",
+  group: "bpmn:Group",
 };
 
 /** Inverse: bpmn-moddle $type → our internal type. Built at module load.

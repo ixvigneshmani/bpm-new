@@ -168,6 +168,10 @@ export const disconnectedNodeRule: ValidationRule = {
       // Pools and lanes are containers that don't participate in
       // sequence-flow connectivity at all.
       if (n.type === "pool" || n.type === "lane") continue;
+      // Artifacts (DataStore / TextAnnotation / Group) connect via
+      // associations — or not at all (groups are purely visual).
+      // The association-endpoints rule owns their validation.
+      if (n.type === "dataStore" || n.type === "textAnnotation" || n.type === "group") continue;
       // Start events of event subprocesses intentionally have no
       // incoming flow — they fire on event. Skip.
       if (n.type === "startEvent") {
@@ -421,6 +425,66 @@ export const laneRequiresPoolRule: ValidationRule = {
   },
 };
 
+/** P8: text annotations are only useful if they carry text. An empty
+ *  sticky-note is a modeling mistake (user double-clicked to create one
+ *  then didn't type), surface as a warning so the exporter can flag it. */
+const emptyTextAnnotationRule: ValidationRule = {
+  id: "empty-text-annotation",
+  name: "Text annotation has no text",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "textAnnotation") continue;
+      const body = (n.data?.label as string) ?? "";
+      if (body.trim().length === 0) {
+        issues.push({
+          id: `empty-text-annotation:${n.id}`,
+          severity: "warning",
+          ruleId: "empty-text-annotation",
+          nodeId: n.id,
+          message: "Text annotation is empty — double-click to add content or remove it.",
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+/** P8: associations connect a flow node to an artifact (or vice versa).
+ *  An association between two flow nodes, or between two artifacts, is
+ *  a modeling mistake — BPMN 2.0 §10.4.5 defines associations only for
+ *  linking artifacts to the flow. */
+const associationEndpointsRule: ValidationRule = {
+  id: "association-endpoints",
+  name: "Association endpoints",
+  run: (nodes, edges) => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const issues: ValidationIssue[] = [];
+    const artifactTypes = new Set(["dataStore", "textAnnotation", "group"]);
+    for (const e of edges) {
+      const flowType = (e.data as { flowType?: string } | undefined)?.flowType;
+      if (flowType !== "association") continue;
+      const src = byId.get(e.source);
+      const tgt = byId.get(e.target);
+      if (!src || !tgt) continue;
+      const srcArt = artifactTypes.has(src.type || "");
+      const tgtArt = artifactTypes.has(tgt.type || "");
+      if (srcArt === tgtArt) {
+        issues.push({
+          id: `association-endpoints:${e.id}`,
+          severity: "warning",
+          ruleId: "association-endpoints",
+          edgeId: e.id,
+          message: srcArt
+            ? "Association connects two artifacts — at least one endpoint should be a flow node."
+            : "Association connects two flow nodes — use a sequence flow or message flow instead.",
+        });
+      }
+    }
+    return issues;
+  },
+};
+
 export const DEFAULT_RULES: ValidationRule[] = [
   noStartEventRule,
   noEndEventRule,
@@ -433,4 +497,6 @@ export const DEFAULT_RULES: ValidationRule[] = [
   sequenceFlowSamePoolRule,
   messageFlowCrossPoolRule,
   laneRequiresPoolRule,
+  emptyTextAnnotationRule,
+  associationEndpointsRule,
 ];
