@@ -26,12 +26,15 @@ export class AuthService {
       throw new UnauthorizedException("Account is deactivated");
     }
 
+    const roles = await this.usersService.getRoleKeys(user.id);
+
     const payload = {
       sub: user.id,
       tenantId: user.tenantId,
       email: user.email,
       displayName: user.displayName,
-      role: user.role,
+      systemRole: user.role,
+      roles,
     };
 
     const accessToken = await this.jwt.signAsync(payload);
@@ -42,7 +45,8 @@ export class AuthService {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
-        role: user.role,
+        systemRole: user.role,
+        roles,
         tenantId: user.tenantId,
       },
     };

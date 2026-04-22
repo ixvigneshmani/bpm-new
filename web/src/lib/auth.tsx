@@ -12,7 +12,10 @@ type User = {
   id: string;
   email: string;
   displayName: string;
-  role: string;
+  /** Platform access level — owner/admin/member/viewer. */
+  systemRole: string;
+  /** Domain role keys, e.g. ["manager"]. */
+  roles: string[];
   tenantId: string;
 };
 
@@ -29,7 +32,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
     try {
       const stored = localStorage.getItem("flowpro_user");
-      return stored ? JSON.parse(stored) : null;
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      // Old payload shape (pre-R1) had `role` only. Force re-login so
+      // the new systemRole/roles fields are populated from /auth/login.
+      if (!parsed?.systemRole || !Array.isArray(parsed.roles)) {
+        localStorage.removeItem("flowpro_user");
+        localStorage.removeItem("flowpro_token");
+        return null;
+      }
+      return parsed;
     } catch {
       localStorage.removeItem("flowpro_user");
       return null;

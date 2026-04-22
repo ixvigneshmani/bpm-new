@@ -359,7 +359,7 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
 
       {startDialogOpen && (
         <StartInstanceDialog
-          schema={processMeta.businessDoc as Record<string, unknown> | null}
+          schema={processMeta.businessDoc as Parameters<typeof StartInstanceDialog>[0]["schema"]}
           submitting={busy === "start"}
           onCancel={() => { if (busy !== "start") setStartDialogOpen(false); }}
           onSubmit={submitStartInstance}
