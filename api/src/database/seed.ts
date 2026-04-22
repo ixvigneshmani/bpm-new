@@ -109,6 +109,62 @@ async function seed() {
     console.log(`  Template: ${doc.name} (${doc.id})`);
   }
 
+  // ─── Roles (R1) ─────────────────────────────────────────────────
+  const seedRoles = [
+    { key: "manager", label: "Manager", description: "Approves requests raised by their reports." },
+    { key: "employee", label: "Employee", description: "Raises requests that flow through the process engine." },
+    { key: "finance", label: "Finance", description: "Approves monetary / expense-related tasks." },
+  ];
+  const roleIdByKey: Record<string, string> = {};
+  for (const r of seedRoles) {
+    const [row] = await db
+      .insert(schema.roles)
+      .values({
+        tenantId: tenant.id,
+        key: r.key,
+        label: r.label,
+        description: r.description,
+        system: true,
+      })
+      .returning();
+    roleIdByKey[r.key] = row.id;
+    console.log(`  Role: ${row.label} (${row.key})`);
+  }
+
+  // Vignesh gets `manager`.
+  await db.insert(schema.userRoles).values({
+    userId: user.id,
+    roleId: roleIdByKey.manager,
+    tenantId: tenant.id,
+    assignedBy: user.id,
+  });
+  console.log(`  Assigned: ${user.email} → manager`);
+
+  // Extra employee-only user for authorization-denial tests.
+  const [employee] = await db
+    .insert(schema.users)
+    .values({
+      tenantId: tenant.id,
+      email: "eva.employee@innovatechs.com",
+      displayName: "Eva Employee",
+      passwordHash,
+      role: "member",
+      emailVerifiedAt: new Date(),
+    })
+    .returning();
+  await db.insert(schema.workspaceMembers).values({
+    workspaceId: workspace.id,
+    userId: employee.id,
+    role: "member",
+  });
+  await db.insert(schema.userRoles).values({
+    userId: employee.id,
+    roleId: roleIdByKey.employee,
+    tenantId: tenant.id,
+    assignedBy: user.id,
+  });
+  console.log(`  User: ${employee.displayName} <${employee.email}> (employee role)`);
+
   console.log("\nSeed complete!");
   if (process.env.NODE_ENV === "development") {
     console.log(`\n  Login: vignesh.mani@innovatechs.com / password123\n`);

@@ -11,6 +11,7 @@ import {
   pgEnum,
   uniqueIndex,
   index,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 
 // ─── Enums ───────────────────────────────────────────────────────────
@@ -186,6 +187,71 @@ export const workspaceMembers = pgTable(
       .defaultNow(),
   },
   (t) => [uniqueIndex("WS_MEMBER_IDX").on(t.workspaceId, t.userId)],
+);
+
+// ─── ROLES ──────────────────────────────────────────────────────────
+// Domain roles (e.g. "manager", "employee", "finance") used for task
+// routing and claim authorization. Distinct from USERS.role / USER_ROLE
+// enum, which is the platform access level (owner/admin/member/viewer)
+// and now lives on the JWT as `systemRole`. Roles are tenant-scoped:
+// two tenants can independently define their own "manager".
+
+export const roles = pgTable(
+  "ROLES",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** Stable identifier used in JWT claims and assignment expressions
+     *  (e.g. `manager`). Immutable after creation by convention. */
+    key: varchar("KEY", { length: 64 }).notNull(),
+    label: varchar("LABEL", { length: 255 }).notNull(),
+    description: text("DESCRIPTION"),
+    /** System-seeded roles (manager/employee/finance on first run).
+     *  Protects against accidental delete via the Roles API. */
+    system: boolean("SYSTEM").notNull().default(false),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ROLE_TENANT_KEY_IDX").on(t.tenantId, t.key),
+    index("ROLE_TENANT_IDX").on(t.tenantId),
+  ],
+);
+
+// ─── USER_ROLES (junction) ──────────────────────────────────────────
+// Many-to-many: a user can hold several roles (e.g. both manager and
+// finance). tenantId denormalised on the row so the Roles API can
+// enforce tenant scoping without a users/roles join on every query.
+
+export const userRoles = pgTable(
+  "USER_ROLES",
+  {
+    userId: uuid("USER_ID")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("ROLE_ID")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    assignedAt: timestamp("ASSIGNED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    /** Who granted the role. Nullable because the granting user may be
+     *  deleted later; the audit trail elsewhere keeps the full history. */
+    assignedBy: uuid("ASSIGNED_BY").references(() => users.id, {
+      onDelete: "set null",
+    }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.roleId] }),
+    index("USER_ROLE_TENANT_ROLE_IDX").on(t.tenantId, t.roleId),
+    index("USER_ROLE_USER_IDX").on(t.userId),
+  ],
 );
 
 // ─── Process & Business Document Enums ──────────────────────────────
@@ -654,6 +720,12 @@ export const instanceTokens = pgTable(
     assignedTo: uuid("ASSIGNED_TO").references(() => users.id, {
       onDelete: "set null",
     }),
+    /** Role key (e.g. `manager`) for tokens waiting on a role-assigned
+     *  userTask. Set when the engine enters the task; cleared when a
+     *  user claims it (claim-first). Mutually exclusive with a direct
+     *  assignedTo set at entry-time, but both can be non-null after
+     *  claim (role gate + specific claimant). */
+    candidateRole: varchar("CANDIDATE_ROLE", { length: 64 }),
     errorMessage: text("ERROR_MESSAGE"),
     // Optimistic-locking guard. Every UPDATE bumps `version`; the
     // interpreter's update statement asserts the prior version in the

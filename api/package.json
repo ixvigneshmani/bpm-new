@@ -11,6 +11,7 @@
     "db:push:test": "NODE_ENV=test drizzle-kit push",
     "db:push:prod": "NODE_ENV=production drizzle-kit push",
     "db:seed": "tsx src/database/seed.ts",
+    "db:seed:r1": "tsx src/database/seed-r1.ts",
     "db:seed:test": "NODE_ENV=test tsx src/database/seed.ts",
     "db:seed:prod": "NODE_ENV=production tsx src/database/seed.ts",
     "test": "vitest run"
