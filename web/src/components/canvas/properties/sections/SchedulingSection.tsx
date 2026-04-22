@@ -106,33 +106,55 @@ export default function SchedulingSection({
         </div>
 
         {showSla && (
-          <div className="space-y-2 rounded-lg border border-gray-100 bg-gray-50 p-3">
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              borderRadius: 10,
+              border: "1px solid #F3F4F6",
+              background: "#F9FAFB",
+              padding: "16px 16px",
+            }}
+          >
             <div>
-              <div className="mb-1 text-[10px] font-medium text-gray-500">Reaction Time</div>
+              <div
+                style={{ marginBottom: 6, fontSize: 11, fontWeight: 500, color: "#4B5563" }}
+                title="Max time until someone claims or starts this task. E.g. PT1H means someone must open it within an hour of creation."
+              >
+                Reaction Time
+              </div>
               <input
                 type="text"
                 value={sla?.reactionTime || ""}
                 onChange={(e) => onSlaChange({ ...sla, reactionTime: e.target.value })}
-                className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 font-mono text-[11px] text-gray-900 outline-none transition-all focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+                style={{ width: "100%", fontFamily: "monospace", fontSize: 11 }}
                 placeholder="PT1H (1 hour)"
               />
             </div>
             <div>
-              <div className="mb-1 text-[10px] font-medium text-gray-500">Completion Deadline</div>
+              <div
+                style={{ marginBottom: 6, fontSize: 11, fontWeight: 500, color: "#4B5563" }}
+                title="Max time until the task is done. E.g. P3D means this task must be completed within 3 days of creation."
+              >
+                Completion Deadline
+              </div>
               <input
                 type="text"
                 value={sla?.completionDeadline || ""}
                 onChange={(e) => onSlaChange({ ...sla, completionDeadline: e.target.value })}
-                className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 font-mono text-[11px] text-gray-900 outline-none transition-all focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+                style={{ width: "100%", fontFamily: "monospace", fontSize: 11 }}
                 placeholder="P3D (3 days)"
               />
             </div>
             <div>
-              <div className="mb-1 text-[10px] font-medium text-gray-500">On Breach</div>
+              <div style={{ marginBottom: 6, fontSize: 11, fontWeight: 500, color: "#4B5563" }}>
+                On Breach
+              </div>
               <select
                 value={sla?.breachAction || "notify"}
                 onChange={(e) => onSlaChange({ ...sla, breachAction: e.target.value as SlaConfig["breachAction"] })}
-                className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 text-[11px] text-gray-900 outline-none transition-all focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+                style={{ width: "100%", fontSize: 11 }}
               >
                 <option value="notify">Notify</option>
                 <option value="escalate">Escalate</option>

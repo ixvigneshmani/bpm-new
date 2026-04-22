@@ -150,11 +150,31 @@ body {
   display: none;
 }
 
+/* ─── Edge interaction — make the 20px invisible hit zone actually clickable.
+ *    React Flow renders a fat transparent interaction path behind the visible
+ *    edge, but sets pointer-events:visiblestroke on it — which the browser
+ *    rejects because the stroke has no visible paint. Override to `stroke`
+ *    so any pixel inside the 20px zone counts as a hit. Without this,
+ *    clicking even 2px off the visible line falls through to the node
+ *    underneath. ──────────────────────────────────────────────────────── */
+.react-flow__edge-interaction {
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
 /* ─── Edge hover — give visual cue that endpoints can be re-attached ── */
 .react-flow__edge:hover .react-flow__edge-path {
   stroke-width: 2.5px;
   filter: drop-shadow(0 0 2px rgba(99, 102, 241, 0.35));
   cursor: grab;
+}
+
+/* ─── Edge selected — strong halo + thicker stroke so the user can see
+ *    at a glance which edge is selected. This is the Camunda / Signavio /
+ *    Figma convention: color alone is too subtle in dense diagrams. ─── */
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke-width: 3px;
+  filter: drop-shadow(0 0 6px rgba(99, 102, 241, 0.55));
 }
 
 /* ─── Properties panel form resets (no preflight) ────────────────── */

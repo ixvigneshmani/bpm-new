@@ -78,6 +78,69 @@ function CanvasInner() {
   const copySelected = useCanvasStore((s) => s.copySelected);
   const pasteClipboard = useCanvasStore((s) => s.pasteClipboard);
   const duplicateSelected = useCanvasStore((s) => s.duplicateSelected);
+  const setSaveStatus = useCanvasStore((s) => s.setSaveStatus);
+
+  // ─── Manual save ────────────────────────────────────────────────────
+  // Replaces the former debounced auto-save. A user may leave a design
+  // half-edited without committing — they control when to persist.
+  const [dirty, setDirty] = useState(false);
+  // Timestamp of the most recent load-or-save. nodes/edges mutations
+  // within a short window after this are considered load-induced (React
+  // Flow runs its own layout pass that nudges positions by <1px), so we
+  // only flag "dirty" for changes after the window closes.
+  const loadedAtRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!canvasProcessId) return;
+    loadedAtRef.current = Date.now();
+    setDirty(false);
+  }, [canvasProcessId]);
+
+  useEffect(() => {
+    if (!canvasProcessId) return;
+    if (Date.now() - loadedAtRef.current < 500) return;
+    setDirty(true);
+  }, [rawNodes, edges, canvasProcessId]);
+
+  const handleSave = useCallback(async () => {
+    if (!canvasProcessId) return;
+    setSaveStatus("saving");
+    try {
+      await apiPut(`/processes/${canvasProcessId}/canvas`, {
+        canvasData: toCanvasPayload(rawNodes, edges),
+      });
+      setSaveStatus("saved");
+      setDirty(false);
+      loadedAtRef.current = Date.now();
+    } catch (e) {
+      console.warn("Save failed:", (e as Error).message);
+      setSaveStatus("error");
+    }
+  }, [canvasProcessId, rawNodes, edges, setSaveStatus]);
+
+  // Cmd/Ctrl + S shortcut.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        if (dirty) handleSave();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dirty, handleSave]);
+
+  // beforeunload guard — stops tab-close or hard refresh when dirty.
+  // In-SPA route changes are a separate concern (router block pattern).
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "You have unsaved canvas changes.";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
 
   // Mirror our selectedNodeId onto React Flow's native node.selected so
   // base nodes (and React Flow's internal selection state) stay in sync.
@@ -353,7 +416,7 @@ function CanvasInner() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
       {/* Subheader — visible only on canvas step */}
-      <ProcessSubheader />
+      <ProcessSubheader dirty={dirty} onSave={handleSave} />
 
       {/* Wizard overlay */}
       {showWizard && <ProcessWizard />}
@@ -395,6 +458,10 @@ function CanvasInner() {
           selectionMode={SelectionMode.Partial}
           multiSelectionKeyCode={["Meta", "Control"]}
           panOnDrag={[1, 2]}                /* Mouse middle/right pans; left drag = box select */
+          panOnScroll                        /* Two-finger trackpad scroll pans the canvas (Figma/Miro convention) */
+          zoomOnScroll={false}               /* Plain scroll no longer zooms — prevents accidental zoom on trackpad */
+          zoomOnPinch                        /* Pinch gesture still zooms */
+          zoomActivationKeyCode="Meta"       /* Cmd+scroll also zooms, for users who prefer the old behavior */
           selectionOnDrag
           deleteKeyCode={null}              /* We handle Delete manually for input-aware skip */
           proOptions={{ hideAttribution: true }}
@@ -474,7 +541,6 @@ export default function DesignCanvasPage() {
   const setWizardStep = useCanvasStore((s) => s.setWizardStep);
   const loadCanvasData = useCanvasStore((s) => s.loadCanvasData);
   const resetCanvas = useCanvasStore((s) => s.resetCanvas);
-  const setSaveStatus = useCanvasStore((s) => s.setSaveStatus);
 
   // Auto-collapse sidebar
   useEffect(() => {
@@ -527,39 +593,6 @@ export default function DesignCanvasPage() {
     };
     load();
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Auto-save canvas data (debounced 2s after last change)
-  const nodes = useCanvasStore((s) => s.nodes);
-  const edges = useCanvasStore((s) => s.edges);
-  const processId = useCanvasStore((s) => s.processId);
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const initialLoad = useRef(true);
-
-  useEffect(() => {
-    // Skip the initial load — only save user-initiated changes
-    if (initialLoad.current) {
-      initialLoad.current = false;
-      return;
-    }
-    if (!processId || loading) return;
-
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    setSaveStatus("idle");
-    saveTimer.current = setTimeout(async () => {
-      setSaveStatus("saving");
-      try {
-        await apiPut(`/processes/${processId}/canvas`, {
-          canvasData: toCanvasPayload(nodes, edges),
-        });
-        setSaveStatus("saved");
-      } catch (e) {
-        console.warn("Auto-save failed:", (e as Error).message);
-        setSaveStatus("error");
-      }
-    }, 2000);
-
-    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [nodes, edges, processId, loading, setSaveStatus]);
 
   if (loading) {
     return (

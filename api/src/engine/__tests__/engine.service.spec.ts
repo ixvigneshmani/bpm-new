@@ -1163,29 +1163,60 @@ describe("resolveDirectUserAssignee", () => {
     expect(
       resolveDirectUserAssignee(
         node({ assignment: { type: "directUser", value: UUID_A } }),
-      ),
+      ).assignee,
     ).toBe(UUID_A);
   });
 
-  it("returns null for unsupported strategies (candidateGroup, expression, aiRouted)", () => {
-    for (const type of ["candidateGroup", "expression", "aiRouted"]) {
-      expect(
-        resolveDirectUserAssignee(node({ assignment: { type, value: UUID_A } })),
-      ).toBeNull();
+  it("returns null for unsupported strategies (candidateGroup, aiRouted) with a diagnostic", () => {
+    for (const type of ["candidateGroup", "aiRouted"]) {
+      const { assignee, diagnostic } = resolveDirectUserAssignee(
+        node({ assignment: { type, value: UUID_A } }),
+      );
+      expect(assignee).toBeNull();
+      expect(diagnostic?.reason).toBe("unsupported-type");
+      expect(diagnostic?.assignmentType).toBe(type);
     }
+  });
+
+  it("resolves an expression assignment against the variable bag", () => {
+    const { assignee, diagnostic } = resolveDirectUserAssignee(
+      node({ assignment: { type: "expression", value: "${managerId}" } }),
+      { managerId: UUID_A },
+    );
+    expect(assignee).toBe(UUID_A);
+    expect(diagnostic).toBeUndefined();
+  });
+
+  it("emits an `unresolved-expression` diagnostic when the variable is missing", () => {
+    const { assignee, diagnostic } = resolveDirectUserAssignee(
+      node({ assignment: { type: "expression", value: "${managerId}" } }),
+      {},
+    );
+    expect(assignee).toBeNull();
+    expect(diagnostic?.reason).toBe("unresolved-expression");
+    expect(diagnostic?.expression).toBe("${managerId}");
+  });
+
+  it("emits `expression-not-uuid` when the resolved value is not a UUID", () => {
+    const { assignee, diagnostic } = resolveDirectUserAssignee(
+      node({ assignment: { type: "expression", value: "${managerId}" } }),
+      { managerId: "alice" },
+    );
+    expect(assignee).toBeNull();
+    expect(diagnostic?.reason).toBe("expression-not-uuid");
   });
 
   it("returns null when the value is not a UUID", () => {
     expect(
       resolveDirectUserAssignee(
         node({ assignment: { type: "directUser", value: "not-a-uuid" } }),
-      ),
+      ).assignee,
     ).toBeNull();
   });
 
   it("returns null when there is no assignment at all", () => {
-    expect(resolveDirectUserAssignee(node(undefined))).toBeNull();
-    expect(resolveDirectUserAssignee(node({}))).toBeNull();
+    expect(resolveDirectUserAssignee(node(undefined)).assignee).toBeNull();
+    expect(resolveDirectUserAssignee(node({})).assignee).toBeNull();
   });
 });
 

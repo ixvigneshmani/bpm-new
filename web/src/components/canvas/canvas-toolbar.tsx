@@ -6,6 +6,7 @@ import useCanvasStore from "../../store/canvas-store";
 import { serializeCanvasToBpmn } from "../../lib/bpmn/serialize";
 import { parseBpmnToCanvas } from "../../lib/bpmn/parse";
 import { apiPost } from "../../lib/api";
+import StartInstanceDialog from "./start-instance-dialog";
 
 type Props = {
   onOpenAi?: () => void;
@@ -20,8 +21,6 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const deleteSelected = useCanvasStore((s) => s.deleteSelected);
   const selectedNodeId = useCanvasStore((s) => s.selectedNodeId);
-  const connectMode = useCanvasStore((s) => s.connectMode);
-  const setConnectMode = useCanvasStore((s) => s.setConnectMode);
   const { undo, redo } = useCanvasStore.temporal.getState();
   const pastStates = useStore(useCanvasStore.temporal, (state) => state.pastStates);
   const futureStates = useStore(useCanvasStore.temporal, (state) => state.futureStates);
@@ -43,26 +42,38 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
     };
   }, []);
 
-  const handleStartInstance = async () => {
+  // Opens the Start Instance dialog. The actual POST happens inside
+  // `submitStartInstance` so the user can fill variables first — this
+  // closes BUG-16 (previously the button sent `{}` and any `${var}`
+  // expression silently fell through to Queue / null).
+  const [startDialogOpen, setStartDialogOpen] = useState(false);
+  const processMeta = useCanvasStore((s) => s.processMeta);
+
+  const handleStartInstance = () => {
+    if (!processId || busy) return;
+    setStartDialogOpen(true);
+  };
+
+  const submitStartInstance = async (variables: Record<string, unknown>) => {
     if (!processId || busy) return;
     setBusy("start");
-    // Generate a fresh idempotency key per click so a double-click
-    // can't create two instances even if the network blips. The engine
-    // returns the cached response on the second call.
+    // Fresh idempotency key per click so a double-click can't create
+    // two instances; engine returns the cached response on replay.
     const idempotencyKey = crypto.randomUUID();
     const controller = new AbortController();
     startAbortRef.current = controller;
     try {
       const out = await apiPost<{ instanceId: string; status: string }>(
         `/processes/${processId}/instances`,
-        {},
+        { variables },
         { headers: { "Idempotency-Key": idempotencyKey }, signal: controller.signal },
       );
       if (mountedRef.current) {
+        setStartDialogOpen(false);
         navigate(`/instances/${out.instanceId}`);
       }
     } catch (e) {
-      if (controller.signal.aborted) return; // user navigated away; ignore
+      if (controller.signal.aborted) return;
       if (mountedRef.current) {
         alert(`Failed to start instance: ${(e as Error).message}`);
       }
@@ -234,46 +245,6 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
 
       {divider}
 
-      {/* Connect mode toggle: Sequence | Message */}
-      <div
-        style={{
-          display: "flex", alignItems: "center", gap: 0,
-          background: "#F3F4F6", borderRadius: 6, padding: 2,
-        }}
-        title="Drag from a node edge to connect. Toggle whether new edges are sequence flows or message flows."
-      >
-        <button
-          onClick={() => setConnectMode("sequence")}
-          style={{
-            padding: "4px 8px", borderRadius: 4, border: "none",
-            fontSize: 10, fontWeight: 600,
-            background: connectMode === "sequence" ? "#fff" : "transparent",
-            color: connectMode === "sequence" ? "#4F46E5" : "#667085",
-            boxShadow: connectMode === "sequence" ? "0 1px 2px rgba(16,24,40,0.06)" : "none",
-            cursor: "pointer",
-            transition: "all 0.12s ease",
-          }}
-        >
-          Sequence
-        </button>
-        <button
-          onClick={() => setConnectMode("message")}
-          style={{
-            padding: "4px 8px", borderRadius: 4, border: "none",
-            fontSize: 10, fontWeight: 600,
-            background: connectMode === "message" ? "#fff" : "transparent",
-            color: connectMode === "message" ? "#4F46E5" : "#667085",
-            boxShadow: connectMode === "message" ? "0 1px 2px rgba(16,24,40,0.06)" : "none",
-            cursor: "pointer",
-            transition: "all 0.12s ease",
-          }}
-        >
-          Message
-        </button>
-      </div>
-
-      {divider}
-
       {/* Zoom in */}
       <button onClick={() => zoomIn()} style={btnStyle()} title="Zoom in">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -385,6 +356,15 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
         style={{ display: "none" }}
         onChange={handleImportFile}
       />
+
+      {startDialogOpen && (
+        <StartInstanceDialog
+          schema={processMeta.businessDoc as Record<string, unknown> | null}
+          submitting={busy === "start"}
+          onCancel={() => { if (busy !== "start") setStartDialogOpen(false); }}
+          onSubmit={submitStartInstance}
+        />
+      )}
     </div>
   );
 }

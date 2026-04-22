@@ -3,7 +3,13 @@ import useCanvasStore from "../../store/canvas-store";
 import { STATUS_COLORS, STATUS_DISPLAY } from "../../lib/constants";
 import { formatRelativeTime } from "../../lib/utils";
 
-export default function ProcessSubheader() {
+export default function ProcessSubheader({
+  dirty = false,
+  onSave,
+}: {
+  dirty?: boolean;
+  onSave?: () => void | Promise<void>;
+} = {}) {
   const processMeta = useCanvasStore((s) => s.processMeta);
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const setWizardStep = useCanvasStore((s) => s.setWizardStep);
@@ -52,9 +58,45 @@ export default function ProcessSubheader() {
         </span>
       </div>
 
-      {/* Right: Save status + Creator + last updated + Edit button */}
+      {/* Right: Save button + status + Creator + last updated + Edit button */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-        <SaveStatusPill status={saveStatus} lastSavedAt={lastSavedAt} />
+        {dirty ? (
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "#B45309", fontWeight: 500,
+          }} title="Your changes are not yet persisted. Click Save or press ⌘S / Ctrl+S.">
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#F59E0B" }} />
+            Unsaved changes
+          </span>
+        ) : (
+          <SaveStatusPill status={saveStatus} lastSavedAt={lastSavedAt} />
+        )}
+
+        <button
+          onClick={() => onSave?.()}
+          disabled={!dirty || saveStatus === "saving"}
+          title={dirty ? "Save canvas (⌘S)" : "No changes to save"}
+          style={{
+            display: "flex", alignItems: "center", gap: 5,
+            padding: "5px 12px", borderRadius: 6,
+            border: "1px solid " + (dirty ? "#4F46E5" : "#E5E7EB"),
+            background: dirty ? "#4F46E5" : "#F9FAFB",
+            color: dirty ? "#fff" : "#9CA3AF",
+            fontSize: 12, fontWeight: 600,
+            cursor: dirty && saveStatus !== "saving" ? "pointer" : "not-allowed",
+            fontFamily: "inherit",
+            transition: "all 0.15s ease",
+            whiteSpace: "nowrap",
+            opacity: saveStatus === "saving" ? 0.6 : 1,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/>
+            <polyline points="7 3 7 8 15 8"/>
+          </svg>
+          {saveStatus === "saving" ? "Saving…" : "Save"}
+        </button>
 
         {processMeta.creatorName && (
           <div style={{ display: "flex", alignItems: "center", gap: 5 }}>

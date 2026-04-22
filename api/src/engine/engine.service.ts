@@ -424,7 +424,27 @@ export class EngineService {
         // resumes it. Resolved assignee (directUser only for E3) goes
         // on the token row so the inbox query is a single index hit.
         if (node.type === "userTask") {
-          const assignedTo = resolveDirectUserAssignee(node, this.logger);
+          const { assignee: assignedTo, diagnostic: assignDiag } =
+            resolveDirectUserAssignee(node, args.variables, this.logger);
+          // Emit a `variable-unresolved` audit event when the assignment
+          // expression couldn't be resolved (e.g. ${managerId} but the
+          // variable wasn't set). Doesn't change behavior — still falls
+          // through to Queue — but the failure is now visible in the
+          // audit trail instead of silent. BUG-17.
+          if (assignDiag && assignDiag.reason === "unresolved-expression") {
+            await args.tx.insert(instanceEvents).values({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              nodeId,
+              eventType: "variable-unresolved",
+              payload: {
+                kind: "assignment",
+                expression: assignDiag.expression,
+                assignmentType: assignDiag.assignmentType,
+              },
+            });
+          }
           version = await this.updateTokenWithLock(
             args.tx,
             args.tokenId,
@@ -2270,41 +2290,123 @@ export function resolveServiceTaskMaxAttempts(node: EngineNode): number | null {
 }
 
 /** Resolve a userTask node's `data.assignment` to a concrete userId
- *  for the assignedTo column. E3 supports the `directUser` strategy
- *  only; other strategies (candidateGroup, expression, aiRouted) leave
- *  the token unassigned (anyone in the tenant can complete) and log a
- *  warning so it shows up in ops.
+ *  for the assignedTo column.
  *
- *  Returns null if there is no assignment, the strategy is unsupported,
- *  or the value isn't a UUID. We never write garbage into assignedTo
- *  because the FK constraint would 500 the request — better to leave
- *  it null and let the operator re-route. */
+ *  Strategies:
+ *   - `directUser`      → value is a literal user UUID
+ *   - `expression`      → value is `${varName}` (or contains `${...}`);
+ *                         we resolve against the instance variables
+ *   - `candidateGroup`, `aiRouted` → not yet supported; leave unassigned
+ *
+ *  Returns `{ assignee, diagnostic }`. `diagnostic`, when present,
+ *  names a specific failure mode (`"unresolved-expression"`,
+ *  `"not-a-uuid"`, etc.) so the caller can emit a
+ *  `variable-unresolved` audit event — that way silent misses become
+ *  visible in the instance audit trail.
+ *
+ *  We never write garbage into assignedTo because the FK constraint
+ *  would 500 the request — better to leave it null and let the
+ *  operator re-route. */
 export function resolveDirectUserAssignee(
   node: EngineNode,
+  variables: Record<string, unknown> = {},
   logger?: { warn?: (msg: string) => void },
-): string | null {
+): {
+  assignee: string | null;
+  diagnostic?: {
+    reason: string;
+    expression?: string;
+    assignmentType?: string;
+  };
+} {
   const data = node.data as Record<string, unknown> | undefined;
   const assignment = data?.assignment as
     | { type?: unknown; value?: unknown }
     | undefined;
-  if (!assignment || typeof assignment !== "object") return null;
+  if (!assignment || typeof assignment !== "object") return { assignee: null };
   const type = assignment.type;
   const value = assignment.value;
-  if (type !== "directUser") {
-    if (typeof type === "string") {
+
+  if (type === "directUser") {
+    if (typeof value !== "string" || !UUID_RE.test(value)) {
       logger?.warn?.(
-        `User task ${node.id}: assignment type "${type}" not supported in E3; leaving unassigned.`,
+        `User task ${node.id}: directUser assignment value is not a UUID; leaving unassigned.`,
       );
+      return {
+        assignee: null,
+        diagnostic: { reason: "not-a-uuid", assignmentType: "directUser" },
+      };
     }
-    return null;
+    return { assignee: value };
   }
-  if (typeof value !== "string" || !UUID_RE.test(value)) {
+
+  if (type === "expression") {
+    if (typeof value !== "string" || !value.trim()) {
+      return {
+        assignee: null,
+        diagnostic: { reason: "empty-expression", assignmentType: "expression" },
+      };
+    }
+    const resolved = resolveVariableExpression(value, variables);
+    if (resolved === undefined || resolved === null || resolved === "") {
+      logger?.warn?.(
+        `User task ${node.id}: assignment expression "${value}" resolved to empty; leaving unassigned.`,
+      );
+      return {
+        assignee: null,
+        diagnostic: {
+          reason: "unresolved-expression",
+          expression: value,
+          assignmentType: "expression",
+        },
+      };
+    }
+    if (typeof resolved !== "string" || !UUID_RE.test(resolved)) {
+      logger?.warn?.(
+        `User task ${node.id}: assignment expression "${value}" resolved to "${String(resolved).slice(0, 60)}" which is not a UUID; leaving unassigned.`,
+      );
+      return {
+        assignee: null,
+        diagnostic: {
+          reason: "expression-not-uuid",
+          expression: value,
+          assignmentType: "expression",
+        },
+      };
+    }
+    return { assignee: resolved };
+  }
+
+  if (typeof type === "string") {
     logger?.warn?.(
-      `User task ${node.id}: directUser assignment value is not a UUID; leaving unassigned.`,
+      `User task ${node.id}: assignment type "${type}" not supported yet; leaving unassigned.`,
     );
-    return null;
+    return {
+      assignee: null,
+      diagnostic: { reason: "unsupported-type", assignmentType: type },
+    };
   }
-  return value;
+  return { assignee: null };
+}
+
+/** Resolve a `${path.to.var}` expression against the variable bag.
+ *  Supports bare variable names (`${managerId}`) and dot-paths
+ *  (`${customer.id}`). Returns `undefined` if any segment is missing.
+ *  Does NOT evaluate arbitrary FEEL — just variable substitution. For
+ *  more complex logic use a scriptTask or an externalWorker handler. */
+export function resolveVariableExpression(
+  expr: string,
+  variables: Record<string, unknown>,
+): unknown {
+  const m = /^\s*\$\{\s*([A-Za-z_$][A-Za-z0-9_$.]*)\s*\}\s*$/.exec(expr);
+  if (!m) return undefined;
+  const path = m[1].split(".");
+  let cur: unknown = variables;
+  for (const seg of path) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
 }
 
 /** A single mapping entry on a serviceTask node:
