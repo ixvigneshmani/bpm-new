@@ -18,7 +18,7 @@
  * header so auditors can trace the exact HTTP call.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException } from "@nestjs/common";
 import { UsersService } from "../users/users.service";
 import type { AuthenticatedRequest } from "../common/types/authenticated-request";
 
@@ -70,20 +70,14 @@ export async function resolveActingFor(
     );
   }
   const target = await users.findById(actingForId);
-  if (!target) {
-    throw new NotFoundException("Impersonation target user not found.");
-  }
-  // Tenant isolation: admins can't act-as a user in a different tenant
-  // even though the JWT's systemRole might technically span. Hard
-  // boundary for compliance.
-  if (target.tenantId !== req.user.tenantId) {
+  // Collapse "not found", "different tenant", "inactive" into a SINGLE
+  // 403 with a deliberately-generic message. Distinguishing between
+  // them lets an admin enumerate which UUIDs correspond to real users
+  // (404) versus cross-tenant users (403) — minor info leak, but a
+  // red flag in any security review.
+  if (!target || target.tenantId !== req.user.tenantId || !target.isActive) {
     throw new ForbiddenException(
-      "Impersonation target is in a different tenant.",
-    );
-  }
-  if (!target.isActive) {
-    throw new BadRequestException(
-      "Impersonation target is deactivated.",
+      "Impersonation target is not available.",
     );
   }
   const roles = await users.getRoleKeys(target.id);

@@ -10,6 +10,8 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { resolveActingFor } from "../auth/acting-for";
+import { UsersService } from "../users/users.service";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { StartInstanceDto } from "./dto/start-instance.dto";
 import { EngineService } from "./engine.service";
@@ -21,6 +23,7 @@ export class EngineController {
   constructor(
     private readonly engine: EngineService,
     private readonly idempotency: IdempotencyService,
+    private readonly users: UsersService,
   ) {}
 
   /** POST /processes/:id/instances
@@ -33,26 +36,31 @@ export class EngineController {
    *  retries idempotent — a second request with the same key + body
    *  returns the original response without starting a duplicate. */
   @Post(":id/instances")
-  startInstance(
+  async startInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: StartInstanceDto,
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
+    const effective = await resolveActingFor(req, this.users);
     return this.idempotency.wrap({
       tenantId: req.user.tenantId,
       endpoint: "start-instance",
       key: idempotencyKey,
+      // actingBy is part of the idempotency body so replaying the
+      // same key with vs without impersonation doesn't collide.
       requestBody: {
         processId: id,
         variables: dto.variables ?? null,
         businessKey: dto.businessKey ?? null,
+        actingBy: effective.actingBy,
       },
       handler: () =>
         this.engine.startInstance({
           processId: id,
           tenantId: req.user.tenantId,
-          userId: req.user.sub,
+          userId: effective.userId,
+          actingBy: effective.actingBy,
           variables: dto.variables,
           businessKey: dto.businessKey,
         }),

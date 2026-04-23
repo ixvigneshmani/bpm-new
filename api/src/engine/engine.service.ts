@@ -122,6 +122,7 @@ export class EngineService {
     processId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
     variables?: Record<string, unknown>;
     businessKey?: string;
   }): Promise<{
@@ -179,7 +180,11 @@ export class EngineService {
         instanceId: inst.id,
         userId: args.userId,
         eventType: "instance-started",
-        payload: { processId: args.processId, definitionHash },
+        payload: {
+          processId: args.processId,
+          definitionHash,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
       });
       await this.emitOutbox(tx, {
         tenantId: args.tenantId,
@@ -190,6 +195,7 @@ export class EngineService {
           definitionHash,
           startedBy: args.userId,
           businessKey: args.businessKey ?? null,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
 
