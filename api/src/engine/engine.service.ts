@@ -2311,6 +2311,34 @@ export class EngineService {
           `Target node "${args.targetNodeId}" not found on this instance's canvas.`,
         );
       }
+      // Reject target-node types the engine doesn't know how to enter
+      // via a bare token placement. Subprocess children need scope
+      // setup; boundary events require a host activity; end events
+      // would terminate immediately (unintended). Reviewer-flagged
+      // failure modes that previously silently misbehaved.
+      const targetData = targetNode as unknown as {
+        type?: string;
+        parentId?: string | null;
+        data?: Record<string, unknown>;
+      };
+      if (targetData.parentId) {
+        throw new BadRequestException(
+          `Target node "${args.targetNodeId}" is inside a subprocess — subprocess-scoped replay is not supported. Replay into a top-level node.`,
+        );
+      }
+      const unsafeTypes = new Set([
+        "boundaryEvent",
+        "subProcess",
+        "callActivity",
+        "endEvent",
+        "intermediateCatchEvent",
+        "intermediateThrowEvent",
+      ]);
+      if (targetData.type && unsafeTypes.has(targetData.type)) {
+        throw new BadRequestException(
+          `Target node type "${targetData.type}" is not supported for replay. Use a start event, user task, service task, or gateway.`,
+        );
+      }
 
       // Snapshot pre-replay state for the audit payload.
       const liveTokens = await tx
@@ -2330,26 +2358,27 @@ export class EngineService {
       // pattern cancelInstance uses — each token gets a terminal status
       // and an error audit row so the trail shows "token T was alive
       // doing X, was cut off by replay, and a new token was born at Y".
+      // Cancel every live token. A concurrent completer racing us is
+      // now a hard failure — the whole replay txn aborts and the
+      // caller retries. Previously we swallowed the optimistic-lock
+      // error which could leave live tokens behind co-existing with
+      // the replay token. (Reviewer bug C-03.)
       let cancelledTokens = 0;
       for (const tok of liveTokens) {
-        try {
-          await this.updateTokenWithLock(tx, tok.id, tok.version, {
-            status: "failed",
-            errorMessage: "Superseded by replay-from-step.",
-          });
-          await tx.insert(instanceEvents).values({
-            tenantId: args.tenantId,
-            instanceId: args.instanceId,
-            tokenId: tok.id,
-            userId: args.userId,
-            nodeId: tok.currentNodeId,
-            eventType: "error",
-            payload: { reason: "superseded-by-replay" },
-          });
-          cancelledTokens += 1;
-        } catch {
-          // Concurrent mutator already moved the token; skip.
-        }
+        await this.updateTokenWithLock(tx, tok.id, tok.version, {
+          status: "failed",
+          errorMessage: "Superseded by replay-from-step.",
+        });
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: tok.id,
+          userId: args.userId,
+          nodeId: tok.currentNodeId,
+          eventType: "error",
+          payload: { reason: "superseded-by-replay" },
+        });
+        cancelledTokens += 1;
       }
 
       // Kill queued jobs on this instance — they would otherwise resume
@@ -2362,6 +2391,7 @@ export class EngineService {
           updatedAt: new Date(),
         })
         .where(and(
+          eq(engineJobs.tenantId, args.tenantId),
           eq(engineJobs.instanceId, args.instanceId),
           inArray(engineJobs.status, ["queued", "running"]),
         ))
@@ -2446,12 +2476,12 @@ export class EngineService {
       });
 
       // Map terminal results to instance status — mirrors startInstance.
+      // BUG-C-01 fix: outbox emits for terminal transitions triggered
+      // by replay were missing; subscribers never learned when a
+      // replayed instance completed or failed. Now parity with the
+      // startInstance lifecycle.
       let instanceStatus: "running" | "completed" | "failed" = "running";
       if (advance.tokenStatus === "completed") {
-        // Only flip to completed if no OTHER tokens are still alive.
-        // Replay always cancelled siblings, so single-token instances
-        // go to completed; multi-token designs will need pool-aware
-        // aggregation (not in this pass).
         await tx
           .update(processInstances)
           .set({ status: "completed", completedAt: new Date() })
@@ -2461,6 +2491,13 @@ export class EngineService {
           instanceId: args.instanceId,
           eventType: "instance-completed",
           payload: { hops: advance.hops, via: "replay" },
+        });
+        await this.emitOutbox(tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          eventType: "instance-completed",
+          payload: { hops: advance.hops, via: "replay", variables: mergedVars },
+          redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
         instanceStatus = "completed";
       } else if (advance.tokenStatus === "failed") {
@@ -2474,7 +2511,29 @@ export class EngineService {
           eventType: "instance-failed",
           payload: { hops: advance.hops, message: advance.errorMessage, via: "replay" },
         });
+        await this.emitOutbox(tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          eventType: "instance-failed",
+          payload: { hops: advance.hops, message: advance.errorMessage, via: "replay" },
+        });
         instanceStatus = "failed";
+      } else if (inst.status === "suspended") {
+        // Replay flipped a suspended instance to running — emit the
+        // resumed lifecycle event so subscribers don't stay stale.
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          userId: args.userId,
+          eventType: "instance-resumed",
+          payload: { via: "replay" },
+        });
+        await this.emitOutbox(tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          eventType: "instance-resumed",
+          payload: { via: "replay", resumedBy: args.userId },
+        });
       }
 
       this.logger.log({
