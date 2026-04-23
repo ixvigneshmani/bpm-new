@@ -25,7 +25,7 @@ export class TasksController {
     private readonly idempotency: IdempotencyService,
   ) {}
 
-  /** GET /tasks            → "my inbox" (assigned to me OR unassigned)
+  /** GET /tasks            → claim-first inbox (mine ∪ claimable by my roles)
    *  GET /tasks?assignedTo=<uuid> → exact-assignee view
    *  Tenant-scoped via the JWT guard. Returns up to 200 newest tasks. */
   @Get()
@@ -36,22 +36,49 @@ export class TasksController {
     return this.engine.listTasks({
       tenantId: req.user.tenantId,
       assignedTo: query.assignedTo,
-      // Default mode: caller's inbox (mine + unassigned). Switching to
-      // a different `assignedTo` makes the explicit filter take over.
       userIdForMine: query.assignedTo ? undefined : req.user.sub,
+      userRoles: req.user.roles ?? [],
+    });
+  }
+
+  /** POST /tasks/:id/claim
+   *  Assigns the waiting task to the caller. Role-gated tokens require
+   *  the caller to hold the candidateRole; otherwise 403. Idempotent if
+   *  caller is already the assignee. */
+  @Post(":id/claim")
+  claim(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.engine.claimTask({
+      tokenId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+      userRoles: req.user.roles ?? [],
+    });
+  }
+
+  /** POST /tasks/:id/unclaim
+   *  Releases the caller's claim on a role-assigned task, returning it
+   *  to the role queue. No-op (returns {unclaimed:false}) if the caller
+   *  isn't the claimant — so mobile/network retries don't 403. */
+  @Post(":id/unclaim")
+  unclaim(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.engine.unclaimTask({
+      tokenId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
     });
   }
 
   /** POST /tasks/:id/complete
-   *  Submits the form output for a waiting user-task token, advances
-   *  the token off the user-task node, and returns the new instance
-   *  + token status. The body's `formData` (optional) is merged into
-   *  the instance variable bag with optimistic locking.
-   *
-   *  Replay safety: pass `Idempotency-Key` to make retries idempotent
-   *  — without this, a network retry would 409 against the optimistic
-   *  lock (since the original request already advanced the token);
-   *  with it, the retry returns the original response. */
+   *  Requires ASSIGNED_TO === caller for role-assigned tasks. Merges
+   *  `formData` into instance variables, advances the token, returns
+   *  new instance + token status. Use an `Idempotency-Key` header for
+   *  retry-safe submission. */
   @Post(":id/complete")
   complete(
     @Req() req: AuthenticatedRequest,

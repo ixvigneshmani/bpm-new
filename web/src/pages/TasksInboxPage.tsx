@@ -28,6 +28,7 @@ type Task = {
   nodeLabel: string | null;
   nodeData: Record<string, unknown> | null;
   assignedTo: string | null;
+  candidateRole: string | null;
   createdAt: string;
 };
 
@@ -181,6 +182,10 @@ export default function TasksInboxPage() {
                     <span style={{ padding: "2px 8px", borderRadius: 6, background: "#EEF2FF", color: "#4F46E5", fontWeight: 600 }}>
                       Mine
                     </span>
+                  ) : t.candidateRole ? (
+                    <span style={{ padding: "2px 8px", borderRadius: 6, background: "#FEF3C7", color: "#92400E", fontWeight: 600 }}>
+                      {t.candidateRole}
+                    </span>
                   ) : (
                     <span style={{ padding: "2px 8px", borderRadius: 6, background: "#F2F4F7", color: "#667085", fontWeight: 500 }}>
                       Queue
@@ -227,11 +232,40 @@ function TaskDrawer(props: {
   onClose: () => void;
   onCompleted: () => Promise<void>;
 }) {
-  const { task, onClose, onCompleted } = props;
+  const { task: initialTask, onClose, onCompleted } = props;
+  const [task, setTask] = useState<Task>(initialTask);
   const [formJson, setFormJson] = useState("{}");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CompleteResponse | null>(null);
+  const isClaimed = !!task.assignedTo;
+  const isRoleGated = !!task.candidateRole;
+
+  const claim = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await apiPost<{ claimed: boolean }>(`/tasks/${task.tokenId}/claim`, {});
+      setTask({ ...task, assignedTo: "me" });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const unclaim = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await apiPost<{ unclaimed: boolean }>(`/tasks/${task.tokenId}/unclaim`, {});
+      setTask({ ...task, assignedTo: null });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const submit = async () => {
     setError(null);
@@ -309,7 +343,15 @@ function TaskDrawer(props: {
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", padding: 22 }}>
-          <div style={{ marginBottom: 16 }}>
+          {isRoleGated && (
+            <div style={{ padding: "10px 14px", borderRadius: 8, background: isClaimed ? "#ECFDF5" : "#FEF3C7", border: `1px solid ${isClaimed ? "#A7F3D0" : "#FDE68A"}`, marginBottom: 16, fontSize: 13 }}>
+              {isClaimed
+                ? <><strong style={{ color: "#065F46" }}>Claimed.</strong> <span style={{ color: "#047857" }}>Role: {task.candidateRole}</span></>
+                : <><strong style={{ color: "#92400E" }}>Role queue: {task.candidateRole}.</strong> <span style={{ color: "#92400E" }}>Claim before completing.</span></>
+              }
+            </div>
+          )}
+          <div style={{ marginBottom: 16, opacity: isRoleGated && !isClaimed ? 0.4 : 1 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Form data</div>
             <div style={{ fontSize: 12, color: "#667085", marginBottom: 8 }}>
               JSON object merged into the instance variables on completion.
@@ -360,19 +402,48 @@ function TaskDrawer(props: {
           >
             Cancel
           </button>
-          <button
-            onClick={submit}
-            disabled={submitting || result !== null}
-            style={{
-              padding: "9px 18px", borderRadius: 8, border: "none",
-              background: result ? "#10B981" : "linear-gradient(135deg, #4F46E5, #6366F1)",
-              fontSize: 13, fontWeight: 600, color: "#fff",
-              cursor: submitting || result ? "not-allowed" : "pointer",
-              fontFamily: "inherit", opacity: submitting ? 0.7 : 1,
-            }}
-          >
-            {submitting ? "Submitting…" : result ? "✓ Done" : "Complete task"}
-          </button>
+          {isRoleGated && isClaimed && (
+            <button
+              onClick={unclaim}
+              disabled={submitting || result !== null}
+              style={{
+                padding: "9px 14px", borderRadius: 8, border: "1px solid #FDE68A",
+                background: "#FFFBEB", fontSize: 13, fontWeight: 600, color: "#92400E",
+                cursor: submitting || result ? "not-allowed" : "pointer", fontFamily: "inherit",
+              }}
+            >
+              Unclaim
+            </button>
+          )}
+          {isRoleGated && !isClaimed ? (
+            <button
+              onClick={claim}
+              disabled={submitting}
+              style={{
+                padding: "9px 18px", borderRadius: 8, border: "none",
+                background: "linear-gradient(135deg, #D97706, #F59E0B)",
+                fontSize: 13, fontWeight: 600, color: "#fff",
+                cursor: submitting ? "not-allowed" : "pointer", fontFamily: "inherit",
+                opacity: submitting ? 0.7 : 1,
+              }}
+            >
+              {submitting ? "Claiming…" : "Claim task"}
+            </button>
+          ) : (
+            <button
+              onClick={submit}
+              disabled={submitting || result !== null}
+              style={{
+                padding: "9px 18px", borderRadius: 8, border: "none",
+                background: result ? "#10B981" : "linear-gradient(135deg, #4F46E5, #6366F1)",
+                fontSize: 13, fontWeight: 600, color: "#fff",
+                cursor: submitting || result ? "not-allowed" : "pointer",
+                fontFamily: "inherit", opacity: submitting ? 0.7 : 1,
+              }}
+            >
+              {submitting ? "Submitting…" : result ? "✓ Done" : "Complete task"}
+            </button>
+          )}
         </div>
       </div>
     </>

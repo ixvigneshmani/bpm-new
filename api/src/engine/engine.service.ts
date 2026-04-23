@@ -1220,6 +1220,10 @@ export class EngineService {
     tenantId: string;
     assignedTo?: string;
     userIdForMine?: string;
+    /** Domain roles held by the caller — drives the claimable-by-me
+     *  half of the "my inbox" filter. Ignored when an explicit
+     *  `assignedTo` filter is passed. */
+    userRoles?: string[];
   }): Promise<
     Array<{
       tokenId: string;
@@ -1230,6 +1234,7 @@ export class EngineService {
       nodeLabel: string | null;
       nodeData: Record<string, unknown> | null;
       assignedTo: string | null;
+      candidateRole: string | null;
       createdAt: string;
     }>
   > {
@@ -1245,11 +1250,22 @@ export class EngineService {
         eq(instanceTokens.assignedTo, args.assignedTo),
       );
     } else if (args.userIdForMine) {
+      // Claim-first inbox:
+      //   • tasks I've already claimed (assignedTo=me), OR
+      //   • unassigned tasks with no role gate (legacy pre-R1 tokens), OR
+      //   • unassigned tasks whose candidateRole is in my role set.
+      const myRoles = args.userRoles ?? [];
+      const claimable = myRoles.length > 0
+        ? or(
+            isNull(instanceTokens.candidateRole),
+            inArray(instanceTokens.candidateRole, myRoles),
+          )
+        : isNull(instanceTokens.candidateRole);
       whereExpr = and(
         ...baseConds,
         or(
           eq(instanceTokens.assignedTo, args.userIdForMine),
-          isNull(instanceTokens.assignedTo),
+          and(isNull(instanceTokens.assignedTo), claimable),
         ),
       );
     } else {
@@ -1262,6 +1278,7 @@ export class EngineService {
         instanceId: instanceTokens.instanceId,
         currentNodeId: instanceTokens.currentNodeId,
         assignedTo: instanceTokens.assignedTo,
+        candidateRole: instanceTokens.candidateRole,
         createdAt: instanceTokens.createdAt,
         processId: processInstances.processId,
         // Prefer the versioned canvas; fall back to the legacy inline
@@ -1301,8 +1318,134 @@ export class EngineService {
         nodeLabel,
         nodeData,
         assignedTo: r.assignedTo,
+        candidateRole: r.candidateRole,
         createdAt: r.createdAt.toISOString(),
       };
+    });
+  }
+
+  /** Claim a waiting userTask token. Requires the token to have no
+   *  current assignee; if it carries a candidateRole, caller must hold
+   *  that role. Idempotent if the caller is already the assignee. */
+  async claimTask(args: {
+    tokenId: string;
+    tenantId: string;
+    userId: string;
+    userRoles: string[];
+  }): Promise<{ claimed: boolean; alreadyClaimed: boolean }> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({
+          id: instanceTokens.id,
+          status: instanceTokens.status,
+          waitingFor: instanceTokens.waitingFor,
+          assignedTo: instanceTokens.assignedTo,
+          candidateRole: instanceTokens.candidateRole,
+          currentNodeId: instanceTokens.currentNodeId,
+          instanceId: instanceTokens.instanceId,
+          version: instanceTokens.version,
+        })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.id, args.tokenId),
+            eq(instanceTokens.tenantId, args.tenantId),
+          ),
+        )
+        .limit(1);
+      if (!row) throw new NotFoundException("Task not found.");
+      if (row.status !== "waiting" || row.waitingFor !== "userTask") {
+        throw new BadRequestException(
+          `Task is not waiting on a user action (status=${row.status}).`,
+        );
+      }
+      if (row.assignedTo === args.userId) {
+        return { claimed: false, alreadyClaimed: true };
+      }
+      if (row.assignedTo && row.assignedTo !== args.userId) {
+        throw new ForbiddenException(
+          "Task is already claimed by another user.",
+        );
+      }
+      if (row.candidateRole && !args.userRoles.includes(row.candidateRole)) {
+        throw new ForbiddenException(
+          `Task requires role "${row.candidateRole}" which you do not hold.`,
+        );
+      }
+      await this.updateTokenWithLock(tx, args.tokenId, row.version, {
+        assignedTo: args.userId,
+      });
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: row.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        nodeId: row.currentNodeId,
+        eventType: "task-claimed",
+        payload: { auto: false, candidateRole: row.candidateRole ?? null },
+      });
+      return { claimed: true, alreadyClaimed: false };
+    });
+  }
+
+  /** Release a claim the caller holds. Idempotent: if not the
+   *  claimant, returns {unclaimed: false} rather than erroring so
+   *  retries on network flakes don't 403. */
+  async unclaimTask(args: {
+    tokenId: string;
+    tenantId: string;
+    userId: string;
+  }): Promise<{ unclaimed: boolean }> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({
+          id: instanceTokens.id,
+          status: instanceTokens.status,
+          waitingFor: instanceTokens.waitingFor,
+          assignedTo: instanceTokens.assignedTo,
+          candidateRole: instanceTokens.candidateRole,
+          currentNodeId: instanceTokens.currentNodeId,
+          instanceId: instanceTokens.instanceId,
+          version: instanceTokens.version,
+        })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.id, args.tokenId),
+            eq(instanceTokens.tenantId, args.tenantId),
+          ),
+        )
+        .limit(1);
+      if (!row) throw new NotFoundException("Task not found.");
+      if (row.status !== "waiting" || row.waitingFor !== "userTask") {
+        throw new BadRequestException(
+          `Task is not waiting on a user action (status=${row.status}).`,
+        );
+      }
+      if (row.assignedTo !== args.userId) {
+        return { unclaimed: false };
+      }
+      // Safeguard: only role-assigned tokens should be unclaimable.
+      // Direct-user tokens had assignedTo set at entry and unclaiming
+      // would strand the task — block it.
+      if (!row.candidateRole) {
+        throw new BadRequestException(
+          "Task is not role-assigned; cannot be unclaimed.",
+        );
+      }
+      await this.updateTokenWithLock(tx, args.tokenId, row.version, {
+        assignedTo: null,
+      });
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: row.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        nodeId: row.currentNodeId,
+        eventType: "task-unclaimed",
+        payload: { candidateRole: row.candidateRole },
+      });
+      return { unclaimed: true };
     });
   }
 
@@ -1331,6 +1474,7 @@ export class EngineService {
         status: instanceTokens.status,
         waitingFor: instanceTokens.waitingFor,
         assignedTo: instanceTokens.assignedTo,
+        candidateRole: instanceTokens.candidateRole,
         version: instanceTokens.version,
       })
       .from(instanceTokens)
@@ -1351,6 +1495,15 @@ export class EngineService {
     if (row.assignedTo && row.assignedTo !== userId) {
       throw new ForbiddenException(
         "Task is assigned to another user.",
+      );
+    }
+    // Claim-first: role-assigned tokens must be claimed before they
+    // can be completed. The permissive "anyone can complete an
+    // unassigned task" path is preserved for legacy tokens that carry
+    // no role gate — backwards compatible with pre-R1 instances.
+    if (!row.assignedTo && row.candidateRole) {
+      throw new ForbiddenException(
+        `Task must be claimed before completion (role "${row.candidateRole}").`,
       );
     }
     return {
