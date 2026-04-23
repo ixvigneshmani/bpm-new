@@ -16,6 +16,7 @@ import { apiGet, apiPost } from "../lib/api";
 import InstanceCanvas from "./console/InstanceCanvas";
 import StepSnapshot from "./console/StepSnapshot";
 import EditVariablesDialog from "./console/EditVariablesDialog";
+import ReplayStepDialog from "./console/ReplayStepDialog";
 
 type InstanceDetail = {
   id: string;
@@ -75,7 +76,8 @@ export default function InstanceDetailPage() {
   const [cancelling, setCancelling] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
-  const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit">(null);
+  const [replayOpen, setReplayOpen] = useState(false);
+  const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit" | "replay">(null);
 
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -191,6 +193,25 @@ export default function InstanceDetailPage() {
       await refresh();
     } catch (e) {
       // Bubble up to the dialog rather than swallowing.
+      throw e;
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const onReplaySubmit = async (reason: string, variablesPatch: Record<string, unknown> | undefined) => {
+    if (!detail || !selectedNodeId) return;
+    setBusyAction("replay");
+    try {
+      await apiPost(`/instances/${detail.id}/replay`, {
+        targetNodeId: selectedNodeId,
+        reason,
+        ...(variablesPatch ? { variablesPatch } : {}),
+      });
+      setReplayOpen(false);
+      setSelectedNodeId(null);
+      await refresh();
+    } catch (e) {
       throw e;
     } finally {
       setBusyAction(null);
@@ -331,16 +352,31 @@ export default function InstanceDetailPage() {
           style={{ marginBottom: 16 }}
         >
           {selectedNodeId && (
-            <button
-              onClick={() => setSelectedNodeId(null)}
-              style={{
-                padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
-                background: "#fff", fontSize: 11, fontWeight: 600, color: "#475467",
-                cursor: "pointer", marginBottom: 8,
-              }}
-            >
-              Clear filter
-            </button>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+              <button
+                onClick={() => setSelectedNodeId(null)}
+                style={{
+                  padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
+                  background: "#fff", fontSize: 11, fontWeight: 600, color: "#475467",
+                  cursor: "pointer",
+                }}
+              >
+                Clear filter
+              </button>
+              {canAdmin && (
+                <button
+                  onClick={() => setReplayOpen(true)}
+                  title="Cancel live tokens and rewind to this step"
+                  style={{
+                    padding: "4px 10px", borderRadius: 6, border: "1px solid #FDE68A",
+                    background: "#FFFBEB", fontSize: 11, fontWeight: 600, color: "#92400E",
+                    cursor: "pointer",
+                  }}
+                >
+                  ⟲ Replay from here
+                </button>
+              )}
+            </div>
           )}
           <InstanceCanvas
             canvas={canvas}
@@ -434,6 +470,14 @@ export default function InstanceDetailPage() {
           currentVariables={detail.variables}
           onClose={() => setEditOpen(false)}
           onSubmit={onEditSubmit}
+        />
+      )}
+
+      {replayOpen && selectedNodeId && (
+        <ReplayStepDialog
+          targetNodeId={selectedNodeId}
+          onClose={() => setReplayOpen(false)}
+          onSubmit={onReplaySubmit}
         />
       )}
 

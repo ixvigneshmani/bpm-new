@@ -784,6 +784,7 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "variable-unresolved",
   "instance-suspended",
   "instance-resumed",
+  "instance-modified",
   "error",
 ]);
 

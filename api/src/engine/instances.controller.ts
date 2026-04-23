@@ -16,6 +16,7 @@ import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { CancelInstanceDto } from "./dto/cancel-instance.dto";
 import { EditVariablesDto } from "./dto/edit-variables.dto";
 import { SuspendInstanceDto } from "./dto/suspend-instance.dto";
+import { ReplayInstanceDto } from "./dto/replay-instance.dto";
 import { EngineService } from "./engine.service";
 import { IdempotencyService } from "./idempotency.service";
 import { ForbiddenException } from "@nestjs/common";
@@ -154,6 +155,27 @@ export class InstancesController {
       instanceId: id,
       tenantId: req.user.tenantId,
       userId: req.user.sub,
+    });
+  }
+
+  /** POST /instances/:id/replay
+   *  Admin-only. Camunda-style modification: cancel every live token,
+   *  kill queued jobs, optionally patch variables, and start a fresh
+   *  token at `targetNodeId`. Reason is mandatory for audit. */
+  @Post(":id/replay")
+  replayInstance(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body() dto: ReplayInstanceDto,
+  ) {
+    assertAdmin(req);
+    return this.engine.replayFromStep({
+      instanceId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+      targetNodeId: dto.targetNodeId,
+      reason: dto.reason,
+      variablesPatch: dto.variablesPatch,
     });
   }
 }

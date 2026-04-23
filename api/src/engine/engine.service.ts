@@ -2234,6 +2234,270 @@ export class EngineService {
     });
   }
 
+  /** Replay-from-step (Camunda-style instance modification).
+   *
+   *  Cancel every live token, kill every queued job, and place a fresh
+   *  token at `targetNodeId`. Runs the advance loop from there just
+   *  like startInstance. Admin-only. Reason is required — this is a
+   *  destructive operation and the audit story needs to answer "why did
+   *  someone rewind the instance to step X on 2026-04-23?"
+   *
+   *  Industry equivalent: Camunda's `ProcessInstanceModificationBuilder`
+   *  (Cockpit exposes it as right-click → Modify). Our delta: a single
+   *  atomic API call (not the N-operation builder) + mandatory reason +
+   *  optional variable patch applied in the same txn so the replay
+   *  starts with the corrected state.
+   *
+   *  Safety: rejects on terminal instances (completed/cancelled/failed).
+   *  Suspended instances are allowed — replay flips them to running.
+   *  Subprocess / multi-instance scopes: not supported in the first
+   *  pass — targetNodeId must be a top-level node on the canvas.
+   */
+  async replayFromStep(args: {
+    instanceId: string;
+    tenantId: string;
+    userId: string;
+    targetNodeId: string;
+    reason: string;
+    variablesPatch?: Record<string, unknown>;
+  }): Promise<{
+    instanceId: string;
+    newTokenId: string;
+    cancelledTokens: number;
+    cancelledJobs: number;
+    status: "running" | "completed" | "failed";
+  }> {
+    if (!args.reason || args.reason.trim().length < 3) {
+      throw new BadRequestException(
+        "A reason (min 3 chars) is required to replay from a step.",
+      );
+    }
+    if (!args.targetNodeId) {
+      throw new BadRequestException("targetNodeId is required.");
+    }
+
+    return this.db.transaction(async (tx) => {
+      const [inst] = await tx
+        .select({
+          id: processInstances.id,
+          status: processInstances.status,
+          version: processInstances.version,
+          variables: processInstances.variables,
+          processId: processInstances.processId,
+          processVersionId: processInstances.processVersionId,
+          definitionSnapshot: processInstances.definitionSnapshot,
+        })
+        .from(processInstances)
+        .where(and(
+          eq(processInstances.id, args.instanceId),
+          eq(processInstances.tenantId, args.tenantId),
+        ))
+        .limit(1);
+      if (!inst) throw new NotFoundException("Instance not found.");
+      if (inst.status === "completed" || inst.status === "cancelled" || inst.status === "failed") {
+        throw new BadRequestException(
+          `Cannot replay a ${inst.status} instance. Start a fresh instance instead.`,
+        );
+      }
+
+      // Validate target node against the versioned canvas. If the
+      // caller asks to replay into a node that doesn't exist in the
+      // snapshot the instance is running against, fail fast rather
+      // than advancing into a node the engine can't execute.
+      const canvas = await this.loadCanvasForInstance(tx, inst);
+      const targetNode = canvas.nodes.find((n) => n.id === args.targetNodeId);
+      if (!targetNode) {
+        throw new BadRequestException(
+          `Target node "${args.targetNodeId}" not found on this instance's canvas.`,
+        );
+      }
+
+      // Snapshot pre-replay state for the audit payload.
+      const liveTokens = await tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          currentNodeId: instanceTokens.currentNodeId,
+          status: instanceTokens.status,
+        })
+        .from(instanceTokens)
+        .where(and(
+          eq(instanceTokens.instanceId, args.instanceId),
+          inArray(instanceTokens.status, ["active", "waiting"]),
+        ));
+
+      // Cancel every live token. We use the same "failed with reason"
+      // pattern cancelInstance uses — each token gets a terminal status
+      // and an error audit row so the trail shows "token T was alive
+      // doing X, was cut off by replay, and a new token was born at Y".
+      let cancelledTokens = 0;
+      for (const tok of liveTokens) {
+        try {
+          await this.updateTokenWithLock(tx, tok.id, tok.version, {
+            status: "failed",
+            errorMessage: "Superseded by replay-from-step.",
+          });
+          await tx.insert(instanceEvents).values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: tok.id,
+            userId: args.userId,
+            nodeId: tok.currentNodeId,
+            eventType: "error",
+            payload: { reason: "superseded-by-replay" },
+          });
+          cancelledTokens += 1;
+        } catch {
+          // Concurrent mutator already moved the token; skip.
+        }
+      }
+
+      // Kill queued jobs on this instance — they would otherwise resume
+      // the very token we just cancelled.
+      const deadJobs = await tx
+        .update(engineJobs)
+        .set({
+          status: "dead",
+          lastError: "Superseded by replay-from-step.",
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(engineJobs.instanceId, args.instanceId),
+          inArray(engineJobs.status, ["queued", "running"]),
+        ))
+        .returning({ id: engineJobs.id });
+
+      // Apply the optional variable patch inline so the new token
+      // advances with the corrected state. Intentionally shallow-merge
+      // (matching editInstanceVariables semantics with null-deletes).
+      const baseVars = (inst.variables as Record<string, unknown> | null) ?? {};
+      const mergedVars: Record<string, unknown> = { ...baseVars };
+      const patch = args.variablesPatch ?? {};
+      const patchKeys = Object.keys(patch);
+      for (const k of patchKeys) {
+        if (patch[k] === null) delete mergedVars[k];
+        else mergedVars[k] = patch[k];
+      }
+      // Flip instance back to running (catches suspended → running) +
+      // persist the new variable bag.
+      await this.updateInstanceWithLock(tx, inst.id, inst.version, {
+        status: "running",
+        variables: mergedVars,
+        errorMessage: null,
+      });
+
+      // Instance-modified audit row BEFORE the new token is placed so
+      // the trail reads: "modified → token-created at Y → advancing".
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        nodeId: args.targetNodeId,
+        eventType: "instance-modified",
+        payload: {
+          action: "replay",
+          targetNodeId: args.targetNodeId,
+          cancelledTokens: liveTokens.map((t) => ({ id: t.id, wasAt: t.currentNodeId })),
+          cancelledJobs: deadJobs.length,
+          patchKeys,
+          reason: args.reason.trim(),
+        },
+      });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-modified",
+        payload: {
+          action: "replay",
+          targetNodeId: args.targetNodeId,
+          reason: args.reason.trim(),
+          modifiedBy: args.userId,
+        },
+      });
+
+      // Place the new token and advance.
+      const [token] = await tx
+        .insert(instanceTokens)
+        .values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          currentNodeId: args.targetNodeId,
+          status: "active",
+        })
+        .returning({ id: instanceTokens.id, version: instanceTokens.version });
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: token.id,
+        nodeId: args.targetNodeId,
+        eventType: "token-created",
+        payload: { source: "replay" },
+      });
+
+      const advance = await this.advanceToken({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: token.id,
+        tokenVersion: token.version,
+        currentNodeId: args.targetNodeId,
+        canvas,
+        variables: mergedVars,
+      });
+
+      // Map terminal results to instance status — mirrors startInstance.
+      let instanceStatus: "running" | "completed" | "failed" = "running";
+      if (advance.tokenStatus === "completed") {
+        // Only flip to completed if no OTHER tokens are still alive.
+        // Replay always cancelled siblings, so single-token instances
+        // go to completed; multi-token designs will need pool-aware
+        // aggregation (not in this pass).
+        await tx
+          .update(processInstances)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(processInstances.id, args.instanceId));
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          eventType: "instance-completed",
+          payload: { hops: advance.hops, via: "replay" },
+        });
+        instanceStatus = "completed";
+      } else if (advance.tokenStatus === "failed") {
+        await tx
+          .update(processInstances)
+          .set({ status: "failed", errorMessage: advance.errorMessage ?? null, completedAt: new Date() })
+          .where(eq(processInstances.id, args.instanceId));
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          eventType: "instance-failed",
+          payload: { hops: advance.hops, message: advance.errorMessage, via: "replay" },
+        });
+        instanceStatus = "failed";
+      }
+
+      this.logger.log({
+        event: "engine.instance.replayed",
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        targetNodeId: args.targetNodeId,
+        cancelledTokens,
+        cancelledJobs: deadJobs.length,
+        reason: args.reason.trim(),
+      });
+
+      return {
+        instanceId: args.instanceId,
+        newTokenId: token.id,
+        cancelledTokens,
+        cancelledJobs: deadJobs.length,
+        status: instanceStatus,
+      };
+    });
+  }
+
   /** Write a row to OUTBOX_EVENTS in the current txn. Called by every
    *  engine lifecycle transition that's interesting to external
    *  subscribers (instance-started/completed/failed/cancelled,
