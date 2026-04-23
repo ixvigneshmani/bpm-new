@@ -13,6 +13,19 @@ export interface JwtPayload {
   exp?: number;
 }
 
+/** Resolved impersonation target, set by `resolveActingFor` when the
+ *  caller (an admin) passes `X-Acting-For: <userId>`. Business logic
+ *  operates on `actingFor.userId` as the effective actor; audit rows
+ *  carry BOTH ids so compliance can see who really did what.
+ *  Non-admins get 403 if they try to set the header at all. */
+export interface ActingFor {
+  userId: string;
+  email: string;
+  displayName: string;
+  roles: string[];
+}
+
 export interface AuthenticatedRequest {
   user: JwtPayload;
+  actingFor?: ActingFor;
 }

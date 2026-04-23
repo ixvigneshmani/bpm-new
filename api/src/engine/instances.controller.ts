@@ -12,6 +12,8 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { resolveActingFor } from "../auth/acting-for";
+import { UsersService } from "../users/users.service";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { CancelInstanceDto } from "./dto/cancel-instance.dto";
 import { EditVariablesDto } from "./dto/edit-variables.dto";
@@ -36,6 +38,7 @@ export class InstancesController {
   constructor(
     private readonly engine: EngineService,
     private readonly idempotency: IdempotencyService,
+    private readonly users: UsersService,
   ) {}
 
   /** GET /instances?status=<status>
@@ -84,22 +87,24 @@ export class InstancesController {
    *
    *  Replay safety: pass `Idempotency-Key` to make retries safe. */
   @Post(":id/cancel")
-  cancelInstance(
+  async cancelInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: CancelInstanceDto,
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
+    const effective = await resolveActingFor(req, this.users);
     return this.idempotency.wrap({
       tenantId: req.user.tenantId,
       endpoint: "cancel-instance",
       key: idempotencyKey,
-      requestBody: { instanceId: id, reason: dto.reason ?? null },
+      requestBody: { instanceId: id, reason: dto.reason ?? null, actingBy: effective.actingBy },
       handler: () =>
         this.engine.cancelInstance({
           instanceId: id,
           tenantId: req.user.tenantId,
-          userId: req.user.sub,
+          userId: effective.userId,
+          actingBy: effective.actingBy,
           reason: dto.reason,
         }),
     });
@@ -110,69 +115,68 @@ export class InstancesController {
    *  bag and emit one `variable-edited` audit row per key with
    *  old/new values + the mandatory reason. */
   @Post(":id/variables")
-  editVariables(
+  async editVariables(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: EditVariablesDto,
   ) {
     assertAdmin(req);
+    const effective = await resolveActingFor(req, this.users);
     return this.engine.editInstanceVariables({
       instanceId: id,
       tenantId: req.user.tenantId,
-      userId: req.user.sub,
+      userId: effective.userId,
+      actingBy: effective.actingBy,
       patch: dto.patch,
       reason: dto.reason,
     });
   }
 
-  /** POST /instances/:id/suspend
-   *  Admin-only. Halts token advancement and worker job execution for
-   *  this instance until /resume is called. Idempotent. */
   @Post(":id/suspend")
-  suspendInstance(
+  async suspendInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: SuspendInstanceDto,
   ) {
     assertAdmin(req);
+    const effective = await resolveActingFor(req, this.users);
     return this.engine.suspendInstance({
       instanceId: id,
       tenantId: req.user.tenantId,
-      userId: req.user.sub,
+      userId: effective.userId,
+      actingBy: effective.actingBy,
       reason: dto.reason,
     });
   }
 
-  /** POST /instances/:id/resume
-   *  Admin-only. Returns a suspended instance to `running`. */
   @Post(":id/resume")
-  resumeInstance(
+  async resumeInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
     assertAdmin(req);
+    const effective = await resolveActingFor(req, this.users);
     return this.engine.resumeInstance({
       instanceId: id,
       tenantId: req.user.tenantId,
-      userId: req.user.sub,
+      userId: effective.userId,
+      actingBy: effective.actingBy,
     });
   }
 
-  /** POST /instances/:id/replay
-   *  Admin-only. Camunda-style modification: cancel every live token,
-   *  kill queued jobs, optionally patch variables, and start a fresh
-   *  token at `targetNodeId`. Reason is mandatory for audit. */
   @Post(":id/replay")
-  replayInstance(
+  async replayInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: ReplayInstanceDto,
   ) {
     assertAdmin(req);
+    const effective = await resolveActingFor(req, this.users);
     return this.engine.replayFromStep({
       instanceId: id,
       tenantId: req.user.tenantId,
-      userId: req.user.sub,
+      userId: effective.userId,
+      actingBy: effective.actingBy,
       targetNodeId: dto.targetNodeId,
       reason: dto.reason,
       variablesPatch: dto.variablesPatch,

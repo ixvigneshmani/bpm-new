@@ -1,5 +1,9 @@
+import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useSidebar } from "./sidebar-context";
+import { useAuth } from "../../lib/auth";
+import { useActingFor } from "../../lib/acting-for";
+import ActAsPicker from "../../pages/console/ActAsPicker";
 
 const ROUTE_LABELS: Record<string, string> = {
   "/home": "Home",
@@ -51,6 +55,10 @@ export default function Header() {
   const { toggle } = useSidebar();
   const location = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const { target } = useActingFor();
+  const [actAsOpen, setActAsOpen] = useState(false);
+  const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
 
   const breadcrumbs = buildBreadcrumbs(location.pathname);
 
@@ -129,6 +137,23 @@ export default function Header() {
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {isAdmin && !target && (
+          <button
+            onClick={() => setActAsOpen(true)}
+            title="Act as another user (audited impersonation)"
+            style={{
+              padding: "6px 12px", borderRadius: 8, border: "1px solid #EAECF0",
+              background: "#fff", color: "#475467", fontSize: 12, fontWeight: 600,
+              cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            Act as…
+          </button>
+        )}
         <button style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", background: "#fff", border: "1px solid #EAECF0", borderRadius: 8, color: "#667085", cursor: "pointer", position: "relative" }}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
             <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" />
@@ -137,6 +162,7 @@ export default function Header() {
           <span style={{ position: "absolute", top: 4, right: 4, width: 8, height: 8, background: "#F04438", borderRadius: "50%", border: "2px solid #fff" }} />
         </button>
       </div>
+      {actAsOpen && <ActAsPicker onClose={() => setActAsOpen(false)} />}
     </header>
   );
 }

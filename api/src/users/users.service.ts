@@ -36,6 +36,43 @@ export class UsersService {
     return rows[0] ?? null;
   }
 
+  /** List tenant users for the Act-as impersonation picker. Returns
+   *  only the fields the picker needs; pulls role keys per user with
+   *  an IN-list join so the admin can see "who holds manager" without
+   *  a follow-up query. */
+  async listForTenant(tenantId: string): Promise<Array<{
+    id: string;
+    email: string;
+    displayName: string;
+    isActive: boolean;
+    systemRole: string;
+    roles: string[];
+  }>> {
+    const us = await this.db
+      .select({
+        id: users.id,
+        email: users.email,
+        displayName: users.displayName,
+        isActive: users.isActive,
+        systemRole: users.role,
+      })
+      .from(users)
+      .where(eq(users.tenantId, tenantId));
+    // One-pass role join — N users × M roles is fine at tenant scale.
+    const roleRows = await this.db
+      .select({ userId: userRoles.userId, key: roles.key })
+      .from(userRoles)
+      .innerJoin(roles, eq(userRoles.roleId, roles.id))
+      .where(eq(userRoles.tenantId, tenantId));
+    const rolesByUser = new Map<string, string[]>();
+    for (const r of roleRows) {
+      const arr = rolesByUser.get(r.userId) ?? [];
+      arr.push(r.key);
+      rolesByUser.set(r.userId, arr);
+    }
+    return us.map((u) => ({ ...u, roles: rolesByUser.get(u.id) ?? [] }));
+  }
+
   /** Domain role keys held by a user (e.g. ["manager", "finance"]). */
   async getRoleKeys(userId: string): Promise<string[]> {
     const rows = await this.db

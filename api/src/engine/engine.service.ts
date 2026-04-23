@@ -732,6 +732,7 @@ export class EngineService {
     tokenId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
     formData?: Record<string, unknown>;
   }): Promise<{
     instanceId: string;
@@ -769,6 +770,7 @@ export class EngineService {
         userId: args.userId,
         nodeId: tokenRow.currentNodeId,
         eventType: "task-completed",
+        payload: args.actingBy ? { actingBy: args.actingBy } : null,
       });
       await this.emitOutbox(tx, {
         tenantId: args.tenantId,
@@ -778,6 +780,7 @@ export class EngineService {
           tokenId: args.tokenId,
           nodeId: tokenRow.currentNodeId,
           completedBy: args.userId,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
 
@@ -1355,6 +1358,10 @@ export class EngineService {
     tenantId: string;
     userId: string;
     userRoles: string[];
+    /** Admin id when this claim is being made on behalf of `userId`.
+     *  The target still has to hold the required candidateRole — the
+     *  admin's systemRole doesn't grant role membership. */
+    actingBy?: string | null;
   }): Promise<{ claimed: boolean; alreadyClaimed: boolean }> {
     return this.db.transaction(async (tx) => {
       const [row] = await tx
@@ -1415,7 +1422,11 @@ export class EngineService {
         userId: args.userId,
         nodeId: row.currentNodeId,
         eventType: "task-claimed",
-        payload: { auto: false, candidateRole: row.candidateRole ?? null },
+        payload: {
+          auto: false,
+          candidateRole: row.candidateRole ?? null,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
       });
       return { claimed: true, alreadyClaimed: false };
     });
@@ -1428,6 +1439,7 @@ export class EngineService {
     tokenId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
   }): Promise<{ unclaimed: boolean }> {
     return this.db.transaction(async (tx) => {
       const [row] = await tx
@@ -1476,7 +1488,10 @@ export class EngineService {
         userId: args.userId,
         nodeId: row.currentNodeId,
         eventType: "task-unclaimed",
-        payload: { candidateRole: row.candidateRole },
+        payload: {
+          candidateRole: row.candidateRole,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
       });
       return { unclaimed: true };
     });
@@ -1863,6 +1878,7 @@ export class EngineService {
     instanceId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
     reason?: string;
   }): Promise<{
     instanceId: string;
@@ -1982,6 +1998,7 @@ export class EngineService {
           reason: args.reason ?? null,
           tokensCancelled: cancelledCount,
           jobsCancelled: cancelledJobs.length,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
       await this.emitOutbox(tx, {
@@ -1993,6 +2010,7 @@ export class EngineService {
           cancelledBy: args.userId,
           tokensCancelled: cancelledCount,
           jobsCancelled: cancelledJobs.length,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
 
@@ -2024,6 +2042,10 @@ export class EngineService {
     instanceId: string;
     tenantId: string;
     userId: string;
+    /** When set, an admin is editing on behalf of `userId`. Recorded
+     *  on every audit row so the trail answers "who really did this?"
+     *  Feature D — Act-as impersonation. */
+    actingBy?: string | null;
     patch: Record<string, unknown>;
     reason: string;
   }): Promise<{ instanceId: string; editedKeys: string[] }> {
@@ -2092,6 +2114,7 @@ export class EngineService {
             newValue: args.patch[k] ?? null,
             action: isDelete ? "delete" : "set",
             reason: args.reason.trim(),
+            ...(args.actingBy ? { actingBy: args.actingBy } : {}),
           },
         });
       }
@@ -2128,6 +2151,7 @@ export class EngineService {
     instanceId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
     reason?: string;
   }): Promise<{ instanceId: string; status: string }> {
     return this.db.transaction(async (tx) => {
@@ -2160,13 +2184,20 @@ export class EngineService {
         instanceId: args.instanceId,
         userId: args.userId,
         eventType: "instance-suspended",
-        payload: { reason: args.reason ?? null },
+        payload: {
+          reason: args.reason ?? null,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
       });
       await this.emitOutbox(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         eventType: "instance-suspended",
-        payload: { reason: args.reason ?? null, suspendedBy: args.userId },
+        payload: {
+          reason: args.reason ?? null,
+          suspendedBy: args.userId,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
       });
       this.logger.log({
         event: "engine.instance.suspended",
@@ -2186,6 +2217,7 @@ export class EngineService {
     instanceId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
   }): Promise<{ instanceId: string; status: string }> {
     return this.db.transaction(async (tx) => {
       const [inst] = await tx
@@ -2217,12 +2249,16 @@ export class EngineService {
         instanceId: args.instanceId,
         userId: args.userId,
         eventType: "instance-resumed",
+        payload: args.actingBy ? { actingBy: args.actingBy } : {},
       });
       await this.emitOutbox(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         eventType: "instance-resumed",
-        payload: { resumedBy: args.userId },
+        payload: {
+          resumedBy: args.userId,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
       });
       this.logger.log({
         event: "engine.instance.resumed",
@@ -2257,6 +2293,7 @@ export class EngineService {
     instanceId: string;
     tenantId: string;
     userId: string;
+    actingBy?: string | null;
     targetNodeId: string;
     reason: string;
     variablesPatch?: Record<string, unknown>;
@@ -2431,6 +2468,7 @@ export class EngineService {
           cancelledJobs: deadJobs.length,
           patchKeys,
           reason: args.reason.trim(),
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
       await this.emitOutbox(tx, {
@@ -2442,6 +2480,7 @@ export class EngineService {
           targetNodeId: args.targetNodeId,
           reason: args.reason.trim(),
           modifiedBy: args.userId,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
 

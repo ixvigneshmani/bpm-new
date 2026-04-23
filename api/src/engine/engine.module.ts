@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
+import { UsersModule } from "../users/users.module";
 import { CleanupService } from "./cleanup.service";
 import { EngineController } from "./engine.controller";
 import { EngineService } from "./engine.service";
@@ -14,7 +15,7 @@ import { WebhooksService } from "./webhooks.service";
 import { WorkerService } from "./worker.service";
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, UsersModule],
   controllers: [
     EngineController,
     InstancesController,

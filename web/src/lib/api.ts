@@ -14,9 +14,24 @@ function getHeaders(
   extra?: Record<string, string>,
 ): Record<string, string> {
   const token = localStorage.getItem("flowpro_token");
+  // Act-as impersonation (Feature D): every API call made during an
+  // Act-as session automatically carries X-Acting-For. The backend
+  // validates the caller is admin + the target is in the same
+  // tenant before routing the request on behalf of the target.
+  let actingFor: string | null = null;
+  try {
+    const raw = localStorage.getItem("flowpro_acting_for");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.userId) actingFor = parsed.userId;
+    }
+  } catch {
+    localStorage.removeItem("flowpro_acting_for");
+  }
   return {
     ...(withBody ? { "Content-Type": "application/json" } : {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(actingFor ? { "X-Acting-For": actingFor } : {}),
     ...(extra ?? {}),
   };
 }

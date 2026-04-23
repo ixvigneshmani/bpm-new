@@ -1,6 +1,7 @@
 
 import { useLocation } from "react-router-dom";
 import { useSidebar } from "./sidebar-context";
+import { ActingForBanner } from "../../lib/acting-for";
 import Sidebar from "./sidebar";
 import Header from "./header";
 
@@ -33,6 +34,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         }}
       >
         <Header />
+        <ActingForBanner />
         <main
           style={{
             overflowY: isFullBleed ? "hidden" : "auto",
