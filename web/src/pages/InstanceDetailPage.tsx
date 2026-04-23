@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
 import InstanceCanvas from "./console/InstanceCanvas";
+import StepSnapshot from "./console/StepSnapshot";
 
 type InstanceDetail = {
   id: string;
@@ -258,6 +259,17 @@ export default function InstanceDetailPage() {
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
             height={480}
+          />
+        </Card>
+      )}
+
+      {/* Step-scoped business document snapshot (when a node is selected) */}
+      {selectedNodeId && (
+        <Card title={`Business document — ${selectedNodeId}`} style={{ marginBottom: 16 }}>
+          <StepSnapshot
+            nodeId={selectedNodeId}
+            events={detail.recentEvents}
+            currentVariables={detail.variables}
           />
         </Card>
       )}
