@@ -424,8 +424,11 @@ export class EngineService {
         // resumes it. Resolved assignee (directUser only for E3) goes
         // on the token row so the inbox query is a single index hit.
         if (node.type === "userTask") {
-          const { assignee: assignedTo, diagnostic: assignDiag } =
-            resolveDirectUserAssignee(node, args.variables, this.logger);
+          const {
+            assignee: assignedTo,
+            candidateRole,
+            diagnostic: assignDiag,
+          } = resolveDirectUserAssignee(node, args.variables, this.logger);
           // Emit a `variable-unresolved` audit event when the assignment
           // expression couldn't be resolved (e.g. ${managerId} but the
           // variable wasn't set). Doesn't change behavior — still falls
@@ -453,6 +456,7 @@ export class EngineService {
               status: "waiting",
               waitingFor: "userTask",
               assignedTo: assignedTo ?? null,
+              candidateRole: candidateRole ?? null,
               currentNodeId: nodeId,
             },
           );
@@ -462,13 +466,17 @@ export class EngineService {
             tokenId: args.tokenId,
             nodeId,
             eventType: "token-waiting",
-            payload: { waitingFor: "userTask", assignedTo: assignedTo ?? null },
+            payload: {
+              waitingFor: "userTask",
+              assignedTo: assignedTo ?? null,
+              candidateRole: candidateRole ?? null,
+            },
           });
           // Auto-claim audit. We emit task-claimed at suspension when
           // an assignee was resolved — the system is "claiming on
-          // behalf" of the user. Unassigned tasks stay in the queue
-          // and emit task-claimed only if/when an explicit claim
-          // endpoint lands (post-E3).
+          // behalf" of the user. Role-assigned tasks start unclaimed
+          // and emit task-claimed only when a role-member calls the
+          // /tasks/:id/claim endpoint (R1.6).
           if (assignedTo) {
             await args.tx.insert(instanceEvents).values({
               tenantId: args.tenantId,
@@ -646,6 +654,7 @@ export class EngineService {
       currentNodeId?: string;
       waitingFor?: string | null;
       assignedTo?: string | null;
+      candidateRole?: string | null;
       errorMessage?: string | null;
     },
   ): Promise<number> {
@@ -2289,20 +2298,23 @@ export function resolveServiceTaskMaxAttempts(node: EngineNode): number | null {
   return null;
 }
 
-/** Resolve a userTask node's `data.assignment` to a concrete userId
- *  for the assignedTo column.
+/** Resolve a userTask node's `data.assignment` to either a concrete
+ *  userId (write to `assignedTo`) or a role key (write to
+ *  `candidateRole` and leave `assignedTo` null so a role-member must
+ *  claim first).
  *
  *  Strategies:
- *   - `directUser`      → value is a literal user UUID
- *   - `expression`      → value is `${varName}` (or contains `${...}`);
- *                         we resolve against the instance variables
- *   - `candidateGroup`, `aiRouted` → not yet supported; leave unassigned
+ *   - `directUser`  → value is a literal user UUID → assignedTo
+ *   - `expression`  → value is `${varName}` (or contains `${...}`);
+ *                     we resolve against the instance variables to a UUID
+ *   - `role`        → value is a role KEY (e.g. `manager`);
+ *                     assignee stays null (claim-first)
  *
- *  Returns `{ assignee, diagnostic }`. `diagnostic`, when present,
- *  names a specific failure mode (`"unresolved-expression"`,
- *  `"not-a-uuid"`, etc.) so the caller can emit a
- *  `variable-unresolved` audit event — that way silent misses become
- *  visible in the instance audit trail.
+ *  Returns `{ assignee, candidateRole?, diagnostic? }`. `diagnostic`,
+ *  when present, names a specific failure mode
+ *  (`"unresolved-expression"`, `"not-a-uuid"`, `"empty-role-key"`,
+ *  etc.) so the caller can emit a `variable-unresolved` audit event —
+ *  silent misses become visible in the instance audit trail.
  *
  *  We never write garbage into assignedTo because the FK constraint
  *  would 500 the request — better to leave it null and let the
@@ -2313,6 +2325,7 @@ export function resolveDirectUserAssignee(
   logger?: { warn?: (msg: string) => void },
 ): {
   assignee: string | null;
+  candidateRole?: string | null;
   diagnostic?: {
     reason: string;
     expression?: string;
@@ -2338,6 +2351,20 @@ export function resolveDirectUserAssignee(
       };
     }
     return { assignee: value };
+  }
+
+  if (type === "role") {
+    if (typeof value !== "string" || !value.trim()) {
+      logger?.warn?.(
+        `User task ${node.id}: role assignment has no role key; leaving unassigned.`,
+      );
+      return {
+        assignee: null,
+        candidateRole: null,
+        diagnostic: { reason: "empty-role-key", assignmentType: "role" },
+      };
+    }
+    return { assignee: null, candidateRole: value.trim() };
   }
 
   if (type === "expression") {

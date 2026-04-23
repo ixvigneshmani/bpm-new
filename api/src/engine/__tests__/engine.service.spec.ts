@@ -1167,15 +1167,31 @@ describe("resolveDirectUserAssignee", () => {
     ).toBe(UUID_A);
   });
 
-  it("returns null for unsupported strategies (candidateGroup, aiRouted) with a diagnostic", () => {
-    for (const type of ["candidateGroup", "aiRouted"]) {
-      const { assignee, diagnostic } = resolveDirectUserAssignee(
-        node({ assignment: { type, value: UUID_A } }),
-      );
-      expect(assignee).toBeNull();
-      expect(diagnostic?.reason).toBe("unsupported-type");
-      expect(diagnostic?.assignmentType).toBe(type);
-    }
+  it("returns candidateRole for a role assignment (claim-first; no assignee)", () => {
+    const { assignee, candidateRole, diagnostic } = resolveDirectUserAssignee(
+      node({ assignment: { type: "role", value: "manager" } }),
+    );
+    expect(assignee).toBeNull();
+    expect(candidateRole).toBe("manager");
+    expect(diagnostic).toBeUndefined();
+  });
+
+  it("emits `empty-role-key` diagnostic when role assignment has no key", () => {
+    const { assignee, candidateRole, diagnostic } = resolveDirectUserAssignee(
+      node({ assignment: { type: "role", value: "   " } }),
+    );
+    expect(assignee).toBeNull();
+    expect(candidateRole).toBeNull();
+    expect(diagnostic?.reason).toBe("empty-role-key");
+  });
+
+  it("returns null + diagnostic for unknown assignment types", () => {
+    const { assignee, diagnostic } = resolveDirectUserAssignee(
+      node({ assignment: { type: "candidateGroup", value: UUID_A } }),
+    );
+    expect(assignee).toBeNull();
+    expect(diagnostic?.reason).toBe("unsupported-type");
+    expect(diagnostic?.assignmentType).toBe("candidateGroup");
   });
 
   it("resolves an expression assignment against the variable bag", () => {
