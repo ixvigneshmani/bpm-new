@@ -34,6 +34,7 @@ export class InstancesController {
   list(
     @Req() req: AuthenticatedRequest,
     @Query("status") status?: string,
+    @Query("businessKey") businessKey?: string,
   ) {
     const allowed = ["running", "completed", "failed", "cancelled"] as const;
     if (status && !allowed.includes(status as (typeof allowed)[number])) {
@@ -44,6 +45,7 @@ export class InstancesController {
     return this.engine.listInstancesForTenant({
       tenantId: req.user.tenantId,
       status: status as (typeof allowed)[number] | undefined,
+      businessKey: businessKey?.trim() || undefined,
     });
   }
 

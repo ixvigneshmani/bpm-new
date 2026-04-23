@@ -43,13 +43,18 @@ export class EngineController {
       tenantId: req.user.tenantId,
       endpoint: "start-instance",
       key: idempotencyKey,
-      requestBody: { processId: id, variables: dto.variables ?? null },
+      requestBody: {
+        processId: id,
+        variables: dto.variables ?? null,
+        businessKey: dto.businessKey ?? null,
+      },
       handler: () =>
         this.engine.startInstance({
           processId: id,
           tenantId: req.user.tenantId,
           userId: req.user.sub,
           variables: dto.variables,
+          businessKey: dto.businessKey,
         }),
     });
   }

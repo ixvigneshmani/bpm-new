@@ -123,6 +123,7 @@ export class EngineService {
     tenantId: string;
     userId: string;
     variables?: Record<string, unknown>;
+    businessKey?: string;
   }): Promise<{
     instanceId: string;
     status: "running" | "completed" | "failed";
@@ -167,6 +168,7 @@ export class EngineService {
           // canvas now lives in PROCESS_VERSIONS keyed by versionId.
           processVersionId: versionId,
           definitionHash,
+          businessKey: args.businessKey ?? null,
         })
         .returning({ id: processInstances.id });
 
@@ -184,7 +186,11 @@ export class EngineService {
         processId: args.processId,
         instanceId: inst.id,
         eventType: "instance-started",
-        payload: { definitionHash, startedBy: args.userId },
+        payload: {
+          definitionHash,
+          startedBy: args.userId,
+          businessKey: args.businessKey ?? null,
+        },
       });
 
       // 3. Place the initial token on the start event.
@@ -1636,12 +1642,14 @@ export class EngineService {
   async listInstancesForTenant(args: {
     tenantId: string;
     status?: "running" | "completed" | "failed" | "cancelled";
+    businessKey?: string;
   }): Promise<
     Array<{
       id: string;
       processId: string;
       processName: string;
       status: "running" | "completed" | "failed" | "cancelled";
+      businessKey: string | null;
       startedBy: string;
       startedAt: string;
       completedAt: string | null;
@@ -1650,12 +1658,16 @@ export class EngineService {
   > {
     const conds = [eq(processInstances.tenantId, args.tenantId)];
     if (args.status) conds.push(eq(processInstances.status, args.status));
+    if (args.businessKey) {
+      conds.push(eq(processInstances.businessKey, args.businessKey));
+    }
     const rows = await this.db
       .select({
         id: processInstances.id,
         processId: processInstances.processId,
         processName: processes.name,
         status: processInstances.status,
+        businessKey: processInstances.businessKey,
         startedBy: processInstances.startedBy,
         startedAt: processInstances.startedAt,
         completedAt: processInstances.completedAt,
@@ -1685,6 +1697,7 @@ export class EngineService {
     processId: string;
     processVersionId: string | null;
     definitionHash: string;
+    businessKey: string | null;
     status: "running" | "completed" | "failed" | "cancelled";
     variables: Record<string, unknown>;
     startedBy: string;
@@ -1758,6 +1771,7 @@ export class EngineService {
       processId: inst.processId,
       processVersionId: inst.processVersionId,
       definitionHash: inst.definitionHash,
+      businessKey: inst.businessKey,
       status: inst.status,
       variables: (inst.variables as Record<string, unknown>) ?? {},
       startedBy: inst.startedBy,

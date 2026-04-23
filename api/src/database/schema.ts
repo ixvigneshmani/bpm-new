@@ -673,6 +673,13 @@ export const processInstances = pgTable(
     // us dedupe identical snapshots and answer "which logical version
     // did this instance run?" without a separate version column.
     definitionHash: varchar("DEFINITION_HASH", { length: 64 }).notNull(),
+    /** Host-app correlation key. Caller-supplied string (e.g. a PO
+     *  number, a leave-request id in the source system). Scoped to
+     *  (tenantId, businessKey) for fast lookup via GET
+     *  /instances?businessKey=… — the industry-standard pattern for
+     *  host-app ↔ BPM correlation. Nullable: ad-hoc starts from the
+     *  designer don't need a business key. */
+    businessKey: varchar("BUSINESS_KEY", { length: 255 }),
     status: processInstanceStatusEnum("STATUS").notNull().default("running"),
     // Use a SQL-side default so raw inserts (seeds, admin tooling) that
     // omit VARIABLES don't trip the NOT NULL — Drizzle's `.default({})`
@@ -699,6 +706,7 @@ export const processInstances = pgTable(
     index("PROC_INST_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
     index("PROC_INST_PROCESS_IDX").on(t.processId),
     index("PROC_INST_TENANT_STATUS_IDX").on(t.tenantId, t.status),
+    index("PROC_INST_TENANT_BUSINESSKEY_IDX").on(t.tenantId, t.businessKey),
   ],
 );
 
