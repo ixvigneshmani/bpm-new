@@ -10,6 +10,9 @@ import DesignCanvasPage from "./pages/DesignCanvasPage";
 import TasksInboxPage from "./pages/TasksInboxPage";
 import InstancesListPage from "./pages/InstancesListPage";
 import InstanceDetailPage from "./pages/InstanceDetailPage";
+import ConsoleLayout from "./pages/console/ConsoleLayout";
+import ProcessesPanel from "./pages/console/ProcessesPanel";
+import StubPanel from "./pages/console/StubPanel";
 
 /** Wrap a route element in a per-page error boundary. A render crash
  *  inside any single page is contained and shows a friendly fallback
@@ -38,6 +41,14 @@ export function App() {
         <Route path="tasks" element={guarded(<TasksInboxPage />)} />
         <Route path="running" element={guarded(<InstancesListPage />)} />
         <Route path="instances/:id" element={guarded(<InstanceDetailPage />)} />
+        <Route path="console" element={guarded(<ConsoleLayout />)}>
+          <Route index element={<Navigate to="/console/processes" replace />} />
+          <Route path="processes" element={<ProcessesPanel />} />
+          <Route path="tasks"     element={<StubPanel title="My Tasks (role-aware)"    comingIn="TC1.3" />} />
+          <Route path="search"    element={<StubPanel title="businessKey Search"       comingIn="TC1.3" />} />
+          <Route path="webhooks"  element={<StubPanel title="Webhook Inspector"        comingIn="TC1.4" />} />
+          <Route path="variables" element={<StubPanel title="Variables Playground"     comingIn="TC1.5" />} />
+        </Route>
       </Route>
       <Route path="*" element={<Navigate to="/home" replace />} />
     </Routes>

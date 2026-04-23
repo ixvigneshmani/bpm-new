@@ -67,7 +67,7 @@ function useSidebarCounts(): { tasks: number; running: number } {
 /** Static nav structure. Counts are filled in at render time from
  *  the live useSidebarCounts() hook so the badges reflect actual
  *  inbox + running totals. Items with no `count` are stat-less. */
-function buildNavGroups(counts: { tasks: number; running: number }): { label: string; items: NavItem[] }[] {
+function buildNavGroups(counts: { tasks: number; running: number }, isAdmin: boolean): { label: string; items: NavItem[] }[] {
   return [
   {
     label: "My Work",
@@ -102,6 +102,16 @@ function buildNavGroups(counts: { tasks: number; running: number }): { label: st
       },
     ],
   },
+  ...(isAdmin ? [{
+    label: "Admin",
+    items: [
+      {
+        name: "Test Console",
+        href: "/console",
+        icon: <><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></>,
+      },
+    ],
+  }] : []),
   {
     label: "Workspace",
     items: [
@@ -130,9 +140,10 @@ export default function Sidebar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const counts = useSidebarCounts();
+  const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
   // Memoise so ancestor re-renders (route changes, sidebar collapse
   // toggles) don't rebuild the nav-group JSX identity unnecessarily.
-  const navGroups = useMemo(() => buildNavGroups(counts), [counts]);
+  const navGroups = useMemo(() => buildNavGroups(counts, isAdmin), [counts, isAdmin]);
 
   const location = useLocation();
 
