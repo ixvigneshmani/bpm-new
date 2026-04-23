@@ -1711,6 +1711,7 @@ export class EngineService {
       status: "active" | "waiting" | "completed" | "failed";
       waitingFor: string | null;
       assignedTo: string | null;
+      candidateRole: string | null;
       version: number;
       updatedAt: string;
     }>;
@@ -1744,6 +1745,7 @@ export class EngineService {
         status: instanceTokens.status,
         waitingFor: instanceTokens.waitingFor,
         assignedTo: instanceTokens.assignedTo,
+        candidateRole: instanceTokens.candidateRole,
         version: instanceTokens.version,
         updatedAt: instanceTokens.updatedAt,
       })

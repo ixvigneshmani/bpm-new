@@ -5,6 +5,7 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { apiGet, apiPost } from "../../lib/api";
 
 type ProcessRow = {
@@ -184,6 +185,8 @@ function StartInstanceConsoleDialog(props: { process: ProcessRow; onClose: () =>
         {result && (
           <Banner kind="success">
             Started instance <code style={{ background: "#F2F4F7", padding: "1px 6px", borderRadius: 4 }}>{result.instanceId}</code> — status <strong>{result.status}</strong>.
+            {" "}
+            <Link to={`/console/instances/${result.instanceId}`} style={{ color: "#166534", fontWeight: 600 }}>View in console →</Link>
           </Banner>
         )}
       </div>

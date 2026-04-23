@@ -12,6 +12,7 @@ import InstancesListPage from "./pages/InstancesListPage";
 import InstanceDetailPage from "./pages/InstanceDetailPage";
 import ConsoleLayout from "./pages/console/ConsoleLayout";
 import ProcessesPanel from "./pages/console/ProcessesPanel";
+import InstancePanel from "./pages/console/InstancePanel";
 import StubPanel from "./pages/console/StubPanel";
 
 /** Wrap a route element in a per-page error boundary. A render crash
@@ -44,6 +45,7 @@ export function App() {
         <Route path="console" element={guarded(<ConsoleLayout />)}>
           <Route index element={<Navigate to="/console/processes" replace />} />
           <Route path="processes" element={<ProcessesPanel />} />
+          <Route path="instances/:id" element={<InstancePanel />} />
           <Route path="tasks"     element={<StubPanel title="My Tasks (role-aware)"    comingIn="TC1.3" />} />
           <Route path="search"    element={<StubPanel title="businessKey Search"       comingIn="TC1.3" />} />
           <Route path="webhooks"  element={<StubPanel title="Webhook Inspector"        comingIn="TC1.4" />} />
