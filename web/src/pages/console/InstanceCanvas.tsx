@@ -171,7 +171,7 @@ export default function InstanceCanvas(props: {
         panOnScroll
         zoomOnScroll={false}
         zoomOnPinch
-        onNodeClick={(_, node) => onSelectNode?.(node.id)}
+        onNodeClick={(_, node) => onSelectNode?.(node.id === selectedNodeId ? null : node.id)}
         onPaneClick={() => onSelectNode?.(null)}
         proOptions={{ hideAttribution: true }}
       >
