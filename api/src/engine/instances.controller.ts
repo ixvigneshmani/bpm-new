@@ -48,7 +48,7 @@ export class InstancesController {
     @Query("status") status?: string,
     @Query("businessKey") businessKey?: string,
   ) {
-    const allowed = ["running", "completed", "failed", "cancelled"] as const;
+    const allowed = ["running", "completed", "failed", "cancelled", "suspended"] as const;
     if (status && !allowed.includes(status as (typeof allowed)[number])) {
       throw new BadRequestException(
         `status must be one of: ${allowed.join(", ")}`,

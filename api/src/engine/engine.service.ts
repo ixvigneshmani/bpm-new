@@ -1191,6 +1191,23 @@ export class EngineService {
         `Token is not waiting on a service task (status=${row.status}, waitingFor=${row.waitingFor}).`,
       );
     }
+    // BUG-B-07 fix: block service-task completion if the instance has
+    // been suspended since the job was claimed. The worker-level job
+    // filter prevents NEW claims from executing while suspended, but
+    // jobs already in `running` status continue to the callback. We
+    // reject here with a retriable BadRequest; the worker registry
+    // transitions the job back to queued so it auto-resumes when the
+    // admin calls /resume.
+    const instRows = await tx
+      .select({ status: processInstances.status })
+      .from(processInstances)
+      .where(eq(processInstances.id, row.instanceId))
+      .limit(1);
+    if (instRows[0]?.status === "suspended") {
+      throw new BadRequestException(
+        "Instance is suspended — service-task completion deferred until resume.",
+      );
+    }
     return {
       instanceId: row.instanceId,
       currentNodeId: row.currentNodeId,
@@ -1871,8 +1888,13 @@ export class EngineService {
       if (!inst) throw new NotFoundException("Instance not found.");
 
       // Already terminal: idempotent no-op. The audit row from the
-      // original transition is the authoritative record.
-      if (inst.status !== "running") {
+      // original transition is the authoritative record. Suspended
+      // instances are NOT terminal — operators must be able to cancel
+      // without resuming first (otherwise suspending-then-cancelling
+      // a broken instance requires two round-trips and briefly
+      // un-pauses execution, which is exactly what the operator is
+      // trying to avoid).
+      if (inst.status !== "running" && inst.status !== "suspended") {
         return { instanceId: inst.id, status: inst.status, tokensCancelled: 0 };
       }
 
@@ -2040,11 +2062,21 @@ export class EngineService {
         );
       }
       const current = (inst.variables as Record<string, unknown>) ?? {};
-      const merged = { ...current, ...args.patch };
+      // BUG-B-03 fix: a `null` patch value DELETES the key (matches the
+      // UI copy: "To remove a key, set its value to null"). Previously
+      // we shallow-merged, leaving the key with value null — which
+      // BPMN expressions treat differently from "unset".
+      const merged: Record<string, unknown> = { ...current };
+      for (const k of keys) {
+        if (args.patch[k] === null) delete merged[k];
+        else merged[k] = args.patch[k];
+      }
       await this.updateInstanceWithLock(tx, inst.id, inst.version, {
         variables: merged,
       });
       for (const k of keys) {
+        const hadKey = Object.prototype.hasOwnProperty.call(current, k);
+        const isDelete = args.patch[k] === null;
         await tx.insert(instanceEvents).values({
           tenantId: args.tenantId,
           instanceId: args.instanceId,
@@ -2052,12 +2084,30 @@ export class EngineService {
           eventType: "variable-edited",
           payload: {
             key: k,
-            oldValue: current[k] ?? null,
+            // Preserve null-vs-undefined fidelity (BUG-B-06 partial):
+            // hadKey=false means "key did not exist", vs value===null
+            // means "key was explicitly null".
+            hadOldValue: hadKey,
+            oldValue: hadKey ? current[k] ?? null : null,
             newValue: args.patch[k] ?? null,
+            action: isDelete ? "delete" : "set",
             reason: args.reason.trim(),
           },
         });
       }
+      // BUG-B-05 fix: emit outbox so webhook subscribers learn about
+      // admin-initiated variable changes — business-critical for SLA
+      // dashboards + compliance integrations.
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "variable-edited",
+        payload: {
+          editedKeys: keys,
+          editedBy: args.userId,
+          reason: args.reason.trim(),
+        },
+      });
       this.logger.log({
         event: "engine.instance.variables-edited",
         tenantId: args.tenantId,
@@ -2112,6 +2162,12 @@ export class EngineService {
         eventType: "instance-suspended",
         payload: { reason: args.reason ?? null },
       });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-suspended",
+        payload: { reason: args.reason ?? null, suspendedBy: args.userId },
+      });
       this.logger.log({
         event: "engine.instance.suspended",
         tenantId: args.tenantId,
@@ -2161,6 +2217,12 @@ export class EngineService {
         instanceId: args.instanceId,
         userId: args.userId,
         eventType: "instance-resumed",
+      });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-resumed",
+        payload: { resumedBy: args.userId },
       });
       this.logger.log({
         event: "engine.instance.resumed",
