@@ -4,10 +4,11 @@
  * the last 50 events (paginated audit + force-ops preview are OS2).
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { apiGet, apiPost } from "../../lib/api";
 import { Banner, primaryBtn, secondaryBtn } from "./ProcessesPanel";
+import InstanceCanvas from "./InstanceCanvas";
 
 type InstanceDetail = {
   id: string;
@@ -41,27 +42,47 @@ type InstanceDetail = {
     payload: unknown;
     createdAt: string;
   }>;
+  canvasData: unknown;
+};
+
+type CanvasData = {
+  nodes?: Array<{ id: string; type?: string; position?: { x: number; y: number }; data?: Record<string, unknown>; width?: number; height?: number; parentId?: string }>;
+  edges?: Array<{ id: string; source: string; target: string; type?: string; data?: Record<string, unknown>; sourceHandle?: string | null; targetHandle?: string | null }>;
 };
 
 export default function InstancePanel() {
   const { id } = useParams<{ id: string }>();
   const [detail, setDetail] = useState<InstanceDetail | null>(null);
+  const [processCanvas, setProcessCanvas] = useState<CanvasData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
       const d = await apiGet<InstanceDetail>(`/instances/${id}`);
       setDetail(d);
+      // Fetch the process canvas once — it has node positions that
+      // the versioned snapshot strips (canonicalise drops them for
+      // content-hash dedupe). Refresh the instance state only after
+      // the canvas fetch so visualization + events stay consistent.
+      if (!processCanvas) {
+        try {
+          const p = await apiGet<{ canvasData?: CanvasData }>(`/processes/${d.processId}`);
+          if (p.canvasData) setProcessCanvas(p.canvasData);
+        } catch {
+          // Ignore — detail still renders without the canvas view.
+        }
+      }
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, processCanvas]);
 
   useEffect(() => {
     refresh();
@@ -85,6 +106,18 @@ export default function InstancePanel() {
       setCancelling(false);
     }
   };
+
+  // Prefer the live process canvas (has positions) over the versioned
+  // snapshot (canonicalised, positions stripped). If the process was
+  // edited since this instance started, layout may drift but node
+  // identity stays consistent — the overlay still colors correctly.
+  const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
+
+  const filteredEvents = useMemo(() => {
+    if (!detail) return [];
+    if (!selectedNodeId) return detail.recentEvents;
+    return detail.recentEvents.filter((e) => e.nodeId === selectedNodeId);
+  }, [detail, selectedNodeId]);
 
   if (loading) return <div style={{ color: "#98A2B3", fontSize: 13 }}>Loading…</div>;
   if (error) return <Banner kind="error">Failed to load: {error}</Banner>;
@@ -132,6 +165,22 @@ export default function InstancePanel() {
         </div>
       </div>
 
+      {/* Read-only canvas with live state overlay */}
+      {canvas && (canvas.nodes?.length ?? 0) > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <Card title={`Flow — ${selectedNodeId ? `filtered to ${selectedNodeId}` : "click a node to filter events"}`}>
+            <InstanceCanvas
+              canvas={canvas}
+              tokens={detail.tokens}
+              events={detail.recentEvents}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+              height={520}
+            />
+          </Card>
+        </div>
+      )}
+
       {/* Two-column layout: variables + tokens */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
         <Card title={`Variables (${Object.keys(detail.variables).length})`}>
@@ -174,12 +223,22 @@ export default function InstancePanel() {
 
       {/* Audit trail */}
       <div style={{ marginTop: 16 }}>
-        <Card title={`Audit trail — recent ${detail.recentEvents.length} events`}>
-          {detail.recentEvents.length === 0 ? (
+        <Card title={selectedNodeId
+          ? `Audit trail — ${filteredEvents.length} events at ${selectedNodeId}  ·  `
+          : `Audit trail — recent ${detail.recentEvents.length} events`}>
+          {selectedNodeId && (
+            <button
+              onClick={() => setSelectedNodeId(null)}
+              style={{ ...secondaryBtn, padding: "4px 10px", fontSize: 11, marginBottom: 8 }}
+            >
+              Clear filter
+            </button>
+          )}
+          {filteredEvents.length === 0 ? (
             <div style={{ color: "#98A2B3", fontSize: 12 }}>No events.</div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-              {[...detail.recentEvents].reverse().map((e) => (
+              {[...filteredEvents].reverse().map((e) => (
                 <div key={e.id} style={{ display: "grid", gridTemplateColumns: "160px 160px 120px 1fr", gap: 12, fontSize: 12, padding: "6px 4px", borderTop: "1px dashed #F2F4F7", alignItems: "start" }}>
                   <span style={{ color: "#98A2B3", fontFamily: "var(--font-mono, monospace)" }}>
                     {new Date(e.createdAt).toLocaleTimeString()}

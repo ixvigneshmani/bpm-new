@@ -1724,6 +1724,10 @@ export class EngineService {
       payload: unknown;
       createdAt: string;
     }>;
+    /** The versioned canvas this instance is running against. Included
+     *  so the console's read-only canvas view has everything it needs
+     *  in one round-trip. Shape is ReactFlow nodes+edges. */
+    canvasData: unknown;
   }> {
     const instRows = await this.db
       .select()
@@ -1737,6 +1741,22 @@ export class EngineService {
       .limit(1);
     const inst = instRows[0];
     if (!inst) throw new NotFoundException("Instance not found.");
+
+    // Resolve the versioned canvas (or fall back to legacy snapshot).
+    // Kept defensive: if neither exists we return null rather than
+    // throwing, so the detail page still renders the tabular data.
+    let canvasData: unknown = null;
+    if (inst.processVersionId) {
+      const vrows = await this.db
+        .select({ canvasData: processVersions.canvasData })
+        .from(processVersions)
+        .where(eq(processVersions.id, inst.processVersionId))
+        .limit(1);
+      canvasData = vrows[0]?.canvasData ?? null;
+    }
+    if (!canvasData && inst.definitionSnapshot) {
+      canvasData = inst.definitionSnapshot;
+    }
 
     const tokens = await this.db
       .select({
@@ -1789,6 +1809,7 @@ export class EngineService {
         ...e,
         createdAt: e.createdAt.toISOString(),
       })),
+      canvasData,
     };
   }
 

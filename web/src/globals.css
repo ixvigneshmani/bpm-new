@@ -355,6 +355,82 @@ body {
   stroke: #6366F1;
 }
 
+/* ─── Instance canvas (read-only overlay) ───────────────────────────
+ * Industry-standard operator view: completed nodes tinted green,
+ * the waiting node haloed amber, failed nodes red, unvisited nodes
+ * dimmed. Applied to the node wrapper so the inner BPMN component
+ * stays untouched and consistent with the designer. */
+
+.react-flow__node.inst-node-completed {
+  filter: drop-shadow(0 0 0 rgba(0,0,0,0));
+}
+.react-flow__node.inst-node-completed::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 12px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1.5px solid rgba(16, 185, 129, 0.55);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.react-flow__node.inst-node-waiting::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 14px;
+  border: 2px solid rgba(245, 158, 11, 0.85);
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18);
+  pointer-events: none;
+  z-index: 0;
+  animation: inst-pulse 1.6s ease-in-out infinite;
+}
+
+.react-flow__node.inst-node-failed::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1.5px solid rgba(239, 68, 68, 0.65);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.react-flow__node.inst-node-unvisited {
+  opacity: 0.5;
+}
+
+.react-flow__node.inst-node-selected::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 16px;
+  border: 2px dashed rgba(99, 102, 241, 0.9);
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes inst-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18); }
+  50%      { box-shadow: 0 0 0 10px rgba(245, 158, 11, 0.08); }
+}
+
+/* Edges: traversed = indigo bold, unvisited = dim */
+.react-flow__edge.inst-edge-traversed .react-flow__edge-path {
+  stroke: #4F46E5 !important;
+  stroke-width: 2.5px !important;
+}
+.react-flow__edge.inst-edge-traversed .react-flow__edge-interaction {
+  stroke: transparent;
+}
+.react-flow__edge.inst-edge-unvisited .react-flow__edge-path {
+  stroke: #CBD5E1 !important;
+  stroke-width: 1.25px !important;
+  stroke-dasharray: 4 3;
+}
+
 /* ─── Responsive ──────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
