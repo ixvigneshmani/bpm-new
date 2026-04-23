@@ -94,11 +94,12 @@ export type EventDefinition =
 
 /* ─── Assignment (User Task) ─── */
 
-export type AssignmentType = "directUser" | "candidateGroup" | "expression" | "aiRouted";
+export type AssignmentType = "directUser" | "role" | "expression";
 
 export type Assignment = {
   type: AssignmentType;
-  value: string; // user ID, group name, or FEEL expression
+  /** user ID (directUser), role key (role), or FEEL expression (expression) */
+  value: string;
 };
 
 /* ─── SLA (our extension) ─── */
