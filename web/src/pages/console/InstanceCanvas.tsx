@@ -154,7 +154,7 @@ export default function InstanceCanvas(props: {
   }, [canvas.edges, traversedEdgeSet]);
 
   return (
-    <div style={{ height, border: "1px solid #EAECF0", borderRadius: 10, overflow: "hidden", background: "#F8FAFC", position: "relative" }}>
+    <div style={{ width: "100%", height, border: "1px solid #EAECF0", borderRadius: 10, overflow: "hidden", background: "#F8FAFC", position: "relative" }}>
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}

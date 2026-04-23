@@ -10,15 +10,17 @@
  * a "what happened?" snapshot.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
+import InstanceCanvas from "./console/InstanceCanvas";
 
 type InstanceDetail = {
   id: string;
   processId: string;
   processVersionId: string | null;
   definitionHash: string;
+  businessKey: string | null;
   status: "running" | "completed" | "failed" | "cancelled";
   variables: Record<string, unknown>;
   startedBy: string;
@@ -32,6 +34,7 @@ type InstanceDetail = {
     status: "active" | "waiting" | "completed" | "failed";
     waitingFor: string | null;
     assignedTo: string | null;
+    candidateRole: string | null;
     version: number;
     updatedAt: string;
   }>;
@@ -44,6 +47,12 @@ type InstanceDetail = {
     payload: unknown;
     createdAt: string;
   }>;
+  canvasData: unknown;
+};
+
+type CanvasData = {
+  nodes?: Array<{ id: string; type?: string; position?: { x: number; y: number }; data?: Record<string, unknown>; width?: number; height?: number; parentId?: string }>;
+  edges?: Array<{ id: string; source: string; target: string; type?: string; data?: Record<string, unknown>; sourceHandle?: string | null; targetHandle?: string | null }>;
 };
 
 const STATUS_STYLES: Record<InstanceDetail["status"], { bg: string; text: string; dot: string; label: string }> = {
@@ -57,22 +66,36 @@ export default function InstanceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [detail, setDetail] = useState<InstanceDetail | null>(null);
+  const [processCanvas, setProcessCanvas] = useState<CanvasData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
       const data = await apiGet<InstanceDetail>(`/instances/${id}`);
       setDetail(data);
+      // One-time canvas fetch — the versioned snapshot strips positions
+      // (canonicalise drops them for content-hash dedupe), so we pull
+      // positions from the live process. Layout may drift slightly if
+      // the process was edited mid-instance; node identity is stable.
+      if (!processCanvas) {
+        try {
+          const p = await apiGet<{ canvasData?: CanvasData }>(`/processes/${data.processId}`);
+          if (p.canvasData) setProcessCanvas(p.canvasData);
+        } catch {
+          // Non-fatal — page still works without the flow view.
+        }
+      }
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, processCanvas]);
 
   // Initial fetch; the auto-poll effect below picks up from there.
   useEffect(() => {
@@ -126,6 +149,13 @@ export default function InstanceDetailPage() {
       setCancelling(false);
     }
   };
+
+  const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
+  const filteredEvents = useMemo(() => {
+    if (!detail) return [];
+    if (!selectedNodeId) return detail.recentEvents;
+    return detail.recentEvents.filter((e) => e.nodeId === selectedNodeId);
+  }, [detail, selectedNodeId]);
 
   if (loading) {
     return <div style={{ padding: 60, textAlign: "center", color: "#98A2B3", fontSize: 13 }}>Loading…</div>;
@@ -203,6 +233,35 @@ export default function InstanceDetailPage() {
         </div>
       </div>
 
+      {/* Flow diagram with live state overlay */}
+      {canvas && (canvas.nodes?.length ?? 0) > 0 && (
+        <Card
+          title={selectedNodeId ? `Flow — filtered to ${selectedNodeId}` : "Flow — click a node to filter events"}
+          style={{ marginBottom: 16 }}
+        >
+          {selectedNodeId && (
+            <button
+              onClick={() => setSelectedNodeId(null)}
+              style={{
+                padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
+                background: "#fff", fontSize: 11, fontWeight: 600, color: "#475467",
+                cursor: "pointer", marginBottom: 8,
+              }}
+            >
+              Clear filter
+            </button>
+          )}
+          <InstanceCanvas
+            canvas={canvas}
+            tokens={detail.tokens}
+            events={detail.recentEvents}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            height={480}
+          />
+        </Card>
+      )}
+
       {/* Top section: meta + variables side-by-side */}
       <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, 1fr) 2fr", gap: 16, marginBottom: 16 }}>
         <Card title="Instance">
@@ -269,12 +328,14 @@ export default function InstanceDetailPage() {
       </Card>
 
       {/* Recent events */}
-      <Card title={`Recent events (${detail.recentEvents.length})`} style={{ marginTop: 16 }}>
-        {detail.recentEvents.length === 0 ? (
+      <Card title={selectedNodeId
+        ? `Events at ${selectedNodeId} (${filteredEvents.length})`
+        : `Recent events (${detail.recentEvents.length})`} style={{ marginTop: 16 }}>
+        {filteredEvents.length === 0 ? (
           <div style={{ fontSize: 13, color: "#98A2B3", padding: 12 }}>No events</div>
         ) : (
           <div>
-            {detail.recentEvents.map((ev) => (
+            {filteredEvents.map((ev) => (
               <div key={ev.id} style={{
                 display: "grid", gridTemplateColumns: "180px minmax(140px, 1fr) 1fr 110px",
                 padding: "8px 0", borderTop: "1px solid #F2F4F7",
