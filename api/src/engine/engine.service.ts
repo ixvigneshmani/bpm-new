@@ -1360,6 +1360,16 @@ export class EngineService {
         )
         .limit(1);
       if (!row) throw new NotFoundException("Task not found.");
+      const [instRow] = await tx
+        .select({ status: processInstances.status })
+        .from(processInstances)
+        .where(eq(processInstances.id, row.instanceId))
+        .limit(1);
+      if (instRow?.status === "suspended") {
+        throw new BadRequestException(
+          "Instance is suspended — resume it before claiming tasks.",
+        );
+      }
       if (row.status !== "waiting" || row.waitingFor !== "userTask") {
         throw new BadRequestException(
           `Task is not waiting on a user action (status=${row.status}).`,
@@ -1493,6 +1503,18 @@ export class EngineService {
       .limit(1);
     const row = rows[0];
     if (!row) throw new NotFoundException("Task not found.");
+    // Separate instance-status lookup (not innerJoin) so the fake DB
+    // in unit tests keeps working. Trivial perf cost (single PK hit).
+    const instRows = await tx
+      .select({ status: processInstances.status })
+      .from(processInstances)
+      .where(eq(processInstances.id, row.instanceId))
+      .limit(1);
+    if (instRows[0]?.status === "suspended") {
+      throw new BadRequestException(
+        "Instance is suspended — resume it before completing tasks.",
+      );
+    }
     if (row.status !== "waiting" || row.waitingFor !== "userTask") {
       throw new BadRequestException(
         `Task is not waiting on a user action (status=${row.status}).`,
@@ -1563,7 +1585,7 @@ export class EngineService {
     instanceId: string,
     expectedVersion: number,
     patch: {
-      status?: "running" | "completed" | "failed" | "cancelled";
+      status?: "running" | "completed" | "failed" | "cancelled" | "suspended";
       variables?: Record<string, unknown>;
       errorMessage?: string | null;
       completedAt?: Date;
@@ -1598,7 +1620,7 @@ export class EngineService {
   }): Promise<
     Array<{
       id: string;
-      status: "running" | "completed" | "failed" | "cancelled";
+      status: "running" | "completed" | "failed" | "cancelled" | "suspended";
       startedBy: string;
       startedAt: string;
       completedAt: string | null;
@@ -1641,14 +1663,14 @@ export class EngineService {
    *  GETs (small N+1 cost on the join is fine for the 200-row cap). */
   async listInstancesForTenant(args: {
     tenantId: string;
-    status?: "running" | "completed" | "failed" | "cancelled";
+    status?: "running" | "completed" | "failed" | "cancelled" | "suspended";
     businessKey?: string;
   }): Promise<
     Array<{
       id: string;
       processId: string;
       processName: string;
-      status: "running" | "completed" | "failed" | "cancelled";
+      status: "running" | "completed" | "failed" | "cancelled" | "suspended";
       businessKey: string | null;
       startedBy: string;
       startedAt: string;
@@ -1698,7 +1720,7 @@ export class EngineService {
     processVersionId: string | null;
     definitionHash: string;
     businessKey: string | null;
-    status: "running" | "completed" | "failed" | "cancelled";
+    status: "running" | "completed" | "failed" | "cancelled" | "suspended";
     variables: Record<string, unknown>;
     startedBy: string;
     startedAt: string;
@@ -1827,7 +1849,7 @@ export class EngineService {
     reason?: string;
   }): Promise<{
     instanceId: string;
-    status: "running" | "completed" | "failed" | "cancelled";
+    status: "running" | "completed" | "failed" | "cancelled" | "suspended";
     tokensCancelled: number;
   }> {
     return this.db.transaction(async (tx) => {
@@ -1965,6 +1987,188 @@ export class EngineService {
         status: "cancelled" as const,
         tokensCancelled: cancelledCount,
       };
+    });
+  }
+
+  /** Admin variable edit: shallow-merge patch into instance variables,
+   *  audit every touched key with old + new values + operator reason.
+   *  Industry equivalent: Camunda Cockpit's "Modify Variables" action
+   *  in Admin → Instance. Reason is mandatory per compliance rule —
+   *  auditors need to answer "why was this variable changed 3 weeks
+   *  later?". Emits per-key `variable-edited` rows (different type
+   *  from the engine-driven `variable-set` so the audit trail cleanly
+   *  distinguishes admin intervention from normal flow). */
+  async editInstanceVariables(args: {
+    instanceId: string;
+    tenantId: string;
+    userId: string;
+    patch: Record<string, unknown>;
+    reason: string;
+  }): Promise<{ instanceId: string; editedKeys: string[] }> {
+    if (!args.reason || args.reason.trim().length < 3) {
+      throw new BadRequestException(
+        "A reason (min 3 chars) is required to edit variables.",
+      );
+    }
+    if (!args.patch || typeof args.patch !== "object" || Array.isArray(args.patch)) {
+      throw new BadRequestException("patch must be a JSON object.");
+    }
+    const keys = Object.keys(args.patch);
+    if (keys.length === 0) {
+      return { instanceId: args.instanceId, editedKeys: [] };
+    }
+    return this.db.transaction(async (tx) => {
+      const [inst] = await tx
+        .select({
+          id: processInstances.id,
+          variables: processInstances.variables,
+          version: processInstances.version,
+          status: processInstances.status,
+        })
+        .from(processInstances)
+        .where(and(
+          eq(processInstances.id, args.instanceId),
+          eq(processInstances.tenantId, args.tenantId),
+        ))
+        .limit(1);
+      if (!inst) throw new NotFoundException("Instance not found.");
+      // Forbid edits on terminal instances — the audit story "we changed
+      // variables on a completed instance" is a compliance red flag.
+      if (inst.status === "completed" || inst.status === "cancelled" || inst.status === "failed") {
+        throw new BadRequestException(
+          `Cannot edit variables on a ${inst.status} instance. Create a new instance instead.`,
+        );
+      }
+      const current = (inst.variables as Record<string, unknown>) ?? {};
+      const merged = { ...current, ...args.patch };
+      await this.updateInstanceWithLock(tx, inst.id, inst.version, {
+        variables: merged,
+      });
+      for (const k of keys) {
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          userId: args.userId,
+          eventType: "variable-edited",
+          payload: {
+            key: k,
+            oldValue: current[k] ?? null,
+            newValue: args.patch[k] ?? null,
+            reason: args.reason.trim(),
+          },
+        });
+      }
+      this.logger.log({
+        event: "engine.instance.variables-edited",
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        keys,
+        reason: args.reason.trim(),
+      });
+      return { instanceId: args.instanceId, editedKeys: keys };
+    });
+  }
+
+  /** Suspend a running instance. Advance loop refuses to move tokens
+   *  while `status='suspended'`; worker poll skips queued jobs for this
+   *  instance. Idempotent if already suspended. Industry equivalent:
+   *  Camunda `runtime.suspendProcessInstance`. */
+  async suspendInstance(args: {
+    instanceId: string;
+    tenantId: string;
+    userId: string;
+    reason?: string;
+  }): Promise<{ instanceId: string; status: string }> {
+    return this.db.transaction(async (tx) => {
+      const [inst] = await tx
+        .select({
+          id: processInstances.id,
+          version: processInstances.version,
+          status: processInstances.status,
+        })
+        .from(processInstances)
+        .where(and(
+          eq(processInstances.id, args.instanceId),
+          eq(processInstances.tenantId, args.tenantId),
+        ))
+        .limit(1);
+      if (!inst) throw new NotFoundException("Instance not found.");
+      if (inst.status === "suspended") {
+        return { instanceId: inst.id, status: "suspended" };
+      }
+      if (inst.status !== "running") {
+        throw new BadRequestException(
+          `Cannot suspend a ${inst.status} instance.`,
+        );
+      }
+      await this.updateInstanceWithLock(tx, inst.id, inst.version, {
+        status: "suspended",
+      });
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        eventType: "instance-suspended",
+        payload: { reason: args.reason ?? null },
+      });
+      this.logger.log({
+        event: "engine.instance.suspended",
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        reason: args.reason ?? null,
+      });
+      return { instanceId: inst.id, status: "suspended" };
+    });
+  }
+
+  /** Resume a suspended instance back to running. Idempotent if already
+   *  running. Tokens that were waiting remain waiting; queued jobs
+   *  become eligible again on the next worker tick. */
+  async resumeInstance(args: {
+    instanceId: string;
+    tenantId: string;
+    userId: string;
+  }): Promise<{ instanceId: string; status: string }> {
+    return this.db.transaction(async (tx) => {
+      const [inst] = await tx
+        .select({
+          id: processInstances.id,
+          version: processInstances.version,
+          status: processInstances.status,
+        })
+        .from(processInstances)
+        .where(and(
+          eq(processInstances.id, args.instanceId),
+          eq(processInstances.tenantId, args.tenantId),
+        ))
+        .limit(1);
+      if (!inst) throw new NotFoundException("Instance not found.");
+      if (inst.status === "running") {
+        return { instanceId: inst.id, status: "running" };
+      }
+      if (inst.status !== "suspended") {
+        throw new BadRequestException(
+          `Cannot resume a ${inst.status} instance.`,
+        );
+      }
+      await this.updateInstanceWithLock(tx, inst.id, inst.version, {
+        status: "running",
+      });
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+        eventType: "instance-resumed",
+      });
+      this.logger.log({
+        event: "engine.instance.resumed",
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        userId: args.userId,
+      });
+      return { instanceId: inst.id, status: "running" };
     });
   }
 

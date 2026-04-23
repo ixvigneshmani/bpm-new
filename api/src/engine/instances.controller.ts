@@ -14,8 +14,20 @@ import {
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { CancelInstanceDto } from "./dto/cancel-instance.dto";
+import { EditVariablesDto } from "./dto/edit-variables.dto";
+import { SuspendInstanceDto } from "./dto/suspend-instance.dto";
 import { EngineService } from "./engine.service";
 import { IdempotencyService } from "./idempotency.service";
+import { ForbiddenException } from "@nestjs/common";
+
+/** Admin-only guard for mutating ops (edit vars, suspend, resume).
+ *  Reuses the systemRole on the JWT so we don't introduce a new
+ *  RBAC surface until OS1 lands. */
+function assertAdmin(req: AuthenticatedRequest) {
+  if (req.user.systemRole !== "owner" && req.user.systemRole !== "admin") {
+    throw new ForbiddenException("Admin-only operation.");
+  }
+}
 
 @Controller("instances")
 @UseGuards(JwtAuthGuard)
@@ -89,6 +101,59 @@ export class InstancesController {
           userId: req.user.sub,
           reason: dto.reason,
         }),
+    });
+  }
+
+  /** POST /instances/:id/variables
+   *  Admin-only. Shallow-merge `patch` into the instance's variable
+   *  bag and emit one `variable-edited` audit row per key with
+   *  old/new values + the mandatory reason. */
+  @Post(":id/variables")
+  editVariables(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body() dto: EditVariablesDto,
+  ) {
+    assertAdmin(req);
+    return this.engine.editInstanceVariables({
+      instanceId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+      patch: dto.patch,
+      reason: dto.reason,
+    });
+  }
+
+  /** POST /instances/:id/suspend
+   *  Admin-only. Halts token advancement and worker job execution for
+   *  this instance until /resume is called. Idempotent. */
+  @Post(":id/suspend")
+  suspendInstance(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body() dto: SuspendInstanceDto,
+  ) {
+    assertAdmin(req);
+    return this.engine.suspendInstance({
+      instanceId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+      reason: dto.reason,
+    });
+  }
+
+  /** POST /instances/:id/resume
+   *  Admin-only. Returns a suspended instance to `running`. */
+  @Post(":id/resume")
+  resumeInstance(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    assertAdmin(req);
+    return this.engine.resumeInstance({
+      instanceId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
     });
   }
 }

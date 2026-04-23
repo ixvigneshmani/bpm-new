@@ -253,9 +253,11 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.db.execute(
       sql`
         WITH claimed AS (
-          SELECT "ID" FROM "ENGINE_JOBS"
-          WHERE "STATUS" = 'queued' AND "SCHEDULED_FOR" <= ${now}
-          ORDER BY "SCHEDULED_FOR" ASC, "CREATED_AT" ASC
+          SELECT j."ID" FROM "ENGINE_JOBS" j
+          LEFT JOIN "PROCESS_INSTANCES" i ON i."ID" = j."INSTANCE_ID"
+          WHERE j."STATUS" = 'queued' AND j."SCHEDULED_FOR" <= ${now}
+            AND (i."STATUS" IS NULL OR i."STATUS" <> 'suspended')
+          ORDER BY j."SCHEDULED_FOR" ASC, j."CREATED_AT" ASC
           LIMIT ${batchSize}
           FOR UPDATE SKIP LOCKED
         )

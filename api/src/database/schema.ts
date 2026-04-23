@@ -630,6 +630,10 @@ export const processInstanceStatusEnum = pgEnum("PROCESS_INSTANCE_STATUS", [
   "completed",
   "failed",
   "cancelled",
+  // Suspended: admin paused execution. Advance loop refuses to move
+  // tokens; worker poll skips jobs for suspended instances. Resume
+  // flips back to `running`. Cancel from suspended is allowed.
+  "suspended",
 ]);
 
 export const instanceTokenStatusEnum = pgEnum("INSTANCE_TOKEN_STATUS", [
@@ -776,7 +780,10 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "task-unclaimed",
   "task-completed",
   "variable-set",
+  "variable-edited",
   "variable-unresolved",
+  "instance-suspended",
+  "instance-resumed",
   "error",
 ]);
 

@@ -15,6 +15,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
 import InstanceCanvas from "./console/InstanceCanvas";
 import StepSnapshot from "./console/StepSnapshot";
+import EditVariablesDialog from "./console/EditVariablesDialog";
 
 type InstanceDetail = {
   id: string;
@@ -22,7 +23,7 @@ type InstanceDetail = {
   processVersionId: string | null;
   definitionHash: string;
   businessKey: string | null;
-  status: "running" | "completed" | "failed" | "cancelled";
+  status: "running" | "completed" | "failed" | "cancelled" | "suspended";
   variables: Record<string, unknown>;
   startedBy: string;
   startedAt: string;
@@ -61,6 +62,7 @@ const STATUS_STYLES: Record<InstanceDetail["status"], { bg: string; text: string
   completed: { bg: "#F0FDF4", text: "#166534", dot: "#22C55E", label: "Completed" },
   failed:    { bg: "#FEF2F2", text: "#B42318", dot: "#EF4444", label: "Failed" },
   cancelled: { bg: "#F9FAFB", text: "#475467", dot: "#98A2B3", label: "Cancelled" },
+  suspended: { bg: "#FFFBEB", text: "#92400E", dot: "#F59E0B", label: "Suspended" },
 };
 
 export default function InstanceDetailPage() {
@@ -72,6 +74,8 @@ export default function InstanceDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit">(null);
 
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -151,6 +155,48 @@ export default function InstanceDetailPage() {
     }
   };
 
+  const onSuspend = async () => {
+    if (!detail) return;
+    const reason = window.prompt("Reason for suspending? (optional)") ?? "";
+    setBusyAction("suspend");
+    try {
+      await apiPost(`/instances/${detail.id}/suspend`, reason.trim() ? { reason: reason.trim() } : {});
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const onResume = async () => {
+    if (!detail) return;
+    setBusyAction("resume");
+    try {
+      await apiPost(`/instances/${detail.id}/resume`, {});
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const onEditSubmit = async (patch: Record<string, unknown>, reason: string) => {
+    if (!detail) return;
+    setBusyAction("edit");
+    try {
+      await apiPost(`/instances/${detail.id}/variables`, { patch, reason });
+      setEditOpen(false);
+      await refresh();
+    } catch (e) {
+      // Bubble up to the dialog rather than swallowing.
+      throw e;
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
   const filteredEvents = useMemo(() => {
     if (!detail) return [];
@@ -171,6 +217,8 @@ export default function InstanceDetailPage() {
 
   const st = STATUS_STYLES[detail.status];
   const isRunning = detail.status === "running";
+  const isSuspended = detail.status === "suspended";
+  const canAdmin = isRunning || isSuspended; // edit/suspend/resume only on live states
 
   return (
     <div>
@@ -206,7 +254,7 @@ export default function InstanceDetailPage() {
             {detail.id}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             onClick={refresh}
             style={{
@@ -217,7 +265,49 @@ export default function InstanceDetailPage() {
           >
             Refresh
           </button>
+          {canAdmin && (
+            <button
+              onClick={() => setEditOpen(true)}
+              style={{
+                padding: "9px 16px", borderRadius: 8, border: "1px solid #E5E7EB",
+                background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467",
+                cursor: "pointer", fontFamily: "inherit",
+              }}
+              title="Edit variables with an audited reason"
+            >
+              Edit vars
+            </button>
+          )}
           {isRunning && (
+            <button
+              onClick={onSuspend}
+              disabled={busyAction === "suspend"}
+              style={{
+                padding: "9px 16px", borderRadius: 8, border: "1px solid #FDE68A",
+                background: "#FFFBEB", fontSize: 13, fontWeight: 600, color: "#92400E",
+                cursor: busyAction === "suspend" ? "not-allowed" : "pointer", fontFamily: "inherit",
+                opacity: busyAction === "suspend" ? 0.7 : 1,
+              }}
+            >
+              {busyAction === "suspend" ? "Suspending…" : "Suspend"}
+            </button>
+          )}
+          {isSuspended && (
+            <button
+              onClick={onResume}
+              disabled={busyAction === "resume"}
+              style={{
+                padding: "9px 16px", borderRadius: 8, border: "none",
+                background: "linear-gradient(135deg, #F59E0B, #F97316)",
+                fontSize: 13, fontWeight: 600, color: "#fff",
+                cursor: busyAction === "resume" ? "not-allowed" : "pointer", fontFamily: "inherit",
+                opacity: busyAction === "resume" ? 0.7 : 1,
+              }}
+            >
+              {busyAction === "resume" ? "Resuming…" : "Resume"}
+            </button>
+          )}
+          {canAdmin && (
             <button
               onClick={onCancel}
               disabled={cancelling}
@@ -338,6 +428,14 @@ export default function InstanceDetailPage() {
           </div>
         )}
       </Card>
+
+      {editOpen && (
+        <EditVariablesDialog
+          currentVariables={detail.variables}
+          onClose={() => setEditOpen(false)}
+          onSubmit={onEditSubmit}
+        />
+      )}
 
       {/* Recent events */}
       <Card title={selectedNodeId
