@@ -1291,6 +1291,199 @@ export class AiService {
       notes,
     };
   }
+
+  /** Feature E — AI incident copilot.
+   *
+   *  Operator asks a question about a specific running/failed instance
+   *  ("why did this stall?", "what variable did task-1 set?", "is there
+   *  a cause-and-effect chain that led to the failure?"). We feed Claude
+   *  the canvas skeleton, the most recent audit events, the current
+   *  variable bag, and the operator's question — and Claude emits a
+   *  plain-text analysis plus a short structured summary.
+   *
+   *  Industry gap: Camunda/Zeebe/Flowable offer no AI-assisted
+   *  operator copilot for live instances. This is a genuine
+   *  differentiator — and a useful pitch anchor — without requiring
+   *  engine surgery.
+   *
+   *  Scope limits:
+   *  - Response is plain text (markdown), not structured — the UI
+   *    renders it inline. No tool_use → fewer failure modes.
+   *  - We cap context: event list is already capped at 50 by
+   *    getInstance; canvas is slim-projected; variables have a 8 KB cap.
+   *  - Rate-limited to the same bucket as scaffolding (shared budget).
+   */
+  async analyzeInstance(args: {
+    tenantId: string;
+    userId: string;
+    question: string;
+    instance: {
+      id: string;
+      status: string;
+      businessKey: string | null;
+      variables: Record<string, unknown>;
+      tokens: Array<{
+        id: string;
+        currentNodeId: string;
+        status: string;
+        waitingFor: string | null;
+        assignedTo: string | null;
+        candidateRole: string | null;
+      }>;
+      events: Array<{
+        eventType: string;
+        nodeId: string | null;
+        userId: string | null;
+        payload: unknown;
+        createdAt: string;
+      }>;
+      canvas: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | null;
+    };
+  }): Promise<{ analysis: string; tokensIn: number | null; tokensOut: number | null }> {
+    if (!this.client) {
+      throw new ServiceUnavailableException("AI copilot is not configured on this server.");
+    }
+    const question = args.question?.trim();
+    if (!question) {
+      throw new BadRequestException("question is required.");
+    }
+    if (question.length > 2000) {
+      throw new PayloadTooLargeException("question must be ≤ 2000 chars.");
+    }
+    this.enforceRateLimit(args.tenantId);
+
+    // Budget the variables blob so a tenant with huge bags doesn't blow
+    // context or cost. Events + canvas are already slim from the caller.
+    let varsJson = JSON.stringify(args.instance.variables ?? {}, null, 2);
+    if (varsJson.length > 8_000) varsJson = varsJson.slice(0, 8_000) + "\n…(truncated)";
+
+    const canvasSummary = args.instance.canvas
+      ? {
+          nodes: (args.instance.canvas.nodes ?? []).map((n) => ({
+            id: (n as { id?: string }).id,
+            type: (n as { type?: string }).type,
+            label: ((n as { data?: { label?: string } }).data?.label) ?? null,
+          })),
+          edges: (args.instance.canvas.edges ?? []).map((e) => ({
+            id: (e as { id?: string }).id,
+            source: (e as { source?: string }).source,
+            target: (e as { target?: string }).target,
+          })),
+        }
+      : { nodes: [], edges: [] };
+
+    const requestStart = Date.now();
+
+    const systemText = [
+      "You are a senior BPM operations analyst embedded in FlowPro's admin console.",
+      "An operator is looking at a specific process instance and has a question.",
+      "You will be given: the process canvas skeleton (BPMN 2.0 nodes + edges), the current",
+      "instance status, its live tokens (active/waiting/failed), the current variable bag,",
+      "and the recent audit event stream (newest first, capped at 50 rows).",
+      "",
+      "Your job is to:",
+      " 1. Answer the operator's question directly and concisely.",
+      " 2. Point to SPECIFIC audit events, nodes, or variables as evidence when possible.",
+      "    Use the format `nodeId` or `eventType` in backticks so the UI can highlight.",
+      " 3. If you identify a likely root cause, state it plainly.",
+      " 4. Offer the NEXT OPERATOR ACTION in one sentence if appropriate (e.g. \"edit",
+      "    variable X to Y and replay from task-1\") — but never invent business rules",
+      "    that aren't visible in the evidence.",
+      "",
+      "Style: max 300 words, markdown, use bullet lists liberally. Don't pad. No preamble",
+      "like 'Based on the audit trail…' — the operator knows where the data came from.",
+    ].join("\n");
+
+    const userText = [
+      "## Instance",
+      `id: ${args.instance.id}`,
+      `status: ${args.instance.status}`,
+      args.instance.businessKey ? `businessKey: ${args.instance.businessKey}` : null,
+      "",
+      "## Tokens",
+      args.instance.tokens.length === 0
+        ? "(none)"
+        : args.instance.tokens
+            .map((t) =>
+              `- ${t.id.slice(0, 8)}… at ${t.currentNodeId} · ${t.status}` +
+              (t.waitingFor ? ` · waiting ${t.waitingFor}` : "") +
+              (t.candidateRole ? ` · role ${t.candidateRole}` : "") +
+              (t.assignedTo ? ` · assignedTo ${t.assignedTo.slice(0, 8)}…` : ""),
+            )
+            .join("\n"),
+      "",
+      "## Variables (current)",
+      "```json",
+      varsJson,
+      "```",
+      "",
+      "## Canvas",
+      "```json",
+      JSON.stringify(canvasSummary, null, 2),
+      "```",
+      "",
+      "## Audit events (newest first)",
+      args.instance.events.length === 0
+        ? "(none)"
+        : args.instance.events
+            .map((e) => `- [${e.createdAt}] ${e.eventType}` + (e.nodeId ? ` @ ${e.nodeId}` : "") + (e.payload ? ` · ${JSON.stringify(e.payload)}` : ""))
+            .join("\n"),
+      "",
+      "## Operator question",
+      question,
+    ].filter((s) => s !== null).join("\n");
+
+    try {
+      const response = await this.client.messages.create({
+        model: MODEL,
+        max_tokens: 1200,
+        system: [{ type: "text" as const, text: systemText, cache_control: { type: "ephemeral" as const } }],
+        messages: [{ role: "user", content: userText }],
+      });
+
+      const textBlock = response.content.find((b) => b.type === "text");
+      const analysis = (textBlock && textBlock.type === "text" ? textBlock.text : "").trim();
+      if (!analysis) {
+        throw new BadGatewayException("AI copilot returned an empty analysis.");
+      }
+
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        kind: "analyze-instance",
+        description: `instance-analyze: ${question.slice(0, 200)}`,
+        status: "success",
+        responseJson: { analysis, instanceId: args.instance.id },
+        tokensIn: response.usage?.input_tokens ?? null,
+        tokensOut: response.usage?.output_tokens ?? null,
+        durationMs: Date.now() - requestStart,
+      });
+
+      return {
+        analysis,
+        tokensIn: response.usage?.input_tokens ?? null,
+        tokensOut: response.usage?.output_tokens ?? null,
+      };
+    } catch (err) {
+      this.logger.error({
+        event: "ai.analyze-instance.error",
+        tenantId: args.tenantId,
+        instanceId: args.instance.id,
+        message: (err as Error).message,
+      });
+      this.recordInteractionAsync({
+        tenantId: args.tenantId,
+        userId: args.userId,
+        kind: "analyze-instance",
+        description: `instance-analyze: ${question.slice(0, 200)}`,
+        status: "error",
+        errorMessage: this.formatErrorMessage(err as HttpException),
+        durationMs: Date.now() - requestStart,
+      });
+      if (err instanceof HttpException) throw err;
+      throw new BadGatewayException("AI copilot request failed.");
+    }
+  }
 }
 
 /** Allowlisted fields we pass into the refine prompt. Anything not

@@ -17,6 +17,8 @@ import InstanceCanvas from "./console/InstanceCanvas";
 import StepSnapshot from "./console/StepSnapshot";
 import EditVariablesDialog from "./console/EditVariablesDialog";
 import ReplayStepDialog from "./console/ReplayStepDialog";
+import AiCopilotDialog from "./console/AiCopilotDialog";
+import { useAuth } from "../lib/auth";
 
 type InstanceDetail = {
   id: string;
@@ -77,7 +79,10 @@ export default function InstanceDetailPage() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit" | "replay">(null);
+  const { user } = useAuth();
+  const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
 
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -286,6 +291,21 @@ export default function InstanceDetailPage() {
           >
             Refresh
           </button>
+          {isAdmin && (
+            <button
+              onClick={() => setAiOpen(true)}
+              title="Ask Claude about this instance"
+              style={{
+                padding: "9px 14px", borderRadius: 8, border: "none",
+                background: "linear-gradient(135deg, #8B5CF6, #6366F1)",
+                color: "#fff", fontSize: 13, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+                display: "flex", alignItems: "center", gap: 6,
+              }}
+            >
+              <span aria-hidden="true">✨</span> Ask AI
+            </button>
+          )}
           {canAdmin && (
             <button
               onClick={() => setEditOpen(true)}
@@ -478,6 +498,13 @@ export default function InstanceDetailPage() {
           targetNodeId={selectedNodeId}
           onClose={() => setReplayOpen(false)}
           onSubmit={onReplaySubmit}
+        />
+      )}
+
+      {aiOpen && (
+        <AiCopilotDialog
+          instanceId={detail.id}
+          onClose={() => setAiOpen(false)}
         />
       )}
 

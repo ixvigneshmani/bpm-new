@@ -13,9 +13,12 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import type { ServerResponse } from "node:http";
+import { ForbiddenException } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
+import { EngineService } from "../engine/engine.service";
 import { AiService, SCAFFOLD_MODEL } from "./ai.service";
+import { AnalyzeInstanceDto } from "./dto/analyze-instance.dto";
 import { ListInteractionsDto } from "./dto/list-interactions.dto";
 import { RefineProcessDto } from "./dto/refine-process.dto";
 import { ScaffoldProcessDto } from "./dto/scaffold-process.dto";
@@ -40,7 +43,56 @@ const HEARTBEAT_MS = 15_000;
 export class AiController {
   private readonly logger = new Logger(AiController.name);
 
-  constructor(private readonly ai: AiService) {}
+  constructor(
+    private readonly ai: AiService,
+    private readonly engine: EngineService,
+  ) {}
+
+  /** POST /ai/analyze-instance — Feature E copilot.
+   *  Admin-only. Loads the given instance (via EngineService.getInstance
+   *  which is tenant-scoped), feeds canvas + variables + audit trail to
+   *  Claude with the operator's question, returns a markdown analysis.
+   *  Rate-limited per tenant in AiService.enforceRateLimit. */
+  @Post("analyze-instance")
+  async analyzeInstance(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: AnalyzeInstanceDto,
+  ) {
+    if (req.user.systemRole !== "owner" && req.user.systemRole !== "admin") {
+      throw new ForbiddenException("AI copilot is admin-only.");
+    }
+    const inst = await this.engine.getInstance({
+      instanceId: dto.instanceId,
+      tenantId: req.user.tenantId,
+    });
+    return this.ai.analyzeInstance({
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+      question: dto.question,
+      instance: {
+        id: inst.id,
+        status: inst.status,
+        businessKey: inst.businessKey,
+        variables: inst.variables,
+        tokens: inst.tokens.map((t) => ({
+          id: t.id,
+          currentNodeId: t.currentNodeId,
+          status: t.status,
+          waitingFor: t.waitingFor,
+          assignedTo: t.assignedTo,
+          candidateRole: t.candidateRole,
+        })),
+        events: inst.recentEvents.map((e) => ({
+          eventType: e.eventType,
+          nodeId: e.nodeId,
+          userId: e.userId,
+          payload: e.payload,
+          createdAt: e.createdAt,
+        })),
+        canvas: (inst.canvasData as { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | null) ?? null,
+      },
+    });
+  }
 
   /** POST /ai/scaffold-process
    *  Turn a plain-language description into a canvas-ready
