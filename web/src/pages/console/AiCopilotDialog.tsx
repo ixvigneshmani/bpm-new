@@ -4,7 +4,7 @@
  * canvas + variables + audit events and returns markdown.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiPost } from "../../lib/api";
 
 type Turn = { question: string; analysis: string | null; error: string | null; busy: boolean };
@@ -25,6 +25,16 @@ export default function AiCopilotDialog(props: {
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Track the in-flight request so closing the dialog aborts it.
+  // Previously an open fetch completed and state-set on an unmounted
+  // component (React warning) and also burned AI spend.
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   const ask = async (q: string) => {
     const question = q.trim();
@@ -32,14 +42,31 @@ export default function AiCopilotDialog(props: {
     const idx = turns.length;
     setTurns((t) => [...t, { question, analysis: null, error: null, busy: true }]);
     setInput("");
+    const ctrl = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = ctrl;
     try {
       const res = await apiPost<{ analysis: string; tokensIn: number | null; tokensOut: number | null }>(
         "/ai/analyze-instance",
         { instanceId, question },
+        { signal: ctrl.signal },
       );
       setTurns((t) => t.map((row, i) => i === idx ? { ...row, analysis: res.analysis, busy: false } : row));
     } catch (ex) {
-      setTurns((t) => t.map((row, i) => i === idx ? { ...row, error: (ex as Error).message, busy: false } : row));
+      // Don't surface an abort as an error — it's our own close-cancel.
+      if ((ex as { name?: string }).name === "AbortError") {
+        setTurns((t) => t.map((row, i) => i === idx ? { ...row, error: "Cancelled.", busy: false } : row));
+        return;
+      }
+      // Friendlier copy for the common 503 "not configured" case vs
+      // raw Anthropic error text bleeding into the dialog.
+      const msg = (ex as Error).message ?? "Request failed.";
+      const friendly = /not configured/i.test(msg)
+        ? "AI copilot isn't configured on this server — ask an admin to set ANTHROPIC_API_KEY."
+        : /rate/i.test(msg)
+          ? "AI call-rate limit reached for this tenant. Try again in a minute."
+          : msg;
+      setTurns((t) => t.map((row, i) => i === idx ? { ...row, error: friendly, busy: false } : row));
     }
     // Scroll to bottom on reply.
     window.setTimeout(() => {
