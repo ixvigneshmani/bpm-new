@@ -26,6 +26,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { and, desc, eq, lt } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import { aiInteractions } from "../database/schema";
+import { LLM_PROVIDER } from "./ai.module";
+import type { LlmProvider } from "./providers";
 
 /** Default model for scaffolding. Sonnet is the cost/quality pick per
  *  current Anthropic guidance — reserve Opus for tasks that clearly
@@ -185,12 +187,23 @@ export class AiService {
   constructor(
     config: ConfigService,
     @Optional() @Inject(DATABASE) private readonly db: Database | null = null,
+    // Provider-agnostic LLM client used by features that are portable
+    // across vendors (today: analyzeInstance). Tool-use + streaming
+    // flows still use the Anthropic-specific `client` below until we
+    // have a target self-hosted schema to swap in.
+    @Optional() @Inject(LLM_PROVIDER) private readonly llm: LlmProvider | null = null,
   ) {
-    const apiKey = config.get<string>("ANTHROPIC_API_KEY");
-    // Empty key = feature disabled. The controller surfaces a 503 if a
-    // request comes in; swallowing the error at construction lets the
-    // rest of the app boot without Anthropic credentials (tests, local
-    // dev for devs who don't need AI features, etc.).
+    const apiKey = config.get<string>("ANTHROPIC_API_KEY") ?? config.get<string>("LLM_API_KEY");
+    // Empty key = scaffolding/refining disabled. The controller
+    // surfaces a 503 if a request comes in; swallowing the error at
+    // construction lets the rest of the app boot without Anthropic
+    // credentials (tests, local dev for devs who don't need AI).
+    //
+    // Note: the Anthropic client is ALSO used by the legacy scaffold
+    // and refine flows that rely on tool_use + streaming. When we
+    // migrate those to the provider interface, this field can be
+    // dropped. For now both co-exist — the copilot uses `this.llm`,
+    // scaffold/refine use `this.client`.
     this.client = apiKey ? new Anthropic({ apiKey }) : null;
   }
 
@@ -931,6 +944,11 @@ export class AiService {
     userId: string;
     description: string;
     kind?: string;
+    /** Which model actually handled this call. Defaults to the legacy
+     *  Anthropic MODEL constant so scaffold/refine rows still record
+     *  correctly; the copilot passes `this.llm.model` so swapping to
+     *  RunPod later is visible in the audit dashboard. */
+    model?: string;
     status: "success" | "error";
     responseJson?: Record<string, unknown>;
     errorMessage?: string;
@@ -944,7 +962,7 @@ export class AiService {
       userId: row.userId,
       kind: row.kind ?? "scaffold-process",
       description: row.description,
-      model: MODEL,
+      model: row.model ?? MODEL,
       status: row.status,
       responseJson: row.responseJson ?? null,
       errorMessage: row.errorMessage ?? null,
@@ -1340,7 +1358,11 @@ export class AiService {
       canvas: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | null;
     };
   }): Promise<{ analysis: string; tokensIn: number | null; tokensOut: number | null }> {
-    if (!this.client) {
+    // Provider-neutral: resolves to AnthropicProvider when
+    // LLM_PROVIDER=anthropic, OpenAICompatibleProvider when
+    // LLM_PROVIDER=openai-compatible (RunPod vLLM, TGI, Ollama, …).
+    // See api/src/ai/providers/ for the abstraction.
+    if (!this.llm || !this.llm.isReady()) {
       throw new ServiceUnavailableException("AI copilot is not configured on this server.");
     }
     const question = args.question?.trim();
@@ -1472,15 +1494,13 @@ export class AiService {
     ].filter((s) => s !== null).join("\n");
 
     try {
-      const response = await this.client.messages.create({
-        model: MODEL,
-        max_tokens: 1200,
-        system: [{ type: "text" as const, text: systemText, cache_control: { type: "ephemeral" as const } }],
-        messages: [{ role: "user", content: userText }],
+      const response = await this.llm.chat({
+        system: systemText,
+        userMessage: userText,
+        maxTokens: 1200,
       });
 
-      const textBlock = response.content.find((b) => b.type === "text");
-      const analysis = (textBlock && textBlock.type === "text" ? textBlock.text : "").trim();
+      const analysis = response.text;
       if (!analysis) {
         throw new BadGatewayException("AI copilot returned an empty analysis.");
       }
@@ -1489,18 +1509,24 @@ export class AiService {
         tenantId: args.tenantId,
         userId: args.userId,
         kind: "analyze-instance",
+        model: this.llm.model,
         description: `instance-analyze: ${question.slice(0, 200)}`,
         status: "success",
-        responseJson: { analysis, instanceId: args.instance.id },
-        tokensIn: response.usage?.input_tokens ?? null,
-        tokensOut: response.usage?.output_tokens ?? null,
+        responseJson: {
+          analysis,
+          instanceId: args.instance.id,
+          provider: this.llm.id,
+          model: this.llm.model,
+        },
+        tokensIn: response.tokensIn,
+        tokensOut: response.tokensOut,
         durationMs: Date.now() - requestStart,
       });
 
       return {
         analysis,
-        tokensIn: response.usage?.input_tokens ?? null,
-        tokensOut: response.usage?.output_tokens ?? null,
+        tokensIn: response.tokensIn,
+        tokensOut: response.tokensOut,
       };
     } catch (err) {
       // BUG-E-01 fix: route raw Anthropic SDK errors through
@@ -1518,6 +1544,7 @@ export class AiService {
         tenantId: args.tenantId,
         userId: args.userId,
         kind: "analyze-instance",
+        model: this.llm?.model,
         description: `instance-analyze: ${question.slice(0, 200)}`,
         status: "error",
         errorMessage: this.formatErrorMessage(mapped),

@@ -4,18 +4,30 @@
  * Backed by POST /instances/:id/replay.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useActingForSnapshot } from "../../lib/acting-for";
 
 export default function ReplayStepDialog(props: {
   targetNodeId: string;
   onClose: () => void;
-  onSubmit: (reason: string, variablesPatch: Record<string, unknown> | undefined) => Promise<void>;
+  onSubmit: (
+    reason: string,
+    variablesPatch: Record<string, unknown> | undefined,
+    idempotencyKey: string,
+    actingForSnapshot: string | null,
+  ) => Promise<void>;
 }) {
   const { targetNodeId, onClose, onSubmit } = props;
   const [reason, setReason] = useState("");
   const [patchJson, setPatchJson] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const actingForSnapshot = useActingForSnapshot();
+  const idemKey = useRef<string>(
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : String(Date.now()) + "-" + Math.random().toString(36).slice(2),
+  );
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -42,7 +54,7 @@ export default function ReplayStepDialog(props: {
     if (!ok) return;
     setSubmitting(true);
     try {
-      await onSubmit(reason.trim(), patch);
+      await onSubmit(reason.trim(), patch, idemKey.current, actingForSnapshot);
     } catch (ex) {
       setError((ex as Error).message);
     } finally {

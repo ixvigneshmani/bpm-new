@@ -5,18 +5,33 @@
  * after the fact. Backed by POST /instances/:id/variables.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useActingForSnapshot } from "../../lib/acting-for";
 
 export default function EditVariablesDialog(props: {
   currentVariables: Record<string, unknown>;
   onClose: () => void;
-  onSubmit: (patch: Record<string, unknown>, reason: string) => Promise<void>;
+  onSubmit: (
+    patch: Record<string, unknown>,
+    reason: string,
+    idempotencyKey: string,
+    actingForSnapshot: string | null,
+  ) => Promise<void>;
 }) {
   const { currentVariables, onClose, onSubmit } = props;
   const [patchJson, setPatchJson] = useState("{}");
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Freeze impersonation + idempotency key at open-time. A mid-edit
+  // switch of Act-as target no longer silently re-attributes; a
+  // network retry replays the same key and the backend de-dupes.
+  const actingForSnapshot = useActingForSnapshot();
+  const idemKey = useRef<string>(
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : String(Date.now()) + "-" + Math.random().toString(36).slice(2),
+  );
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,7 +71,7 @@ export default function EditVariablesDialog(props: {
     }
     setSubmitting(true);
     try {
-      await onSubmit(patch, reason.trim());
+      await onSubmit(patch, reason.trim(), idemKey.current, actingForSnapshot);
     } catch (ex) {
       setError((ex as Error).message);
     } finally {

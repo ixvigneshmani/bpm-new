@@ -9,7 +9,7 @@
  * {userId, email, displayName, roles} — the resolved target profile.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
 type ActingTarget = {
   userId: string;
@@ -64,6 +64,22 @@ export function useActingFor() {
   const ctx = useContext(ActingForContext);
   if (!ctx) throw new Error("useActingFor must be inside ActingForProvider");
   return ctx;
+}
+
+/** Capture the CURRENT impersonation target at mount-time and hold it
+ *  fixed for the lifetime of the component. Dialogs that submit
+ *  state-changing requests should call this so a switch in another
+ *  tab / via the banner doesn't silently re-attribute the in-flight
+ *  submission (reviewer-flagged bug from Feature D).
+ *
+ *  Returns the target `userId` or `null` — pass to `apiPost(..., {
+ *  actingForOverride: snapshot })` and the value stays frozen. */
+export function useActingForSnapshot(): string | null {
+  const { target } = useActingFor();
+  const snapshot = useRef<string | null>(target?.userId ?? null);
+  // Only set on the very first render — subsequent target changes in
+  // the context do NOT update the ref.
+  return snapshot.current;
 }
 
 export function ActingForBanner() {

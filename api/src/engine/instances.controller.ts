@@ -113,22 +113,40 @@ export class InstancesController {
   /** POST /instances/:id/variables
    *  Admin-only. Shallow-merge `patch` into the instance's variable
    *  bag and emit one `variable-edited` audit row per key with
-   *  old/new values + the mandatory reason. */
+   *  old/new values + the mandatory reason.
+   *  Replay safety: pass `Idempotency-Key` header so a network retry
+   *  doesn't apply the patch twice (and duplicate the audit rows). */
   @Post(":id/variables")
   async editVariables(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: EditVariablesDto,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     assertAdmin(req);
     const effective = await resolveActingFor(req, this.users);
-    return this.engine.editInstanceVariables({
-      instanceId: id,
+    return this.idempotency.wrap({
       tenantId: req.user.tenantId,
-      userId: effective.userId,
-      actingBy: effective.actingBy,
-      patch: dto.patch,
-      reason: dto.reason,
+      endpoint: "edit-variables",
+      key: idempotencyKey,
+      // Include actingBy + reason + patch in the body hash so replaying
+      // the same key with a different patch is treated as a conflict
+      // (not a silent cache hit).
+      requestBody: {
+        instanceId: id,
+        patch: dto.patch,
+        reason: dto.reason,
+        actingBy: effective.actingBy,
+      },
+      handler: () =>
+        this.engine.editInstanceVariables({
+          instanceId: id,
+          tenantId: req.user.tenantId,
+          userId: effective.userId,
+          actingBy: effective.actingBy,
+          patch: dto.patch,
+          reason: dto.reason,
+        }),
     });
   }
 
@@ -137,15 +155,27 @@ export class InstancesController {
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: SuspendInstanceDto,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     assertAdmin(req);
     const effective = await resolveActingFor(req, this.users);
-    return this.engine.suspendInstance({
-      instanceId: id,
+    return this.idempotency.wrap({
       tenantId: req.user.tenantId,
-      userId: effective.userId,
-      actingBy: effective.actingBy,
-      reason: dto.reason,
+      endpoint: "suspend-instance",
+      key: idempotencyKey,
+      requestBody: {
+        instanceId: id,
+        reason: dto.reason ?? null,
+        actingBy: effective.actingBy,
+      },
+      handler: () =>
+        this.engine.suspendInstance({
+          instanceId: id,
+          tenantId: req.user.tenantId,
+          userId: effective.userId,
+          actingBy: effective.actingBy,
+          reason: dto.reason,
+        }),
     });
   }
 
@@ -153,14 +183,22 @@ export class InstancesController {
   async resumeInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     assertAdmin(req);
     const effective = await resolveActingFor(req, this.users);
-    return this.engine.resumeInstance({
-      instanceId: id,
+    return this.idempotency.wrap({
       tenantId: req.user.tenantId,
-      userId: effective.userId,
-      actingBy: effective.actingBy,
+      endpoint: "resume-instance",
+      key: idempotencyKey,
+      requestBody: { instanceId: id, actingBy: effective.actingBy },
+      handler: () =>
+        this.engine.resumeInstance({
+          instanceId: id,
+          tenantId: req.user.tenantId,
+          userId: effective.userId,
+          actingBy: effective.actingBy,
+        }),
     });
   }
 
@@ -169,17 +207,31 @@ export class InstancesController {
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body() dto: ReplayInstanceDto,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     assertAdmin(req);
     const effective = await resolveActingFor(req, this.users);
-    return this.engine.replayFromStep({
-      instanceId: id,
+    return this.idempotency.wrap({
       tenantId: req.user.tenantId,
-      userId: effective.userId,
-      actingBy: effective.actingBy,
-      targetNodeId: dto.targetNodeId,
-      reason: dto.reason,
-      variablesPatch: dto.variablesPatch,
+      endpoint: "replay-instance",
+      key: idempotencyKey,
+      requestBody: {
+        instanceId: id,
+        targetNodeId: dto.targetNodeId,
+        reason: dto.reason,
+        variablesPatch: dto.variablesPatch ?? null,
+        actingBy: effective.actingBy,
+      },
+      handler: () =>
+        this.engine.replayFromStep({
+          instanceId: id,
+          tenantId: req.user.tenantId,
+          userId: effective.userId,
+          actingBy: effective.actingBy,
+          targetNodeId: dto.targetNodeId,
+          reason: dto.reason,
+          variablesPatch: dto.variablesPatch,
+        }),
     });
   }
 }

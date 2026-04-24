@@ -19,6 +19,16 @@ import EditVariablesDialog from "./console/EditVariablesDialog";
 import ReplayStepDialog from "./console/ReplayStepDialog";
 import AiCopilotDialog from "./console/AiCopilotDialog";
 import { useAuth } from "../lib/auth";
+import { useActingForSnapshot } from "../lib/acting-for";
+
+/** Tiny helper — crypto.randomUUID with a non-UUID fallback for
+ *  browsers missing the WebCrypto method (test runners, ancient
+ *  Safari). Used to generate an Idempotency-Key per action. */
+function newIdemKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+}
 
 type InstanceDetail = {
   id: string;
@@ -83,6 +93,11 @@ export default function InstanceDetailPage() {
   const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit" | "replay">(null);
   const { user } = useAuth();
   const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
+  // Impersonation is snapshotted ONCE per page-load so headline
+  // inline actions (Cancel, Suspend, Resume) attribute to the target
+  // that was active when the operator opened the page, not whatever
+  // target happens to be set at click-time.
+  const pageActingFor = useActingForSnapshot();
 
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -153,7 +168,14 @@ export default function InstanceDetailPage() {
     if (!detail || !window.confirm(`Cancel this instance? This cannot be undone.`)) return;
     setCancelling(true);
     try {
-      await apiPost(`/instances/${detail.id}/cancel`, { reason: "Cancelled from UI" });
+      await apiPost(
+        `/instances/${detail.id}/cancel`,
+        { reason: "Cancelled from UI" },
+        {
+          headers: { "Idempotency-Key": newIdemKey() },
+          actingForOverride: pageActingFor,
+        },
+      );
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -167,7 +189,14 @@ export default function InstanceDetailPage() {
     const reason = window.prompt("Reason for suspending? (optional)") ?? "";
     setBusyAction("suspend");
     try {
-      await apiPost(`/instances/${detail.id}/suspend`, reason.trim() ? { reason: reason.trim() } : {});
+      await apiPost(
+        `/instances/${detail.id}/suspend`,
+        reason.trim() ? { reason: reason.trim() } : {},
+        {
+          headers: { "Idempotency-Key": newIdemKey() },
+          actingForOverride: pageActingFor,
+        },
+      );
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -180,7 +209,14 @@ export default function InstanceDetailPage() {
     if (!detail) return;
     setBusyAction("resume");
     try {
-      await apiPost(`/instances/${detail.id}/resume`, {});
+      await apiPost(
+        `/instances/${detail.id}/resume`,
+        {},
+        {
+          headers: { "Idempotency-Key": newIdemKey() },
+          actingForOverride: pageActingFor,
+        },
+      );
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -189,11 +225,23 @@ export default function InstanceDetailPage() {
     }
   };
 
-  const onEditSubmit = async (patch: Record<string, unknown>, reason: string) => {
+  const onEditSubmit = async (
+    patch: Record<string, unknown>,
+    reason: string,
+    idemKey: string,
+    actingForSnapshot: string | null,
+  ) => {
     if (!detail) return;
     setBusyAction("edit");
     try {
-      await apiPost(`/instances/${detail.id}/variables`, { patch, reason });
+      await apiPost(
+        `/instances/${detail.id}/variables`,
+        { patch, reason },
+        {
+          headers: { "Idempotency-Key": idemKey },
+          actingForOverride: actingForSnapshot,
+        },
+      );
       setEditOpen(false);
       await refresh();
     } catch (e) {
@@ -204,15 +252,27 @@ export default function InstanceDetailPage() {
     }
   };
 
-  const onReplaySubmit = async (reason: string, variablesPatch: Record<string, unknown> | undefined) => {
+  const onReplaySubmit = async (
+    reason: string,
+    variablesPatch: Record<string, unknown> | undefined,
+    idemKey: string,
+    actingForSnapshot: string | null,
+  ) => {
     if (!detail || !selectedNodeId) return;
     setBusyAction("replay");
     try {
-      await apiPost(`/instances/${detail.id}/replay`, {
-        targetNodeId: selectedNodeId,
-        reason,
-        ...(variablesPatch ? { variablesPatch } : {}),
-      });
+      await apiPost(
+        `/instances/${detail.id}/replay`,
+        {
+          targetNodeId: selectedNodeId,
+          reason,
+          ...(variablesPatch ? { variablesPatch } : {}),
+        },
+        {
+          headers: { "Idempotency-Key": idemKey },
+          actingForOverride: actingForSnapshot,
+        },
+      );
       setReplayOpen(false);
       setSelectedNodeId(null);
       await refresh();
