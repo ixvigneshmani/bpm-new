@@ -815,13 +815,13 @@ function buildActivityFeed(args: {
       });
       pendingEntries.set(ev.nodeId, list);
     } else if (ev.eventType === "instance-started") {
-      const start = canvasNodes.find((n) => n.type === "startEvent");
-      const lbl = start ? `Process started — ${labelOf(start.id)}` : "Process started";
-      rows.push({ kind: "instance", key: ev.id, label: lbl, tone: "neutral", at: new Date(ev.createdAt).getTime(), userId: ev.userId ?? startedBy });
+      // Plain "Process started". The diagram already shows which
+      // start event fired; appending the node label here would
+      // overpromise context we may not have when external systems
+      // kick off the instance without a known user record.
+      rows.push({ kind: "instance", key: ev.id, label: "Process started", tone: "neutral", at: new Date(ev.createdAt).getTime(), userId: ev.userId ?? startedBy });
     } else if (ev.eventType === "instance-completed") {
-      const end = canvasNodes.find((n) => n.type === "endEvent");
-      const lbl = end ? `Process completed — ${labelOf(end.id)}` : "Process completed";
-      rows.push({ kind: "instance", key: ev.id, label: lbl, tone: "success", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+      rows.push({ kind: "instance", key: ev.id, label: "Process completed", tone: "success", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
     } else if (ev.eventType === "instance-failed") {
       rows.push({ kind: "instance", key: ev.id, label: "Process failed", tone: "danger", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
     } else if (ev.eventType === "instance-cancelled") {
@@ -984,7 +984,7 @@ function renderRowSubtitle(row: ActivityRow): React.ReactNode {
     return parts.join(" · ");
   }
   if (row.kind === "admin" || row.kind === "instance") {
-    return row.userId ? `By ${row.userId.slice(0, 8)}…` : "System";
+    return row.userId ? `By ${row.userId.slice(0, 8)}…` : "By external system";
   }
   return null;
 }
