@@ -27,12 +27,15 @@ function newIdemKey(): string {
 type InstanceDetail = {
   id: string;
   processId: string;
+  processName: string | null;
+  processVersion: number | null;
   processVersionId: string | null;
   definitionHash: string;
   businessKey: string | null;
   status: "running" | "completed" | "failed" | "cancelled" | "suspended";
   variables: Record<string, unknown>;
   startedBy: string;
+  startedByName: string | null;
   startedAt: string;
   completedAt: string | null;
   errorMessage: string | null;
@@ -282,12 +285,20 @@ export default function InstanceDetailPage() {
           Back to instances
         </button>
 
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <h1 style={{ fontSize: 18, fontWeight: 700, color: "#101828", letterSpacing: "-0.02em", margin: 0 }}>
-                Instance
+              <h1 style={{ fontSize: 22, fontWeight: 700, color: "#101828", letterSpacing: "-0.02em", margin: 0 }}>
+                {detail.processName ?? "Instance"}
               </h1>
+              {detail.processVersion !== null && (
+                <span style={{
+                  fontSize: 12, fontWeight: 600, color: "#475467",
+                  background: "#F2F4F7", padding: "2px 8px", borderRadius: 4,
+                }} title="Process definition version">
+                  v{detail.processVersion}
+                </span>
+              )}
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 5,
                 padding: "3px 10px", borderRadius: 6,
@@ -296,12 +307,13 @@ export default function InstanceDetailPage() {
                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot }} />
                 {st.label}
               </span>
-              <CopyableId id={detail.id} />
             </div>
-            <div style={{ fontSize: 12, color: "#667085", marginTop: 6, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span>Started {new Date(detail.startedAt).toLocaleString()}</span>
+            <div style={{ fontSize: 13, color: "#475467", marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span>Started by <strong style={{ color: "#101828", fontWeight: 600 }}>{detail.startedByName ?? "External system"}</strong></span>
               <Dot />
-              <span>Duration {formatDuration(detail.startedAt, detail.completedAt)}</span>
+              <span>{new Date(detail.startedAt).toLocaleString()}</span>
+              <Dot />
+              <span>Running {formatDuration(detail.startedAt, detail.completedAt)}</span>
               {isRunning && (
                 <>
                   <Dot />
@@ -346,16 +358,36 @@ export default function InstanceDetailPage() {
         </div>
       )}
 
-      <MetricsStrip
-        items={[
-          { label: "Process", value: `${detail.processId.slice(0, 8)}…`, mono: true },
-          { label: "Version", value: `v${detail.version}` },
-          { label: "Started by", value: `${detail.startedBy.slice(0, 8)}…`, mono: true },
-          { label: "Active steps", value: String(activeTokens), emphasize: activeTokens > 0 },
-          { label: "Incidents", value: String(incidentCount), danger: incidentCount > 0 },
-          { label: "Business key", value: detail.businessKey ?? "—", muted: !detail.businessKey },
-        ]}
-      />
+      {/* Quick stats: just two pill chips + business key + instance ID.
+       * Replaces the cramped 6-column metrics strip with breathable
+       * pills that map to the operator's first scan questions:
+       * "is anything stuck?" / "anything failing?" / "which work item
+       * is this?" — without UUID noise. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <StatPill
+          icon="●"
+          tone={activeTokens > 0 ? "info" : "neutral"}
+          label={`${activeTokens} active step${activeTokens === 1 ? "" : "s"}`}
+          tooltip="Steps currently in flight (waiting on a person, running a service, or sitting at a timer)."
+        />
+        <StatPill
+          icon={incidentCount > 0 ? "⚠" : "✓"}
+          tone={incidentCount > 0 ? "danger" : "success"}
+          label={`${incidentCount} incident${incidentCount === 1 ? "" : "s"}`}
+          tooltip="Errors that need human attention — failed service tasks, stuck timers, unhandled exceptions."
+        />
+        <div style={{ flex: 1 }} />
+        {detail.businessKey && (
+          <span
+            title="A human-readable identifier your app supplies — used to find this work item without dealing with UUIDs."
+            style={{ fontSize: 12, color: "#667085" }}
+          >
+            <span style={{ color: "#98A2B3" }}>Business key </span>
+            <strong style={{ color: "#344054", fontWeight: 600 }}>{detail.businessKey}</strong>
+          </span>
+        )}
+        <CopyableId id={detail.id} />
+      </div>
 
       <div style={{ background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12, overflow: "hidden" }}>
         {canvas && (canvas.nodes?.length ?? 0) > 0 ? (
@@ -661,33 +693,27 @@ function TokenBadge({ status }: { status: "active" | "waiting" | "completed" | "
   );
 }
 
-/* ─── Metrics strip ──────────────────────────────────────────────── */
+/* ─── Stat pill ──────────────────────────────────────────────────── */
 
-function MetricsStrip({ items }: { items: Array<{ label: string; value: string; mono?: boolean; emphasize?: boolean; danger?: boolean; muted?: boolean }> }) {
+function StatPill({ icon, label, tone, tooltip }: { icon: string; label: string; tone: "neutral" | "info" | "success" | "danger" | "warning"; tooltip?: string }) {
+  const palette: Record<typeof tone, { bg: string; text: string; icon: string }> = {
+    neutral: { bg: "#F9FAFB", text: "#475467", icon: "#98A2B3" },
+    info:    { bg: "#EEF2FF", text: "#3730A3", icon: "#6366F1" },
+    success: { bg: "#F0FDF4", text: "#166534", icon: "#22C55E" },
+    danger:  { bg: "#FEF2F2", text: "#B42318", icon: "#EF4444" },
+    warning: { bg: "#FFFBEB", text: "#92400E", icon: "#F59E0B" },
+  };
+  const c = palette[tone];
   return (
-    <div style={{
-      display: "flex", gap: 0, background: "#fff", border: "1px solid #E5E7EB",
-      borderRadius: 12, overflowX: "auto",
+    <span title={tooltip} style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      padding: "5px 12px", borderRadius: 999,
+      background: c.bg, color: c.text,
+      fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
     }}>
-      {items.map((m, i) => (
-        <div key={m.label} style={{
-          padding: "8px 14px", minWidth: 0,
-          borderLeft: i === 0 ? "none" : "1px solid #F2F4F7",
-        }}>
-          <div style={{ fontSize: 10, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            {m.label}
-          </div>
-          <div style={{
-            fontSize: 13, fontWeight: 600, marginTop: 2,
-            color: m.danger ? "#B42318" : m.emphasize ? "#4338CA" : m.muted ? "#98A2B3" : "#101828",
-            fontFamily: m.mono ? "var(--font-mono, monospace)" : "inherit",
-            whiteSpace: "nowrap",
-          }}>
-            {m.value}
-          </div>
-        </div>
-      ))}
-    </div>
+      <span style={{ color: c.icon, fontSize: 11 }}>{icon}</span>
+      {label}
+    </span>
   );
 }
 
@@ -968,7 +994,8 @@ function renderRowTitle(row: ActivityRow, onOpenNode: (id: string) => void): Rea
       </>
     );
   }
-  return row.label;
+  if (row.kind === "instance" || row.kind === "admin") return row.label;
+  return null;
 }
 
 function renderRowSubtitle(row: ActivityRow): React.ReactNode {

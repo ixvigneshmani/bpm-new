@@ -18,6 +18,7 @@ import {
   ReactFlow,
   Background,
   BackgroundVariant,
+  MarkerType,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -144,6 +145,10 @@ export default function InstanceCanvas(props: {
   const rfEdges: Edge[] = useMemo(() => {
     return (canvas.edges ?? []).map((e) => {
       const traversed = traversedEdgeSet.has(e.id);
+      // Sequence-flow arrowhead — the designer applies one via
+      // defaultEdgeOptions; we recreate it here so the read-only
+      // instance view doesn't lose the directional cue at the target.
+      const isAssociation = (e.type ?? "") === "associationEdge";
       return {
         id: e.id,
         source: e.source,
@@ -153,6 +158,12 @@ export default function InstanceCanvas(props: {
         sourceHandle: e.sourceHandle,
         targetHandle: e.targetHandle,
         className: traversed ? "inst-edge-traversed" : "inst-edge-unvisited",
+        markerEnd: isAssociation ? undefined : {
+          type: MarkerType.ArrowClosed,
+          width: 18,
+          height: 18,
+          color: traversed ? "#4F46E5" : "#CBD5E1",
+        },
       };
     });
   }, [canvas.edges, traversedEdgeSet]);

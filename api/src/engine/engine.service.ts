@@ -41,6 +41,7 @@ import {
   processInstances,
   processVersions,
   processes,
+  users,
 } from "../database/schema";
 import { inArray } from "drizzle-orm";
 import { SERVICE_TASK_TOPIC } from "./service-task-registry";
@@ -1755,12 +1756,15 @@ export class EngineService {
   }): Promise<{
     id: string;
     processId: string;
+    processName: string | null;
+    processVersion: number | null;
     processVersionId: string | null;
     definitionHash: string;
     businessKey: string | null;
     status: "running" | "completed" | "failed" | "cancelled" | "suspended";
     variables: Record<string, unknown>;
     startedBy: string;
+    startedByName: string | null;
     startedAt: string;
     completedAt: string | null;
     errorMessage: string | null;
@@ -1802,20 +1806,45 @@ export class EngineService {
     const inst = instRows[0];
     if (!inst) throw new NotFoundException("Instance not found.");
 
-    // Resolve the versioned canvas (or fall back to legacy snapshot).
-    // Kept defensive: if neither exists we return null rather than
-    // throwing, so the detail page still renders the tabular data.
+    // Resolve the versioned canvas (or fall back to legacy snapshot)
+    // AND the human-readable process version number in one go. Kept
+    // defensive: if the version row is missing we still return null
+    // rather than throwing, so the detail page renders.
     let canvasData: unknown = null;
+    let processVersion: number | null = null;
     if (inst.processVersionId) {
       const vrows = await this.db
-        .select({ canvasData: processVersions.canvasData })
+        .select({ canvasData: processVersions.canvasData, version: processVersions.version })
         .from(processVersions)
         .where(eq(processVersions.id, inst.processVersionId))
         .limit(1);
       canvasData = vrows[0]?.canvasData ?? null;
+      processVersion = vrows[0]?.version ?? null;
     }
     if (!canvasData && inst.definitionSnapshot) {
       canvasData = inst.definitionSnapshot;
+    }
+
+    // Process name and started-by display name — operator UI needs
+    // these instead of UUIDs. One small select each; both are tiny
+    // single-row lookups against indexed PKs.
+    let processName: string | null = null;
+    {
+      const prows = await this.db
+        .select({ name: processes.name })
+        .from(processes)
+        .where(eq(processes.id, inst.processId))
+        .limit(1);
+      processName = prows[0]?.name ?? null;
+    }
+    let startedByName: string | null = null;
+    if (inst.startedBy) {
+      const urows = await this.db
+        .select({ displayName: users.displayName })
+        .from(users)
+        .where(eq(users.id, inst.startedBy))
+        .limit(1);
+      startedByName = urows[0]?.displayName ?? null;
     }
 
     const tokens = await this.db
@@ -1851,12 +1880,15 @@ export class EngineService {
     return {
       id: inst.id,
       processId: inst.processId,
+      processName,
+      processVersion,
       processVersionId: inst.processVersionId,
       definitionHash: inst.definitionHash,
       businessKey: inst.businessKey,
       status: inst.status,
       variables: (inst.variables as Record<string, unknown>) ?? {},
       startedBy: inst.startedBy,
+      startedByName,
       startedAt: inst.startedAt.toISOString(),
       completedAt: inst.completedAt ? inst.completedAt.toISOString() : null,
       errorMessage: inst.errorMessage,
