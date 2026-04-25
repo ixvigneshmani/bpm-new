@@ -41,6 +41,8 @@ import {
   processInstances,
   processVersions,
   processes,
+  roles,
+  userRoles,
   users,
 } from "../database/schema";
 import { inArray } from "drizzle-orm";
@@ -1502,6 +1504,280 @@ export class EngineService {
       });
       return { unclaimed: true };
     });
+  }
+
+  /** Admin-only: reassign a waiting userTask to a different user.
+   *  Validates the target is in-tenant and active, and (if the token
+   *  carries a candidateRole) that the target holds that role —
+   *  reassigning to someone who can't perform the task would just
+   *  strand it. Records both the previous and new assignee on the
+   *  audit event so the trail shows who-from-whom-to-whom. */
+  async reassignTask(args: {
+    tokenId: string;
+    tenantId: string;
+    userId: string;          // admin performing the reassign
+    targetUserId: string;
+    actingBy?: string | null;
+  }): Promise<{ reassigned: boolean; from: string | null; to: string }> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({
+          id: instanceTokens.id,
+          status: instanceTokens.status,
+          waitingFor: instanceTokens.waitingFor,
+          assignedTo: instanceTokens.assignedTo,
+          candidateRole: instanceTokens.candidateRole,
+          currentNodeId: instanceTokens.currentNodeId,
+          instanceId: instanceTokens.instanceId,
+          version: instanceTokens.version,
+        })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.id, args.tokenId),
+            eq(instanceTokens.tenantId, args.tenantId),
+          ),
+        )
+        .limit(1);
+      if (!row) throw new NotFoundException("Task not found.");
+      if (row.status !== "waiting" || row.waitingFor !== "userTask") {
+        throw new BadRequestException(
+          `Task is not waiting on a user action (status=${row.status}).`,
+        );
+      }
+
+      const [target] = await tx
+        .select({
+          id: users.id,
+          tenantId: users.tenantId,
+          isActive: users.isActive,
+        })
+        .from(users)
+        .where(eq(users.id, args.targetUserId))
+        .limit(1);
+      if (!target || target.tenantId !== args.tenantId) {
+        throw new NotFoundException("Target user not found.");
+      }
+      if (!target.isActive) {
+        throw new BadRequestException("Target user is inactive.");
+      }
+      if (row.candidateRole) {
+        // Tenant-scoped role membership lookup. The userRoles row is
+        // created at role-grant time and removed on revoke, so an
+        // in-list check here is authoritative.
+        const targetRoles = await this.userRoleKeysForTenant(
+          tx,
+          args.targetUserId,
+          args.tenantId,
+        );
+        if (!targetRoles.includes(row.candidateRole)) {
+          throw new BadRequestException(
+            `Target user does not hold role "${row.candidateRole}".`,
+          );
+        }
+      }
+
+      if (row.assignedTo === args.targetUserId) {
+        return { reassigned: false, from: row.assignedTo, to: args.targetUserId };
+      }
+
+      await this.updateTokenWithLock(tx, args.tokenId, row.version, {
+        assignedTo: args.targetUserId,
+      });
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: row.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        nodeId: row.currentNodeId,
+        eventType: "task-reassigned",
+        payload: {
+          from: row.assignedTo,
+          to: args.targetUserId,
+          candidateRole: row.candidateRole ?? null,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
+      });
+      return { reassigned: true, from: row.assignedTo, to: args.targetUserId };
+    });
+  }
+
+  /** Admin-only: advance a waiting userTask past its current node
+   *  WITHOUT requiring a claim, an assignee match, or form data.
+   *  Use case: an admin needs to unblock an instance whose task is
+   *  parked on a user who is unavailable, and the proper path
+   *  (reassign + complete) isn't appropriate. The audit event is
+   *  "task-skipped" so the trail clearly distinguishes this from a
+   *  normal completion. */
+  async skipTask(args: {
+    tokenId: string;
+    tenantId: string;
+    userId: string;          // admin performing the skip
+    actingBy?: string | null;
+    reason?: string | null;
+  }): Promise<{
+    instanceId: string;
+    instanceStatus: "running" | "completed" | "failed";
+    tokenStatus: "completed" | "waiting" | "failed";
+  }> {
+    return this.db.transaction(async (tx) => {
+      const [tokenRow] = await tx
+        .select({
+          id: instanceTokens.id,
+          tenantId: instanceTokens.tenantId,
+          instanceId: instanceTokens.instanceId,
+          currentNodeId: instanceTokens.currentNodeId,
+          status: instanceTokens.status,
+          waitingFor: instanceTokens.waitingFor,
+          assignedTo: instanceTokens.assignedTo,
+          version: instanceTokens.version,
+        })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.id, args.tokenId),
+            eq(instanceTokens.tenantId, args.tenantId),
+          ),
+        )
+        .limit(1);
+      if (!tokenRow) throw new NotFoundException("Task not found.");
+      if (tokenRow.status !== "waiting" || tokenRow.waitingFor !== "userTask") {
+        throw new BadRequestException(
+          `Task is not waiting on a user action (status=${tokenRow.status}).`,
+        );
+      }
+      const instRow = await this.loadInstanceById(
+        tx,
+        tokenRow.instanceId,
+        args.tenantId,
+      );
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
+
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "task-skipped",
+        payload: {
+          previousAssignee: tokenRow.assignedTo,
+          reason: args.reason ?? null,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
+      });
+      await this.emitOutbox(tx, {
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        eventType: "task-skipped",
+        payload: {
+          tokenId: args.tokenId,
+          nodeId: tokenRow.currentNodeId,
+          skippedBy: args.userId,
+          ...(args.actingBy ? { actingBy: args.actingBy } : {}),
+        },
+      });
+
+      const tokenVersion = await this.updateTokenWithLock(
+        tx,
+        args.tokenId,
+        tokenRow.version,
+        {
+          status: "active",
+          waitingFor: null,
+        },
+      );
+      await tx.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "token-resumed",
+      });
+
+      const advance = await this.advanceToken({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        tokenVersion,
+        currentNodeId: tokenRow.currentNodeId,
+        canvas,
+        variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+        resumeFromWait: true,
+      });
+
+      let instanceStatus: "running" | "completed" | "failed" = "running";
+      if (advance.tokenStatus === "completed") {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instRow.version,
+          { status: "completed", completedAt: new Date() },
+        );
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-completed",
+          payload: { hops: advance.hops },
+        });
+        instanceStatus = "completed";
+      } else if (advance.tokenStatus === "failed") {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instRow.version,
+          {
+            status: "failed",
+            errorMessage: advance.errorMessage ?? null,
+            completedAt: new Date(),
+          },
+        );
+        await tx.insert(instanceEvents).values({
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-failed",
+          payload: { hops: advance.hops, message: advance.errorMessage },
+        });
+        instanceStatus = "failed";
+      }
+
+      this.logger.log({
+        event: "engine.task.skipped",
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: args.tokenId,
+        userId: args.userId,
+        instanceStatus,
+        tokenStatus: advance.tokenStatus,
+      });
+
+      return {
+        instanceId: tokenRow.instanceId,
+        instanceStatus,
+        tokenStatus: advance.tokenStatus,
+      };
+    });
+  }
+
+  /** Tenant-scoped role-key lookup used by reassignTask. Mirrors the
+   *  query in UsersService.getRoleKeys but lives on the engine txn so
+   *  the membership check sits inside the same transaction as the
+   *  token update — no read/write race against a concurrent revoke. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async userRoleKeysForTenant(tx: any, userId: string, tenantId: string): Promise<string[]> {
+    const rows = await tx
+      .select({ key: roles.key })
+      .from(userRoles)
+      .innerJoin(roles, eq(userRoles.roleId, roles.id))
+      .where(
+        and(
+          eq(userRoles.userId, userId),
+          eq(userRoles.tenantId, tenantId),
+        ),
+      );
+    return rows.map((r: { key: string }) => r.key);
   }
 
   /** Load + validate a token for the completeTask flow. Centralised so

@@ -779,6 +779,8 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "task-claimed",
   "task-unclaimed",
   "task-completed",
+  "task-reassigned",
+  "task-skipped",
   "variable-set",
   "variable-edited",
   "variable-unresolved",

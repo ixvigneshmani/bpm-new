@@ -238,6 +238,54 @@ export default function InstanceDetailPage() {
     finally { setBusyAction(null); }
   };
 
+  /* Task lifecycle actions — operate on the token sitting at a
+   * waiting userTask. The token id IS the task id in our engine.
+   * Complete and Reassign open a small modal; Claim/Release/Skip
+   * are direct calls (with confirms where needed). */
+  const [completeForToken, setCompleteForToken] = useState<string | null>(null);
+  const [reassignForToken, setReassignForToken] = useState<string | null>(null);
+
+  const onClaimTask = async (tokenId: string) => {
+    try {
+      await apiPost(`/tasks/${tokenId}/claim`, {}, { actingForOverride: pageActingFor });
+      await refresh();
+    } catch (e) { setError((e as Error).message); }
+  };
+  const onReleaseTask = async (tokenId: string) => {
+    try {
+      await apiPost(`/tasks/${tokenId}/unclaim`, {}, { actingForOverride: pageActingFor });
+      await refresh();
+    } catch (e) { setError((e as Error).message); }
+  };
+  const onOpenComplete = (tokenId: string) => setCompleteForToken(tokenId);
+  const onSubmitComplete = async (tokenId: string, formData: Record<string, unknown>) => {
+    await apiPost(`/tasks/${tokenId}/complete`, { formData }, {
+      headers: { "Idempotency-Key": newIdemKey() },
+      actingForOverride: pageActingFor,
+    });
+    setCompleteForToken(null);
+    await refresh();
+  };
+  const onOpenReassign = (tokenId: string) => setReassignForToken(tokenId);
+  const onSubmitReassign = async (tokenId: string, targetUserId: string) => {
+    await apiPost(`/tasks/${tokenId}/reassign`, { userId: targetUserId }, {
+      actingForOverride: pageActingFor,
+    });
+    setReassignForToken(null);
+    await refresh();
+  };
+  const onSkipTask = async (tokenId: string) => {
+    const reason = window.prompt("Reason for skipping this task? (optional, but recommended for the audit trail)");
+    if (reason === null) return; // user cancelled
+    try {
+      await apiPost(`/tasks/${tokenId}/skip`, reason.trim() ? { reason: reason.trim() } : {}, {
+        headers: { "Idempotency-Key": newIdemKey() },
+        actingForOverride: pageActingFor,
+      });
+      await refresh();
+    } catch (e) { setError((e as Error).message); }
+  };
+
   const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
 
   const selectedNode: CanvasNode | null = useMemo(() => {
@@ -445,6 +493,13 @@ export default function InstanceDetailPage() {
           tokens={selectedNodeTokens}
           events={detail.recentEvents.filter((e) => e.nodeId === selectedNodeId)}
           currentVariables={detail.variables}
+          currentUser={user}
+          isAdmin={isAdmin}
+          onClaimTask={onClaimTask}
+          onReleaseTask={onReleaseTask}
+          onCompleteTask={onOpenComplete}
+          onReassignTask={onOpenReassign}
+          onSkipTask={onSkipTask}
           canAdmin={canAdmin}
           pinned={pinned}
           onTogglePin={() => setPinned((v) => !v)}
@@ -475,6 +530,22 @@ export default function InstanceDetailPage() {
           onClose={() => setAiOpen(false)}
         />
       )}
+      {completeForToken && (
+        <CompleteTaskDialog
+          tokenId={completeForToken}
+          onClose={() => setCompleteForToken(null)}
+          onSubmit={onSubmitComplete}
+        />
+      )}
+      {reassignForToken && (
+        <ReassignTaskDialog
+          tokenId={reassignForToken}
+          candidateRole={detail.tokens.find((t) => t.id === reassignForToken)?.candidateRole ?? null}
+          currentAssignee={detail.tokens.find((t) => t.id === reassignForToken)?.assignedTo ?? null}
+          onClose={() => setReassignForToken(null)}
+          onSubmit={onSubmitReassign}
+        />
+      )}
     </div>
   );
 }
@@ -487,6 +558,8 @@ function NodeDrawer(props: {
   tokens: InstanceDetail["tokens"];
   events: InstanceDetail["recentEvents"];
   currentVariables: Record<string, unknown>;
+  currentUser: { id: string; roles: string[]; systemRole: string } | null;
+  isAdmin: boolean;
   canAdmin: boolean;
   pinned: boolean;
   onTogglePin: () => void;
@@ -494,11 +567,37 @@ function NodeDrawer(props: {
   onReplay: () => void;
   onExplain: () => void;
   onEditVars: () => void;
+  onClaimTask: (tokenId: string) => Promise<void> | void;
+  onReleaseTask: (tokenId: string) => Promise<void> | void;
+  onCompleteTask: (tokenId: string) => Promise<void> | void;
+  onReassignTask: (tokenId: string) => Promise<void> | void;
+  onSkipTask: (tokenId: string) => Promise<void> | void;
 }) {
-  const { node, nodeId, tokens, events, currentVariables, canAdmin, pinned, onTogglePin, onClose, onReplay, onExplain, onEditVars } = props;
+  const { node, nodeId, tokens, events, currentVariables, currentUser, isAdmin, canAdmin,
+    pinned, onTogglePin, onClose, onReplay, onExplain, onEditVars,
+    onClaimTask, onReleaseTask, onCompleteTask, onReassignTask, onSkipTask } = props;
   const nodeLabel = String((node?.data as { label?: string })?.label ?? nodeId);
   const nodeType = String(node?.type ?? "node");
   const liveToken = tokens[0];
+
+  /* Eligibility for the task lifecycle buttons. The token id IS the
+   * task id in our engine. We only render the buttons that the
+   * current user is actually allowed to invoke — Camunda Tasklist
+   * pattern (don't show buttons that will 403). */
+  const isUserTask = liveToken?.waitingFor === "userTask";
+  const isWaiting = liveToken?.status === "waiting";
+  const myId = currentUser?.id ?? "";
+  const myRoles = currentUser?.roles ?? [];
+  const hasCandidateRole = liveToken?.candidateRole ? myRoles.includes(liveToken.candidateRole) : false;
+  const isAssignee = liveToken?.assignedTo === myId;
+  const canClaim = isUserTask && isWaiting && !liveToken?.assignedTo && (isAdmin || hasCandidateRole);
+  const canRelease = isUserTask && isWaiting && isAssignee;
+  const canComplete = isUserTask && isWaiting && (isAssignee || isAdmin);
+  // Reassign + Skip are admin-only escape hatches: they don't fit the
+  // normal claim/complete flow and are intended for unblocking stuck
+  // instances when the assignee is unavailable.
+  const canReassign = isUserTask && isWaiting && isAdmin;
+  const canSkip = isUserTask && isWaiting && isAdmin;
 
   return (
     <aside
@@ -591,17 +690,81 @@ function NodeDrawer(props: {
       </div>
 
       <div style={{ padding: "12px 16px", borderTop: "1px solid #EAECF0", background: "#FCFCFD" }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
-          Actions
-        </div>
         {canAdmin ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <button onClick={onReplay} style={actionBtnPrimary} title="Cancel live tokens and rewind to this step">
-              ⟲ Replay from this step
-            </button>
-            <button onClick={onExplain} style={actionBtn}>
-              ✨ Explain this step
-            </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {(canClaim || canRelease || canComplete) && (
+              <ActionGroup label="Task actions">
+                {canClaim && (
+                  <button
+                    onClick={() => liveToken && onClaimTask(liveToken.id)}
+                    style={actionBtnPrimary}
+                    title="Take ownership of this task"
+                  >
+                    Claim
+                  </button>
+                )}
+                {canComplete && (
+                  <button
+                    onClick={() => liveToken && onCompleteTask(liveToken.id)}
+                    style={actionBtn}
+                    title="Mark this task as done"
+                  >
+                    Complete
+                  </button>
+                )}
+                {canRelease && (
+                  <button
+                    onClick={() => liveToken && onReleaseTask(liveToken.id)}
+                    style={actionBtn}
+                    title="Release back to the role queue"
+                  >
+                    Release
+                  </button>
+                )}
+              </ActionGroup>
+            )}
+
+            {isUserTask && isWaiting && !canClaim && !canRelease && !canComplete && (
+              <div style={{ fontSize: 11, color: "#667085", padding: "0 0 4px" }}>
+                You don't have permission to act on this task.
+                {liveToken?.candidateRole && ` Required role: ${liveToken.candidateRole}.`}
+              </div>
+            )}
+
+            {(canReassign || canSkip) && (
+              <ActionGroup label="Admin overrides">
+                {canReassign && (
+                  <button
+                    onClick={() => liveToken && onReassignTask(liveToken.id)}
+                    style={actionBtn}
+                    title="Reassign this task to a different user"
+                  >
+                    Reassign…
+                  </button>
+                )}
+                {canSkip && (
+                  <button
+                    onClick={() => liveToken && onSkipTask(liveToken.id)}
+                    style={actionBtn}
+                    title="Advance the token past this step without form data"
+                  >
+                    Skip step
+                  </button>
+                )}
+              </ActionGroup>
+            )}
+
+            <ActionGroup label="Step actions">
+              <button onClick={onReplay} style={actionBtn} title="Cancel live tokens and rewind to this step">
+                ⟲ Replay from this step
+              </button>
+            </ActionGroup>
+
+            <ActionGroup label="AI">
+              <button onClick={onExplain} style={actionBtn}>
+                ✨ Explain this step
+              </button>
+            </ActionGroup>
           </div>
         ) : (
           <div style={{ fontSize: 12, color: "#667085", padding: "4px 0" }}>
@@ -610,6 +773,19 @@ function NodeDrawer(props: {
         )}
       </div>
     </aside>
+  );
+}
+
+function ActionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {children}
+      </div>
+    </div>
   );
 }
 
@@ -1284,3 +1460,219 @@ function formatAgo(ts: number): string {
   const m = Math.floor(s / 60);
   return `${m}m ago`;
 }
+
+/* ─── Complete-task dialog ───────────────────────────────────────────
+ * v1: a small JSON editor. The proper version (designer-defined form
+ * schema rendered as a real form) is a separate epic; until then this
+ * lets admins drive real test flows by typing the variables they want
+ * the gateway / next step to read. "Skip form" submits an empty {}. */
+function CompleteTaskDialog(props: {
+  tokenId: string;
+  onClose: () => void;
+  onSubmit: (tokenId: string, formData: Record<string, unknown>) => Promise<void>;
+}) {
+  const { tokenId, onClose, onSubmit } = props;
+  const [text, setText] = useState("{\n  \n}");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async (formData: Record<string, unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await onSubmit(tokenId, formData);
+    } catch (e) {
+      setErr((e as Error).message);
+      setBusy(false);
+    }
+  };
+
+  const onComplete = async () => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); }
+    catch (e) { setErr(`Invalid JSON: ${(e as Error).message}`); return; }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      setErr("Form data must be a JSON object (e.g. {\"approved\": true}).");
+      return;
+    }
+    await submit(parsed as Record<string, unknown>);
+  };
+  const onSkipForm = () => submit({});
+
+  return (
+    <ModalShell onClose={onClose} title="Complete task">
+      <p style={{ margin: "0 0 8px", fontSize: 13, color: "#475467" }}>
+        Form data is merged into the instance variables. Gateways and downstream
+        steps read these to branch and fill templates. Common shape:
+      </p>
+      <pre style={{ margin: "0 0 12px", padding: 8, background: "#F9FAFB", borderRadius: 6, fontSize: 11, fontFamily: "var(--font-mono, monospace)", color: "#475467" }}>
+{`{ "approved": true, "comment": "OK" }`}
+      </pre>
+      <textarea
+        value={text}
+        onChange={(e) => { setText(e.target.value); setErr(null); }}
+        spellCheck={false}
+        style={{
+          width: "100%", minHeight: 160, padding: 10, fontSize: 12,
+          fontFamily: "var(--font-mono, monospace)", border: "1px solid #D0D5DD",
+          borderRadius: 6, color: "#101828", boxSizing: "border-box", resize: "vertical",
+        }}
+      />
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
+        <button onClick={onSkipForm} disabled={busy} style={modalBtn} title="Submit with empty {} — no form data">
+          Skip form
+        </button>
+        <button onClick={onComplete} disabled={busy} style={modalBtnPrimary}>
+          {busy ? "Completing…" : "Complete task"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ─── Reassign-task dialog ───────────────────────────────────────────
+ * Admin-only. Shows tenant users; if the task carries a candidateRole,
+ * surfaces who actually holds it so the admin doesn't strand the task
+ * by reassigning to someone outside the role. The API enforces this
+ * too — the UI just makes the right choice obvious. */
+type TenantUser = { id: string; email: string; displayName: string; isActive: boolean; roles: string[] };
+
+function ReassignTaskDialog(props: {
+  tokenId: string;
+  candidateRole: string | null;
+  currentAssignee: string | null;
+  onClose: () => void;
+  onSubmit: (tokenId: string, targetUserId: string) => Promise<void>;
+}) {
+  const { tokenId, candidateRole, currentAssignee, onClose, onSubmit } = props;
+  const [users, setUsers] = useState<TenantUser[] | null>(null);
+  const [filter, setFilter] = useState("");
+  const [picked, setPicked] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    apiGet<TenantUser[]>("/users")
+      .then((rows) => { if (alive) setUsers(rows); })
+      .catch((e) => { if (alive) setErr((e as Error).message); });
+    return () => { alive = false; };
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!users) return [];
+    const q = filter.trim().toLowerCase();
+    return users
+      .filter((u) => u.isActive && u.id !== currentAssignee)
+      .filter((u) => !candidateRole || u.roles.includes(candidateRole))
+      .filter((u) => !q || u.email.toLowerCase().includes(q) || u.displayName.toLowerCase().includes(q));
+  }, [users, filter, candidateRole, currentAssignee]);
+
+  const onConfirm = async () => {
+    if (!picked) return;
+    setBusy(true);
+    setErr(null);
+    try { await onSubmit(tokenId, picked); }
+    catch (e) { setErr((e as Error).message); setBusy(false); }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Reassign task">
+      {candidateRole ? (
+        <p style={{ margin: "0 0 10px", fontSize: 12, color: "#475467" }}>
+          Showing active users who hold the <code style={{ background: "#F2F4F7", padding: "1px 4px", borderRadius: 3 }}>{candidateRole}</code> role.
+        </p>
+      ) : (
+        <p style={{ margin: "0 0 10px", fontSize: 12, color: "#475467" }}>
+          This task has no role gate — any active user is eligible.
+        </p>
+      )}
+      <input
+        type="text"
+        placeholder="Filter by name or email…"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        style={{ width: "100%", padding: "8px 10px", fontSize: 13, border: "1px solid #D0D5DD", borderRadius: 6, marginBottom: 10, boxSizing: "border-box" }}
+      />
+      <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #EAECF0", borderRadius: 6 }}>
+        {users === null ? (
+          <div style={{ padding: 16, fontSize: 12, color: "#98A2B3" }}>Loading users…</div>
+        ) : filtered.length === 0 ? (
+          <div style={{ padding: 16, fontSize: 12, color: "#98A2B3" }}>No matching eligible users.</div>
+        ) : filtered.map((u) => (
+          <label
+            key={u.id}
+            style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+              borderTop: "1px solid #F2F4F7", cursor: "pointer",
+              background: picked === u.id ? "#EEF2FF" : "transparent",
+            }}
+          >
+            <input
+              type="radio"
+              name="reassign-target"
+              checked={picked === u.id}
+              onChange={() => setPicked(u.id)}
+            />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: "#101828", fontWeight: 500 }}>{u.displayName || u.email}</div>
+              <div style={{ fontSize: 11, color: "#667085" }}>{u.email}</div>
+            </div>
+            {u.roles.length > 0 && (
+              <div style={{ fontSize: 10, color: "#475467" }}>{u.roles.join(", ")}</div>
+            )}
+          </label>
+        ))}
+      </div>
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
+        <button onClick={onConfirm} disabled={busy || !picked} style={modalBtnPrimary}>
+          {busy ? "Reassigning…" : "Reassign"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ModalShell({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)",
+        zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%", maxWidth: 520, background: "#fff", borderRadius: 12,
+          boxShadow: "0 24px 48px -12px rgba(16,24,40,0.25)", padding: 20,
+          maxHeight: "90vh", overflow: "auto",
+        }}
+      >
+        <div style={{ fontSize: 16, fontWeight: 600, color: "#101828", marginBottom: 12 }}>{title}</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const modalBtn: React.CSSProperties = {
+  padding: "7px 14px", fontSize: 13, borderRadius: 6, border: "1px solid #D0D5DD",
+  background: "#fff", color: "#344054", cursor: "pointer", fontFamily: "inherit",
+};
+const modalBtnPrimary: React.CSSProperties = {
+  ...modalBtn, background: "#6366F1", color: "#fff", border: "1px solid #6366F1", fontWeight: 500,
+};
