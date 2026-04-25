@@ -18,7 +18,6 @@ import {
   ReactFlow,
   Background,
   BackgroundVariant,
-  MiniMap,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -121,6 +120,11 @@ export default function InstanceCanvas(props: {
       else if (completedSet.has(n.id)) classes.push("inst-node-completed");
       else classes.push("inst-node-unvisited");
       if (selectedNodeId === n.id) classes.push("inst-node-selected");
+      // Shape hint so the highlight ring follows the node's actual
+      // geometry (circle for events, diamond for gateways).
+      const t = n.type ?? "";
+      if (/Event$/.test(t)) classes.push("inst-shape-circle");
+      else if (/Gateway$/.test(t)) classes.push("inst-shape-diamond");
       return {
         id: n.id,
         type: n.type,
@@ -154,16 +158,16 @@ export default function InstanceCanvas(props: {
   }, [canvas.edges, traversedEdgeSet]);
 
   return (
-    <div style={{ width: "100%", height, border: "1px solid #EAECF0", borderRadius: 10, overflow: "hidden", background: "#F8FAFC", position: "relative" }}>
+    <div className="instance-canvas-readonly" style={{ width: "100%", height, border: "1px solid #EAECF0", borderRadius: 10, overflow: "hidden", background: "#F8FAFC", position: "relative" }}>
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         fitView
-        fitViewOptions={{ padding: 0.15 }}
+        fitViewOptions={{ padding: 0.2, maxZoom: 0.9 }}
         minZoom={0.2}
-        maxZoom={2}
+        maxZoom={1.5}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
@@ -176,7 +180,6 @@ export default function InstanceCanvas(props: {
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} color="#CBD5E1" gap={20} size={1} />
-        <MiniMap pannable zoomable style={{ background: "#fff", border: "1px solid #EAECF0" }} />
       </ReactFlow>
       <Legend />
     </div>

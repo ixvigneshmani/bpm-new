@@ -361,55 +361,53 @@ body {
  * dimmed. Applied to the node wrapper so the inner BPMN component
  * stays untouched and consistent with the designer. */
 
-.react-flow__node.inst-node-completed {
-  filter: drop-shadow(0 0 0 rgba(0,0,0,0));
-}
-.react-flow__node.inst-node-completed::before {
+.react-flow__node.inst-node-completed::before,
+.react-flow__node.inst-node-waiting::before,
+.react-flow__node.inst-node-failed::before,
+.react-flow__node.inst-node-selected::after {
   content: "";
   position: absolute;
-  inset: -4px;
+  inset: -6px;
   border-radius: 12px;
-  background: rgba(16, 185, 129, 0.12);
-  border: 1.5px solid rgba(16, 185, 129, 0.55);
   pointer-events: none;
   z-index: 0;
 }
 
+/* Shape-aware ring: events become circular, gateways become rotated
+ * squares (diamond), tasks/activities stay rounded rectangles. */
+.react-flow__node.inst-shape-circle::before,
+.react-flow__node.inst-shape-circle::after { border-radius: 50%; }
+
+.react-flow__node.inst-node-completed::before {
+  border: 1.75px solid rgba(16, 185, 129, 0.65);
+  background: transparent;
+}
+
 .react-flow__node.inst-node-waiting::before {
-  content: "";
-  position: absolute;
-  inset: -6px;
-  border-radius: 14px;
   border: 2px solid rgba(245, 158, 11, 0.85);
   box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18);
-  pointer-events: none;
-  z-index: 0;
   animation: inst-pulse 1.6s ease-in-out infinite;
 }
 
 .react-flow__node.inst-node-failed::before {
-  content: "";
-  position: absolute;
-  inset: -4px;
-  border-radius: 12px;
-  background: rgba(239, 68, 68, 0.12);
-  border: 1.5px solid rgba(239, 68, 68, 0.65);
-  pointer-events: none;
-  z-index: 0;
+  border: 1.75px solid rgba(239, 68, 68, 0.7);
+  background: transparent;
 }
 
 .react-flow__node.inst-node-unvisited {
-  opacity: 0.5;
+  opacity: 0.55;
 }
 
 .react-flow__node.inst-node-selected::after {
-  content: "";
-  position: absolute;
-  inset: -8px;
-  border-radius: 16px;
+  inset: -10px;
   border: 2px dashed rgba(99, 102, 241, 0.9);
-  pointer-events: none;
-  z-index: 0;
+}
+
+/* Hide React Flow connection handles in the read-only instance view —
+ * operators don't connect nodes, and the floating "+" dots are noise. */
+.instance-canvas-readonly .react-flow__handle {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 @keyframes inst-pulse {

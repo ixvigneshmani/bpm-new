@@ -1,13 +1,10 @@
 /* ─── Instance Detail ───────────────────────────────────────────────
- * Three sections from a single GET /instances/:id call: instance
- * header (status + variables), live tokens, recent audit events.
- * Cancel button on running instances.
+ * Full-width diagram as the primary surface; step details open in a
+ * right-side overlay drawer on node click. Tabs below are always
+ * instance-scoped (drawer owns step-scope). Selection is reflected
+ * in the URL hash (`#node=xxx`) so refresh/share preserves state.
  *
- * Auto-refresh: while the instance is still `running`, we poll every
- * 3 s so the operator watching a service-task complete sees tokens
- * advance without manual refresh clicks. Terminal states
- * (completed/failed/cancelled) stop the poll — the view freezes as
- * a "what happened?" snapshot.
+ * Auto-refresh: polls every 3 s while running; pauses on hidden tab.
  * ──────────────────────────────────────────────────────────────────── */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -21,9 +18,6 @@ import AiCopilotDialog from "./console/AiCopilotDialog";
 import { useAuth } from "../lib/auth";
 import { useActingForSnapshot } from "../lib/acting-for";
 
-/** Tiny helper — crypto.randomUUID with a non-UUID fallback for
- *  browsers missing the WebCrypto method (test runners, ancient
- *  Safari). Used to generate an Idempotency-Key per action. */
 function newIdemKey(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -65,10 +59,9 @@ type InstanceDetail = {
   canvasData: unknown;
 };
 
-type CanvasData = {
-  nodes?: Array<{ id: string; type?: string; position?: { x: number; y: number }; data?: Record<string, unknown>; width?: number; height?: number; parentId?: string }>;
-  edges?: Array<{ id: string; source: string; target: string; type?: string; data?: Record<string, unknown>; sourceHandle?: string | null; targetHandle?: string | null }>;
-};
+type CanvasNode = { id: string; type?: string; position?: { x: number; y: number }; data?: Record<string, unknown>; width?: number; height?: number; parentId?: string };
+type CanvasEdge = { id: string; source: string; target: string; type?: string; data?: Record<string, unknown>; sourceHandle?: string | null; targetHandle?: string | null };
+type CanvasData = { nodes?: CanvasNode[]; edges?: CanvasEdge[] };
 
 const STATUS_STYLES: Record<InstanceDetail["status"], { bg: string; text: string; dot: string; label: string }> = {
   running:   { bg: "#EEF2FF", text: "#4338CA", dot: "#6366F1", label: "Running" },
@@ -78,6 +71,21 @@ const STATUS_STYLES: Record<InstanceDetail["status"], { bg: string; text: string
   suspended: { bg: "#FFFBEB", text: "#92400E", dot: "#F59E0B", label: "Suspended" },
 };
 
+type TabKey = "activity" | "variables" | "incidents";
+
+function readNodeFromHash(): string | null {
+  const h = window.location.hash.replace(/^#/, "");
+  if (!h) return null;
+  const params = new URLSearchParams(h);
+  return params.get("node");
+}
+
+function writeNodeToHash(nodeId: string | null) {
+  const h = nodeId ? `#node=${encodeURIComponent(nodeId)}` : "";
+  const next = window.location.pathname + window.location.search + h;
+  window.history.replaceState(null, "", next);
+}
+
 export default function InstanceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -86,17 +94,17 @@ export default function InstanceDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => readNodeFromHash());
+  const [pinned, setPinned] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit" | "replay">(null);
+  const [activeTab, setActiveTab] = useState<TabKey>("activity");
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
+  const [, setNowTick] = useState(0);
   const { user } = useAuth();
   const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
-  // Impersonation is snapshotted ONCE per page-load so headline
-  // inline actions (Cancel, Suspend, Resume) attribute to the target
-  // that was active when the operator opened the page, not whatever
-  // target happens to be set at click-time.
   const pageActingFor = useActingForSnapshot();
 
   const refresh = useCallback(async () => {
@@ -104,19 +112,14 @@ export default function InstanceDetailPage() {
     try {
       const data = await apiGet<InstanceDetail>(`/instances/${id}`);
       setDetail(data);
-      // One-time canvas fetch — the versioned snapshot strips positions
-      // (canonicalise drops them for content-hash dedupe), so we pull
-      // positions from the live process. Layout may drift slightly if
-      // the process was edited mid-instance; node identity is stable.
       if (!processCanvas) {
         try {
           const p = await apiGet<{ canvasData?: CanvasData }>(`/processes/${data.processId}`);
           if (p.canvasData) setProcessCanvas(p.canvasData);
-        } catch {
-          // Non-fatal — page still works without the flow view.
-        }
+        } catch { /* non-fatal */ }
       }
       setError(null);
+      setLastRefreshedAt(Date.now());
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -124,64 +127,54 @@ export default function InstanceDetailPage() {
     }
   }, [id, processCanvas]);
 
-  // Initial fetch; the auto-poll effect below picks up from there.
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
 
-  // Live auto-refresh while running. Interval is stopped + cleared
-  // when the instance terminates OR the tab is hidden (to avoid
-  // idle polling of backgrounded windows). Visibility-change
-  // re-arms it when the tab comes back.
   const statusRef = useRef(detail?.status);
   statusRef.current = detail?.status;
   useEffect(() => {
     if (!detail || detail.status !== "running") return;
     let timer: number | null = null;
-    const tick = () => {
-      if (statusRef.current !== "running") return;
-      refresh();
-    };
-    const start = () => {
-      if (timer !== null) return;
-      timer = window.setInterval(tick, 3_000);
-    };
-    const stop = () => {
-      if (timer !== null) {
-        window.clearInterval(timer);
-        timer = null;
-      }
-    };
-    const onVis = () => {
-      if (document.visibilityState === "visible") start();
-      else stop();
-    };
+    const tick = () => { if (statusRef.current === "running") refresh(); };
+    const start = () => { if (timer === null) timer = window.setInterval(tick, 3_000); };
+    const stop = () => { if (timer !== null) { window.clearInterval(timer); timer = null; } };
+    const onVis = () => { document.visibilityState === "visible" ? start() : stop(); };
     if (document.visibilityState === "visible") start();
     document.addEventListener("visibilitychange", onVis);
-    return () => {
-      stop();
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return () => { stop(); document.removeEventListener("visibilitychange", onVis); };
   }, [detail, refresh]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => { writeNodeToHash(selectedNodeId); }, [selectedNodeId]);
+  useEffect(() => {
+    const onHash = () => setSelectedNodeId(readNodeFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedNodeId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !pinned) setSelectedNodeId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedNodeId, pinned]);
 
   const onCancel = async () => {
     if (!detail || !window.confirm(`Cancel this instance? This cannot be undone.`)) return;
     setCancelling(true);
     try {
-      await apiPost(
-        `/instances/${detail.id}/cancel`,
-        { reason: "Cancelled from UI" },
-        {
-          headers: { "Idempotency-Key": newIdemKey() },
-          actingForOverride: pageActingFor,
-        },
-      );
+      await apiPost(`/instances/${detail.id}/cancel`, { reason: "Cancelled from UI" }, {
+        headers: { "Idempotency-Key": newIdemKey() },
+        actingForOverride: pageActingFor,
+      });
       await refresh();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setCancelling(false);
-    }
+    } catch (e) { setError((e as Error).message); }
+    finally { setCancelling(false); }
   };
 
   const onSuspend = async () => {
@@ -189,105 +182,69 @@ export default function InstanceDetailPage() {
     const reason = window.prompt("Reason for suspending? (optional)") ?? "";
     setBusyAction("suspend");
     try {
-      await apiPost(
-        `/instances/${detail.id}/suspend`,
-        reason.trim() ? { reason: reason.trim() } : {},
-        {
-          headers: { "Idempotency-Key": newIdemKey() },
-          actingForOverride: pageActingFor,
-        },
-      );
+      await apiPost(`/instances/${detail.id}/suspend`, reason.trim() ? { reason: reason.trim() } : {}, {
+        headers: { "Idempotency-Key": newIdemKey() },
+        actingForOverride: pageActingFor,
+      });
       await refresh();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusyAction(null);
-    }
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusyAction(null); }
   };
 
   const onResume = async () => {
     if (!detail) return;
     setBusyAction("resume");
     try {
-      await apiPost(
-        `/instances/${detail.id}/resume`,
-        {},
-        {
-          headers: { "Idempotency-Key": newIdemKey() },
-          actingForOverride: pageActingFor,
-        },
-      );
+      await apiPost(`/instances/${detail.id}/resume`, {}, {
+        headers: { "Idempotency-Key": newIdemKey() },
+        actingForOverride: pageActingFor,
+      });
       await refresh();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusyAction(null);
-    }
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusyAction(null); }
   };
 
-  const onEditSubmit = async (
-    patch: Record<string, unknown>,
-    reason: string,
-    idemKey: string,
-    actingForSnapshot: string | null,
-  ) => {
+  const onEditSubmit = async (patch: Record<string, unknown>, reason: string, idemKey: string, actingForSnapshot: string | null) => {
     if (!detail) return;
     setBusyAction("edit");
     try {
-      await apiPost(
-        `/instances/${detail.id}/variables`,
-        { patch, reason },
-        {
-          headers: { "Idempotency-Key": idemKey },
-          actingForOverride: actingForSnapshot,
-        },
-      );
+      await apiPost(`/instances/${detail.id}/variables`, { patch, reason }, {
+        headers: { "Idempotency-Key": idemKey },
+        actingForOverride: actingForSnapshot,
+      });
       setEditOpen(false);
       await refresh();
-    } catch (e) {
-      // Bubble up to the dialog rather than swallowing.
-      throw e;
-    } finally {
-      setBusyAction(null);
-    }
+    } catch (e) { throw e; }
+    finally { setBusyAction(null); }
   };
 
-  const onReplaySubmit = async (
-    reason: string,
-    variablesPatch: Record<string, unknown> | undefined,
-    idemKey: string,
-    actingForSnapshot: string | null,
-  ) => {
+  const onReplaySubmit = async (reason: string, variablesPatch: Record<string, unknown> | undefined, idemKey: string, actingForSnapshot: string | null) => {
     if (!detail || !selectedNodeId) return;
     setBusyAction("replay");
     try {
-      await apiPost(
-        `/instances/${detail.id}/replay`,
-        {
-          targetNodeId: selectedNodeId,
-          reason,
-          ...(variablesPatch ? { variablesPatch } : {}),
-        },
-        {
-          headers: { "Idempotency-Key": idemKey },
-          actingForOverride: actingForSnapshot,
-        },
-      );
+      await apiPost(`/instances/${detail.id}/replay`, {
+        targetNodeId: selectedNodeId, reason, ...(variablesPatch ? { variablesPatch } : {}),
+      }, {
+        headers: { "Idempotency-Key": idemKey },
+        actingForOverride: actingForSnapshot,
+      });
       setReplayOpen(false);
       setSelectedNodeId(null);
       await refresh();
-    } catch (e) {
-      throw e;
-    } finally {
-      setBusyAction(null);
-    }
+    } catch (e) { throw e; }
+    finally { setBusyAction(null); }
   };
 
   const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
-  const filteredEvents = useMemo(() => {
-    if (!detail) return [];
-    if (!selectedNodeId) return detail.recentEvents;
-    return detail.recentEvents.filter((e) => e.nodeId === selectedNodeId);
+
+  const selectedNode: CanvasNode | null = useMemo(() => {
+    if (!canvas || !selectedNodeId) return null;
+    return canvas.nodes?.find((n) => n.id === selectedNodeId) ?? null;
+  }, [canvas, selectedNodeId]);
+
+  const selectedNodeTokens = useMemo(() => {
+    if (!detail || !selectedNodeId) return [];
+    return detail.tokens.filter((t) => t.currentNodeId === selectedNodeId);
   }, [detail, selectedNodeId]);
 
   if (loading) {
@@ -304,246 +261,167 @@ export default function InstanceDetailPage() {
   const st = STATUS_STYLES[detail.status];
   const isRunning = detail.status === "running";
   const isSuspended = detail.status === "suspended";
-  const canAdmin = isRunning || isSuspended; // edit/suspend/resume only on live states
+  const canAdmin = isRunning || isSuspended;
+
+  const activeTokens = detail.tokens.filter((t) => t.status === "active" || t.status === "waiting").length;
+  const incidentCount = detail.errorMessage ? 1 : 0;
 
   return (
-    <div>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
-        <div>
-          <button
-            onClick={() => navigate("/running")}
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 6,
-              padding: "4px 10px 4px 8px", borderRadius: 6, border: "1px solid #E5E7EB",
-              background: "#fff", fontSize: 12, color: "#475467", fontWeight: 500,
-              cursor: "pointer", fontFamily: "inherit", marginBottom: 10,
-            }}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
-            Back to instances
-          </button>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: "#101828", letterSpacing: "-0.02em", margin: 0 }}>
-              Instance
-            </h1>
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 5,
-              padding: "4px 12px", borderRadius: 6,
-              background: st.bg, fontSize: 12, fontWeight: 600, color: st.text,
-            }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot }} />
-              {st.label}
-            </span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div>
+        <button
+          onClick={() => navigate("/running")}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "4px 10px 4px 8px", borderRadius: 6, border: "1px solid #E5E7EB",
+            background: "#fff", fontSize: 12, color: "#475467", fontWeight: 500,
+            cursor: "pointer", fontFamily: "inherit", marginBottom: 10,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+          Back to instances
+        </button>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <h1 style={{ fontSize: 18, fontWeight: 700, color: "#101828", letterSpacing: "-0.02em", margin: 0 }}>
+                Instance
+              </h1>
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 5,
+                padding: "3px 10px", borderRadius: 6,
+                background: st.bg, fontSize: 12, fontWeight: 600, color: st.text,
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot }} />
+                {st.label}
+              </span>
+              <CopyableId id={detail.id} />
+            </div>
+            <div style={{ fontSize: 12, color: "#667085", marginTop: 6, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span>Started {new Date(detail.startedAt).toLocaleString()}</span>
+              <Dot />
+              <span>Duration {formatDuration(detail.startedAt, detail.completedAt)}</span>
+              {isRunning && (
+                <>
+                  <Dot />
+                  <span style={{ color: "#98A2B3" }}>Updated {formatAgo(lastRefreshedAt)}</span>
+                </>
+              )}
+            </div>
           </div>
-          <div style={{ fontSize: 12, color: "#9CA3AF", fontFamily: "var(--font-mono, monospace)", marginTop: 4 }}>
-            {detail.id}
+
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {isAdmin && (
+              <button
+                onClick={() => setAiOpen(true)}
+                title="Ask Claude about this instance"
+                style={{
+                  padding: "8px 14px", borderRadius: 8, border: "none",
+                  background: "linear-gradient(135deg, #8B5CF6, #6366F1)",
+                  color: "#fff", fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}
+              >
+                <span aria-hidden="true">✨</span> Ask AI
+              </button>
+            )}
+            <ActionsMenu
+              items={[
+                { key: "refresh", label: "Refresh now", onClick: refresh },
+                canAdmin && { key: "edit", label: "Edit variables…", onClick: () => setEditOpen(true) },
+                isRunning && { key: "suspend", label: busyAction === "suspend" ? "Suspending…" : "Suspend", onClick: onSuspend, disabled: busyAction === "suspend" },
+                isSuspended && { key: "resume", label: busyAction === "resume" ? "Resuming…" : "Resume", onClick: onResume, disabled: busyAction === "resume" },
+                canAdmin && { key: "cancel", label: cancelling ? "Cancelling…" : "Cancel instance", onClick: onCancel, disabled: cancelling, destructive: true },
+              ].filter(Boolean) as MenuItem[]}
+            />
           </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            onClick={refresh}
-            style={{
-              padding: "9px 16px", borderRadius: 8, border: "1px solid #E5E7EB",
-              background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467",
-              cursor: "pointer", fontFamily: "inherit",
-            }}
-          >
-            Refresh
-          </button>
-          {isAdmin && (
-            <button
-              onClick={() => setAiOpen(true)}
-              title="Ask Claude about this instance"
-              style={{
-                padding: "9px 14px", borderRadius: 8, border: "none",
-                background: "linear-gradient(135deg, #8B5CF6, #6366F1)",
-                color: "#fff", fontSize: 13, fontWeight: 600,
-                cursor: "pointer", fontFamily: "inherit",
-                display: "flex", alignItems: "center", gap: 6,
-              }}
-            >
-              <span aria-hidden="true">✨</span> Ask AI
-            </button>
-          )}
-          {canAdmin && (
-            <button
-              onClick={() => setEditOpen(true)}
-              style={{
-                padding: "9px 16px", borderRadius: 8, border: "1px solid #E5E7EB",
-                background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467",
-                cursor: "pointer", fontFamily: "inherit",
-              }}
-              title="Edit variables with an audited reason"
-            >
-              Edit vars
-            </button>
-          )}
-          {isRunning && (
-            <button
-              onClick={onSuspend}
-              disabled={busyAction === "suspend"}
-              style={{
-                padding: "9px 16px", borderRadius: 8, border: "1px solid #FDE68A",
-                background: "#FFFBEB", fontSize: 13, fontWeight: 600, color: "#92400E",
-                cursor: busyAction === "suspend" ? "not-allowed" : "pointer", fontFamily: "inherit",
-                opacity: busyAction === "suspend" ? 0.7 : 1,
-              }}
-            >
-              {busyAction === "suspend" ? "Suspending…" : "Suspend"}
-            </button>
-          )}
-          {isSuspended && (
-            <button
-              onClick={onResume}
-              disabled={busyAction === "resume"}
-              style={{
-                padding: "9px 16px", borderRadius: 8, border: "none",
-                background: "linear-gradient(135deg, #F59E0B, #F97316)",
-                fontSize: 13, fontWeight: 600, color: "#fff",
-                cursor: busyAction === "resume" ? "not-allowed" : "pointer", fontFamily: "inherit",
-                opacity: busyAction === "resume" ? 0.7 : 1,
-              }}
-            >
-              {busyAction === "resume" ? "Resuming…" : "Resume"}
-            </button>
-          )}
-          {canAdmin && (
-            <button
-              onClick={onCancel}
-              disabled={cancelling}
-              style={{
-                padding: "9px 18px", borderRadius: 8, border: "1px solid #FECACA",
-                background: "#fff", fontSize: 13, fontWeight: 600, color: "#B42318",
-                cursor: cancelling ? "not-allowed" : "pointer", fontFamily: "inherit",
-                opacity: cancelling ? 0.7 : 1,
-              }}
-            >
-              {cancelling ? "Cancelling…" : "Cancel instance"}
-            </button>
-          )}
         </div>
       </div>
 
-      {/* Flow diagram with live state overlay */}
-      {canvas && (canvas.nodes?.length ?? 0) > 0 && (
-        <Card
-          title={selectedNodeId ? `Flow — filtered to ${selectedNodeId}` : "Flow — click a node to filter events"}
-          style={{ marginBottom: 16 }}
-        >
-          {selectedNodeId && (
-            <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-              <button
-                onClick={() => setSelectedNodeId(null)}
-                style={{
-                  padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
-                  background: "#fff", fontSize: 11, fontWeight: 600, color: "#475467",
-                  cursor: "pointer",
-                }}
-              >
-                Clear filter
-              </button>
-              {canAdmin && (
-                <button
-                  onClick={() => setReplayOpen(true)}
-                  title="Cancel live tokens and rewind to this step"
-                  style={{
-                    padding: "4px 10px", borderRadius: 6, border: "1px solid #FDE68A",
-                    background: "#FFFBEB", fontSize: 11, fontWeight: 600, color: "#92400E",
-                    cursor: "pointer",
-                  }}
-                >
-                  ⟲ Replay from here
-                </button>
-              )}
-            </div>
-          )}
+      {detail.errorMessage && (
+        <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, fontSize: 13, color: "#B42318" }}>
+          <strong>Incident:</strong> {detail.errorMessage}
+        </div>
+      )}
+
+      <MetricsStrip
+        items={[
+          { label: "Process", value: `${detail.processId.slice(0, 8)}…`, mono: true },
+          { label: "Version", value: `v${detail.version}` },
+          { label: "Started by", value: `${detail.startedBy.slice(0, 8)}…`, mono: true },
+          { label: "Active steps", value: String(activeTokens), emphasize: activeTokens > 0 },
+          { label: "Incidents", value: String(incidentCount), danger: incidentCount > 0 },
+          { label: "Business key", value: detail.businessKey ?? "—", muted: !detail.businessKey },
+        ]}
+      />
+
+      <div style={{ background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12, overflow: "hidden" }}>
+        {canvas && (canvas.nodes?.length ?? 0) > 0 ? (
           <InstanceCanvas
             canvas={canvas}
             tokens={detail.tokens}
             events={detail.recentEvents}
             selectedNodeId={selectedNodeId}
-            onSelectNode={setSelectedNodeId}
-            height={480}
+            onSelectNode={(id) => setSelectedNodeId((cur) => (cur === id ? null : id))}
+            height={400}
           />
-        </Card>
-      )}
-
-      {/* Step-scoped business document snapshot (when a node is selected) */}
-      {selectedNodeId && (
-        <Card title={`Business document — ${selectedNodeId}`} style={{ marginBottom: 16 }}>
-          <StepSnapshot
-            nodeId={selectedNodeId}
-            events={detail.recentEvents}
-            currentVariables={detail.variables}
-          />
-        </Card>
-      )}
-
-      {/* Top section: meta + variables side-by-side */}
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, 1fr) 2fr", gap: 16, marginBottom: 16 }}>
-        <Card title="Instance">
-          <Field label="Process" mono>{detail.processId.slice(0, 8)}…</Field>
-          <Field label="Hash" mono>{detail.definitionHash.slice(0, 12)}…</Field>
-          <Field label="Started by" mono>{detail.startedBy.slice(0, 8)}…</Field>
-          <Field label="Started at">{new Date(detail.startedAt).toLocaleString()}</Field>
-          {detail.completedAt && (
-            <Field label="Ended at">{new Date(detail.completedAt).toLocaleString()}</Field>
-          )}
-          <Field label="Version">{String(detail.version)}</Field>
-          {detail.errorMessage && (
-            <div style={{ marginTop: 10, padding: "8px 10px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6, fontSize: 12, color: "#B42318" }}>
-              {detail.errorMessage}
-            </div>
-          )}
-        </Card>
-
-        <Card title="Variables">
-          {Object.keys(detail.variables).length === 0 ? (
-            <div style={{ fontSize: 13, color: "#98A2B3", padding: "12px 0" }}>No variables set</div>
-          ) : (
-            <pre style={{
-              margin: 0, padding: 12, background: "#F9FAFB", borderRadius: 6,
-              fontSize: 12, fontFamily: "var(--font-mono, monospace)", color: "#101828",
-              overflow: "auto", maxHeight: 240,
-            }}>
-              {JSON.stringify(detail.variables, null, 2)}
-            </pre>
-          )}
-        </Card>
-      </div>
-
-      {/* Tokens */}
-      <Card title={`Tokens (${detail.tokens.length})`}>
-        {detail.tokens.length === 0 ? (
-          <div style={{ fontSize: 13, color: "#98A2B3", padding: 12 }}>No tokens</div>
         ) : (
-          <div>
-            {detail.tokens.map((tok) => (
-              <div key={tok.id} style={{
-                display: "grid", gridTemplateColumns: "minmax(180px, 1fr) 120px 120px 1fr 100px",
-                padding: "10px 0", borderTop: "1px solid #F2F4F7",
-                alignItems: "center", fontSize: 13,
-              }}>
-                <span style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 12, color: "#475467" }}>
-                  {tok.id.slice(0, 8)}…
-                </span>
-                <span style={{ color: "#475467" }}>
-                  Node <code style={{ fontSize: 12, fontFamily: "var(--font-mono, monospace)" }}>{tok.currentNodeId}</code>
-                </span>
-                <TokenStatusBadge status={tok.status} />
-                <span style={{ fontSize: 12, color: "#667085" }}>
-                  {tok.waitingFor ? `Waiting on ${tok.waitingFor}` : ""}
-                  {tok.assignedTo ? ` · ${tok.assignedTo.slice(0, 8)}…` : ""}
-                </span>
-                <span style={{ fontSize: 12, color: "#9CA3AF", textAlign: "right" }}>
-                  v{tok.version}
-                </span>
-              </div>
-            ))}
+          <div style={{ padding: 60, textAlign: "center", color: "#98A2B3", fontSize: 13 }}>
+            Flow diagram unavailable for this instance.
           </div>
         )}
-      </Card>
+      </div>
+
+      <div style={{ background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12 }}>
+        <div style={{ display: "flex", borderBottom: "1px solid #EAECF0", padding: "0 8px", overflowX: "auto" }}>
+          <TabButton active={activeTab === "activity"} onClick={() => setActiveTab("activity")}>
+            Activity
+          </TabButton>
+          <TabButton active={activeTab === "variables"} onClick={() => setActiveTab("variables")}>
+            Variables ({Object.keys(detail.variables).length})
+          </TabButton>
+          <TabButton
+            active={activeTab === "incidents"}
+            onClick={() => setActiveTab("incidents")}
+            badge={incidentCount > 0 ? incidentCount : undefined}
+            danger={incidentCount > 0}
+          >
+            Incidents
+          </TabButton>
+        </div>
+        <div style={{ padding: "16px 20px" }}>
+          {activeTab === "activity" && (
+            <ActivityView
+              events={detail.recentEvents}
+              tokens={detail.tokens}
+              canvasNodes={(canvas?.nodes ?? [])}
+              startedBy={detail.startedBy}
+              onOpenNode={setSelectedNodeId}
+            />
+          )}
+          {activeTab === "variables" && <VariablesView variables={detail.variables} />}
+          {activeTab === "incidents" && <IncidentsView errorMessage={detail.errorMessage} />}
+        </div>
+      </div>
+
+      {selectedNodeId && (
+        <NodeDrawer
+          node={selectedNode}
+          nodeId={selectedNodeId}
+          tokens={selectedNodeTokens}
+          events={detail.recentEvents.filter((e) => e.nodeId === selectedNodeId)}
+          currentVariables={detail.variables}
+          canAdmin={canAdmin}
+          pinned={pinned}
+          onTogglePin={() => setPinned((v) => !v)}
+          onClose={() => setSelectedNodeId(null)}
+          onReplay={() => setReplayOpen(true)}
+          onExplain={() => setAiOpen(true)}
+          onEditVars={() => setEditOpen(true)}
+        />
+      )}
 
       {editOpen && (
         <EditVariablesDialog
@@ -552,7 +430,6 @@ export default function InstanceDetailPage() {
           onSubmit={onEditSubmit}
         />
       )}
-
       {replayOpen && selectedNodeId && (
         <ReplayStepDialog
           targetNodeId={selectedNodeId}
@@ -560,98 +437,810 @@ export default function InstanceDetailPage() {
           onSubmit={onReplaySubmit}
         />
       )}
-
       {aiOpen && (
         <AiCopilotDialog
           instanceId={detail.id}
           onClose={() => setAiOpen(false)}
         />
       )}
+    </div>
+  );
+}
 
-      {/* Recent events */}
-      <Card title={selectedNodeId
-        ? `Events at ${selectedNodeId} (${filteredEvents.length})`
-        : `Recent events (${detail.recentEvents.length})`} style={{ marginTop: 16 }}>
-        {filteredEvents.length === 0 ? (
-          <div style={{ fontSize: 13, color: "#98A2B3", padding: 12 }}>No events</div>
-        ) : (
-          <div>
-            {filteredEvents.map((ev) => (
-              <div key={ev.id} style={{
-                display: "grid", gridTemplateColumns: "180px minmax(140px, 1fr) 1fr 110px",
-                padding: "8px 0", borderTop: "1px solid #F2F4F7",
-                alignItems: "start", fontSize: 12,
-              }}>
-                <span style={{
-                  display: "inline-flex", padding: "2px 8px", borderRadius: 4,
-                  background: eventTypeBg(ev.eventType), color: "#475467",
-                  fontFamily: "var(--font-mono, monospace)", fontSize: 11, fontWeight: 600,
-                  alignSelf: "start", maxWidth: "fit-content",
-                }}>
-                  {ev.eventType}
-                </span>
-                <span style={{ color: "#475467", fontSize: 12 }}>
-                  {ev.nodeId && <code style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 11 }}>{ev.nodeId}</code>}
-                </span>
-                <code style={{
-                  fontFamily: "var(--font-mono, monospace)", fontSize: 11,
-                  color: "#667085", whiteSpace: "pre-wrap", wordBreak: "break-word",
-                }}>
-                  {ev.payload ? JSON.stringify(ev.payload) : ""}
-                </code>
-                <span style={{ fontSize: 11, color: "#9CA3AF", textAlign: "right" }}>
-                  {new Date(ev.createdAt).toLocaleTimeString()}
-                </span>
+/* ─── Drawer (overlay, right edge) ───────────────────────────────── */
+
+function NodeDrawer(props: {
+  node: CanvasNode | null;
+  nodeId: string;
+  tokens: InstanceDetail["tokens"];
+  events: InstanceDetail["recentEvents"];
+  currentVariables: Record<string, unknown>;
+  canAdmin: boolean;
+  pinned: boolean;
+  onTogglePin: () => void;
+  onClose: () => void;
+  onReplay: () => void;
+  onExplain: () => void;
+  onEditVars: () => void;
+}) {
+  const { node, nodeId, tokens, events, currentVariables, canAdmin, pinned, onTogglePin, onClose, onReplay, onExplain, onEditVars } = props;
+  const nodeLabel = String((node?.data as { label?: string })?.label ?? nodeId);
+  const nodeType = String(node?.type ?? "node");
+  const liveToken = tokens[0];
+
+  return (
+    <aside
+      role="complementary"
+      aria-label={`Details for ${nodeLabel}`}
+      style={{
+        position: "fixed", top: 20, right: 20, bottom: 20, width: 400,
+        background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12,
+        boxShadow: "0 24px 48px -12px rgba(16,24,40,0.18), 0 8px 16px -6px rgba(16,24,40,0.10)",
+        zIndex: 40, display: "flex", flexDirection: "column", overflow: "hidden",
+      }}
+    >
+      <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid #EAECF0" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#6366F1", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+            {humanizeNodeType(nodeType)}
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            <IconButton onClick={onTogglePin} title={pinned ? "Unpin drawer" : "Pin drawer open"} active={pinned}>
+              {pinned ? "📌" : "📍"}
+            </IconButton>
+            <IconButton onClick={onClose} title="Close (Esc)">✕</IconButton>
+          </div>
+        </div>
+        <div style={{ fontSize: 17, fontWeight: 600, color: "#101828", wordBreak: "break-word", lineHeight: 1.3 }}>
+          {nodeLabel}
+        </div>
+        <div style={{ fontSize: 11, color: "#98A2B3", fontFamily: "var(--font-mono, monospace)", marginTop: 2 }}>
+          {nodeId}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px" }}>
+        <DrawerSection label="Execution">
+          {liveToken ? (
+            <div>
+              <DrawerRow label="Status"><TokenBadge status={liveToken.status} /></DrawerRow>
+              <DrawerRow label="Waiting for">{humanizeWaitingFor(liveToken.waitingFor)}</DrawerRow>
+              <DrawerRow label="Role">{liveToken.candidateRole ?? "—"}</DrawerRow>
+              <DrawerRow label="Assignee">{liveToken.assignedTo ? `${liveToken.assignedTo.slice(0, 8)}…` : "—"}</DrawerRow>
+            </div>
+          ) : (
+            <div style={emptyStyle}>
+              No active execution at this step. It may have already completed, or the flow hasn't reached here yet.
+            </div>
+          )}
+        </DrawerSection>
+
+        <DrawerSection label="Variables" right={canAdmin ? <button onClick={onEditVars} style={linkBtn}>Edit</button> : null}>
+          {Object.keys(currentVariables).length === 0 ? (
+            <div style={emptyStyle}>No variables set on this instance.</div>
+          ) : (
+            <pre style={{
+              margin: 0, padding: 10, background: "#F9FAFB", borderRadius: 6,
+              fontSize: 11, fontFamily: "var(--font-mono, monospace)", color: "#101828",
+              overflow: "auto", maxHeight: 180,
+            }}>
+              {JSON.stringify(currentVariables, null, 2)}
+            </pre>
+          )}
+        </DrawerSection>
+
+        <Collapsible label="Business document (step-scoped snapshot)">
+          <StepSnapshot nodeId={nodeId} events={events} currentVariables={currentVariables} />
+        </Collapsible>
+
+        <Collapsible label={`Activity (${events.filter(isMeaningfulEvent).length})`}>
+          {(() => {
+            const filtered = events.filter(isMeaningfulEvent);
+            if (filtered.length === 0) return <div style={emptyStyle}>No activity yet for this step.</div>;
+            return (
+              <div>
+                {filtered.map((ev) => {
+                  const h = humanizeEvent(ev.eventType);
+                  return (
+                    <div key={ev.id} style={{ padding: "8px 0", borderTop: "1px solid #F2F4F7", fontSize: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ color: h.tone === "danger" ? "#B42318" : h.tone === "success" ? "#166534" : "#344054", fontWeight: 500 }}>
+                          {h.label}
+                        </span>
+                        <span style={{ color: "#9CA3AF", fontSize: 11 }}>{new Date(ev.createdAt).toLocaleTimeString()}</span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
+            );
+          })()}
+        </Collapsible>
+      </div>
+
+      <div style={{ padding: "12px 16px", borderTop: "1px solid #EAECF0", background: "#FCFCFD" }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+          Actions
+        </div>
+        {canAdmin ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <button onClick={onReplay} style={actionBtnPrimary} title="Cancel live tokens and rewind to this step">
+              ⟲ Replay from this step
+            </button>
+            <button onClick={onExplain} style={actionBtn}>
+              ✨ Explain this step
+            </button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: "#667085", padding: "4px 0" }}>
+            Instance is not in a live state — actions are disabled.
           </div>
         )}
-      </Card>
-    </div>
-  );
-}
-
-function Card(props: { title: string; children: React.ReactNode; style?: React.CSSProperties }) {
-  return (
-    <div style={{ background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12, padding: "16px 20px", ...props.style }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 12 }}>
-        {props.title}
       </div>
-      {props.children}
-    </div>
+    </aside>
   );
 }
 
-function Field(props: { label: string; mono?: boolean; children: React.ReactNode }) {
+/* ─── Drawer primitives ──────────────────────────────────────────── */
+
+function DrawerSection({ label, right, children }: { label: string; right?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13 }}>
-      <span style={{ color: "#667085" }}>{props.label}</span>
-      <span style={{ color: "#101828", fontWeight: 500, fontFamily: props.mono ? "var(--font-mono, monospace)" : undefined, fontSize: props.mono ? 12 : 13 }}>
-        {props.children}
-      </span>
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          {label}
+        </div>
+        {right}
+      </div>
+      {children}
     </div>
   );
 }
 
-function TokenStatusBadge({ status }: { status: "active" | "waiting" | "completed" | "failed" }) {
-  const m: Record<typeof status, { bg: string; color: string; label: string }> = {
+function DrawerRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", fontSize: 12, borderBottom: "1px solid #F2F4F7", gap: 8 }}>
+      <span style={{ color: "#667085" }}>{label}</span>
+      <span style={{ color: "#101828", fontWeight: 500, textAlign: "right" }}>{children}</span>
+    </div>
+  );
+}
+
+function Collapsible({ label, children, defaultOpen = false }: { label: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 16, border: "1px solid #EAECF0", borderRadius: 8 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", textAlign: "left", padding: "10px 12px",
+          border: "none", background: "transparent", cursor: "pointer",
+          fontSize: 12, fontWeight: 600, color: "#344054",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          fontFamily: "inherit",
+        }}
+      >
+        {label}
+        <span style={{ color: "#98A2B3", fontSize: 10 }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div style={{ padding: "0 12px 12px" }}>{children}</div>}
+    </div>
+  );
+}
+
+function IconButton({ onClick, title, children, active }: { onClick: () => void; title: string; children: React.ReactNode; active?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        padding: "4px 8px", borderRadius: 6,
+        border: "1px solid " + (active ? "#C7D2FE" : "#E5E7EB"),
+        background: active ? "#EEF2FF" : "#fff",
+        fontSize: 12, color: active ? "#4338CA" : "#667085",
+        cursor: "pointer", fontFamily: "inherit",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function TokenBadge({ status }: { status: "active" | "waiting" | "completed" | "failed" }) {
+  const map = {
     active:    { bg: "#EEF2FF", color: "#4338CA", label: "Active" },
     waiting:   { bg: "#FEF3C7", color: "#92400E", label: "Waiting" },
     completed: { bg: "#F0FDF4", color: "#166534", label: "Done" },
     failed:    { bg: "#FEF2F2", color: "#B42318", label: "Failed" },
   };
-  const s = m[status];
+  const s = map[status];
   return (
-    <span style={{ display: "inline-flex", padding: "2px 10px", borderRadius: 6, background: s.bg, color: s.color, fontSize: 11, fontWeight: 600, maxWidth: "fit-content" }}>
+    <span style={{ display: "inline-flex", padding: "2px 8px", borderRadius: 4, background: s.bg, color: s.color, fontSize: 11, fontWeight: 600 }}>
       {s.label}
     </span>
   );
 }
 
-function eventTypeBg(eventType: string): string {
-  if (eventType.startsWith("instance-completed") || eventType === "token-completed") return "#F0FDF4";
-  if (eventType.startsWith("instance-failed") || eventType === "error") return "#FEF2F2";
-  if (eventType === "instance-cancelled") return "#F9FAFB";
-  if (eventType.startsWith("task-")) return "#EEF2FF";
-  return "#F2F4F7";
+/* ─── Metrics strip ──────────────────────────────────────────────── */
+
+function MetricsStrip({ items }: { items: Array<{ label: string; value: string; mono?: boolean; emphasize?: boolean; danger?: boolean; muted?: boolean }> }) {
+  return (
+    <div style={{
+      display: "flex", gap: 0, background: "#fff", border: "1px solid #E5E7EB",
+      borderRadius: 12, overflowX: "auto",
+    }}>
+      {items.map((m, i) => (
+        <div key={m.label} style={{
+          padding: "8px 14px", minWidth: 0,
+          borderLeft: i === 0 ? "none" : "1px solid #F2F4F7",
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            {m.label}
+          </div>
+          <div style={{
+            fontSize: 13, fontWeight: 600, marginTop: 2,
+            color: m.danger ? "#B42318" : m.emphasize ? "#4338CA" : m.muted ? "#98A2B3" : "#101828",
+            fontFamily: m.mono ? "var(--font-mono, monospace)" : "inherit",
+            whiteSpace: "nowrap",
+          }}>
+            {m.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─── Tabs ───────────────────────────────────────────────────────── */
+
+function TabButton({ active, children, onClick, badge, danger }: { active: boolean; children: React.ReactNode; onClick: () => void; badge?: number; danger?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: "12px 14px", border: "none", background: "transparent",
+        fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+        color: active ? "#101828" : "#667085",
+        borderBottom: `2px solid ${active ? "#6366F1" : "transparent"}`,
+        marginBottom: -1, display: "flex", alignItems: "center", gap: 6,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+      {badge !== undefined && (
+        <span style={{
+          display: "inline-flex", minWidth: 18, height: 18, padding: "0 6px",
+          background: danger ? "#FEF2F2" : "#F2F4F7",
+          color: danger ? "#B42318" : "#475467",
+          borderRadius: 9, fontSize: 10, fontWeight: 700,
+          alignItems: "center", justifyContent: "center",
+        }}>
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function VariablesView({ variables }: { variables: Record<string, unknown> }) {
+  if (Object.keys(variables).length === 0) {
+    return <div style={emptyStyle}>No variables set on this instance.</div>;
+  }
+  return (
+    <pre style={{
+      margin: 0, padding: 12, background: "#F9FAFB", borderRadius: 6,
+      fontSize: 12, fontFamily: "var(--font-mono, monospace)", color: "#101828",
+      overflow: "auto", maxHeight: 320,
+    }}>
+      {JSON.stringify(variables, null, 2)}
+    </pre>
+  );
+}
+
+/* ─── Activity feed ──────────────────────────────────────────────── */
+
+type ActivityRow =
+  | { kind: "step"; key: string; nodeId: string; label: string; status: "completed" | "failed"; enteredAt: number; exitedAt: number; durationMs: number; userId: string | null }
+  | { kind: "pending"; key: string; nodeId: string; label: string; waitingFor: string | null; role: string | null; assignee: string | null; since: number }
+  | { kind: "instance"; key: string; label: string; tone: "neutral" | "success" | "warning" | "danger"; at: number; userId: string | null }
+  | { kind: "admin"; key: string; label: string; at: number; userId: string | null }
+  | { kind: "raw"; key: string; eventType: string; nodeId: string | null; at: number; userId: string | null };
+
+function buildActivityFeed(args: {
+  events: InstanceDetail["recentEvents"];
+  tokens: InstanceDetail["tokens"];
+  canvasNodes: Array<{ id: string; type?: string; data?: Record<string, unknown> }>;
+  startedBy: string;
+}): ActivityRow[] {
+  const { events, tokens, canvasNodes, startedBy } = args;
+  const labelOf = (id: string) => {
+    const n = canvasNodes.find((cn) => cn.id === id);
+    const lbl = (n?.data as { label?: string } | undefined)?.label;
+    return typeof lbl === "string" && lbl.trim() ? lbl : id;
+  };
+
+  const rows: ActivityRow[] = [];
+
+  // Pair node-entered → node-exited per node, in event order, to build
+  // "step completed in Xs" rows. Multiple instances per node (loops)
+  // produce multiple rows.
+  const pendingEntries = new Map<string, Array<{ at: number; userId: string | null }>>();
+  for (const ev of events) {
+    if (ev.eventType === "node-entered" && ev.nodeId) {
+      const at = new Date(ev.createdAt).getTime();
+      const list = pendingEntries.get(ev.nodeId) ?? [];
+      list.push({ at, userId: ev.userId });
+      pendingEntries.set(ev.nodeId, list);
+    } else if (ev.eventType === "node-exited" && ev.nodeId) {
+      const at = new Date(ev.createdAt).getTime();
+      const list = pendingEntries.get(ev.nodeId) ?? [];
+      const entry = list.shift();
+      if (entry) {
+        rows.push({
+          kind: "step",
+          key: `step:${ev.id}`,
+          nodeId: ev.nodeId,
+          label: labelOf(ev.nodeId),
+          status: "completed",
+          enteredAt: entry.at,
+          exitedAt: at,
+          durationMs: at - entry.at,
+          userId: ev.userId ?? entry.userId ?? (rows.length === 0 ? startedBy : null),
+        });
+      }
+      pendingEntries.set(ev.nodeId, list);
+    } else if (ev.eventType === "node-failed" && ev.nodeId) {
+      const at = new Date(ev.createdAt).getTime();
+      const list = pendingEntries.get(ev.nodeId) ?? [];
+      const entry = list.shift();
+      rows.push({
+        kind: "step",
+        key: `fail:${ev.id}`,
+        nodeId: ev.nodeId,
+        label: labelOf(ev.nodeId),
+        status: "failed",
+        enteredAt: entry?.at ?? at,
+        exitedAt: at,
+        durationMs: entry ? at - entry.at : 0,
+        userId: ev.userId,
+      });
+      pendingEntries.set(ev.nodeId, list);
+    } else if (ev.eventType === "instance-started") {
+      rows.push({ kind: "instance", key: ev.id, label: "Process started", tone: "neutral", at: new Date(ev.createdAt).getTime(), userId: ev.userId ?? startedBy });
+    } else if (ev.eventType === "instance-completed") {
+      rows.push({ kind: "instance", key: ev.id, label: "Process completed", tone: "success", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    } else if (ev.eventType === "instance-failed") {
+      rows.push({ kind: "instance", key: ev.id, label: "Process failed", tone: "danger", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    } else if (ev.eventType === "instance-cancelled") {
+      rows.push({ kind: "admin", key: ev.id, label: "Process cancelled", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    } else if (ev.eventType === "instance-suspended") {
+      rows.push({ kind: "admin", key: ev.id, label: "Process paused", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    } else if (ev.eventType === "instance-resumed") {
+      rows.push({ kind: "admin", key: ev.id, label: "Process resumed", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    } else if (ev.eventType === "variables-updated") {
+      rows.push({ kind: "admin", key: ev.id, label: "Variables updated", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    } else if (ev.eventType === "replay") {
+      const target = (ev.payload as { targetNodeId?: string } | null)?.targetNodeId;
+      rows.push({ kind: "admin", key: ev.id, label: target ? `Replayed from “${labelOf(target)}”` : "Replayed", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+    }
+  }
+
+  // Sort all completed rows chronologically (by exitedAt for steps,
+  // by `at` for instance/admin events).
+  rows.sort((a, b) => {
+    const aT = a.kind === "step" ? a.exitedAt : (a as { at: number }).at;
+    const bT = b.kind === "step" ? b.exitedAt : (b as { at: number }).at;
+    return aT - bT;
+  });
+
+  // Append currently waiting steps as "pending" rows at the end.
+  for (const t of tokens) {
+    if (t.status !== "waiting" && t.status !== "active") continue;
+    const list = pendingEntries.get(t.currentNodeId) ?? [];
+    const entered = list[0];
+    rows.push({
+      kind: "pending",
+      key: `pending:${t.id}`,
+      nodeId: t.currentNodeId,
+      label: labelOf(t.currentNodeId),
+      waitingFor: t.waitingFor,
+      role: t.candidateRole,
+      assignee: t.assignedTo,
+      since: entered?.at ?? Date.now(),
+    });
+  }
+
+  return rows;
+}
+
+function ActivityView(props: {
+  events: InstanceDetail["recentEvents"];
+  tokens: InstanceDetail["tokens"];
+  canvasNodes: Array<{ id: string; type?: string; data?: Record<string, unknown> }>;
+  startedBy: string;
+  onOpenNode: (nodeId: string) => void;
+}) {
+  const { events, tokens, canvasNodes, startedBy, onOpenNode } = props;
+  const [showRaw, setShowRaw] = useState(false);
+
+  const rows = useMemo(
+    () => buildActivityFeed({ events, tokens, canvasNodes, startedBy }),
+    [events, tokens, canvasNodes, startedBy],
+  );
+
+  if (rows.length === 0 && !showRaw) {
+    return <div style={emptyStyle}>No activity yet.</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+        <button
+          onClick={() => setShowRaw((v) => !v)}
+          style={{
+            padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
+            background: "#fff", fontSize: 11, fontWeight: 600, color: "#475467",
+            cursor: "pointer", fontFamily: "inherit",
+          }}
+        >
+          {showRaw ? "Hide technical events" : "Show technical events"}
+        </button>
+      </div>
+
+      {!showRaw ? (
+        <div>
+          {rows.map((r) => (
+            <ActivityRowView key={r.key} row={r} onOpenNode={onOpenNode} />
+          ))}
+        </div>
+      ) : (
+        <RawEventsTable events={events} onOpenNode={onOpenNode} />
+      )}
+    </div>
+  );
+}
+
+function ActivityRowView({ row, onOpenNode }: { row: ActivityRow; onOpenNode: (id: string) => void }) {
+  const dotColor =
+    row.kind === "step" && row.status === "completed" ? "#22C55E" :
+    row.kind === "step" && row.status === "failed" ? "#EF4444" :
+    row.kind === "pending" ? "#F59E0B" :
+    row.kind === "instance" && row.tone === "success" ? "#22C55E" :
+    row.kind === "instance" && row.tone === "danger" ? "#EF4444" :
+    row.kind === "admin" ? "#6366F1" : "#98A2B3";
+
+  const time =
+    row.kind === "step" ? new Date(row.exitedAt).toLocaleString() :
+    row.kind === "pending" ? `since ${new Date(row.since).toLocaleString()}` :
+    new Date((row as { at: number }).at).toLocaleString();
+
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "20px 1fr auto",
+      padding: "12px 0", borderTop: "1px solid #F2F4F7",
+      alignItems: "start", gap: 12,
+    }}>
+      <div style={{
+        marginTop: 4, width: 10, height: 10, borderRadius: "50%",
+        background: dotColor,
+      }} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: "#101828", fontWeight: 500 }}>
+          {renderRowTitle(row, onOpenNode)}
+        </div>
+        <div style={{ fontSize: 12, color: "#667085", marginTop: 2 }}>
+          {renderRowSubtitle(row)}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: "#98A2B3", whiteSpace: "nowrap" }}>{time}</div>
+    </div>
+  );
+}
+
+function renderRowTitle(row: ActivityRow, onOpenNode: (id: string) => void): React.ReactNode {
+  if (row.kind === "step") {
+    return (
+      <>
+        <NodeLink id={row.nodeId} label={row.label} onOpenNode={onOpenNode} />
+        {row.status === "completed" ? " — completed" : " — failed"}
+        {row.durationMs > 0 ? ` in ${formatMs(row.durationMs)}` : ""}
+      </>
+    );
+  }
+  if (row.kind === "pending") {
+    return (
+      <>
+        <NodeLink id={row.nodeId} label={row.label} onOpenNode={onOpenNode} />
+        {" — waiting"}
+      </>
+    );
+  }
+  return row.label;
+}
+
+function renderRowSubtitle(row: ActivityRow): React.ReactNode {
+  if (row.kind === "step") {
+    return row.userId ? `By ${row.userId.slice(0, 8)}…` : "Automatic step";
+  }
+  if (row.kind === "pending") {
+    const parts: string[] = [];
+    parts.push(`Waiting for ${humanizeWaitingFor(row.waitingFor)}`);
+    if (row.role) parts.push(`role: ${row.role}`);
+    if (row.assignee) parts.push(`assignee: ${row.assignee.slice(0, 8)}…`);
+    parts.push(`pending ${formatMs(Date.now() - row.since)}`);
+    return parts.join(" · ");
+  }
+  if (row.kind === "admin" || row.kind === "instance") {
+    return row.userId ? `By ${row.userId.slice(0, 8)}…` : "System";
+  }
+  return null;
+}
+
+function NodeLink({ id, label, onOpenNode }: { id: string; label: string; onOpenNode: (id: string) => void }) {
+  return (
+    <button
+      onClick={() => onOpenNode(id)}
+      style={{
+        border: "none", background: "transparent", padding: 0,
+        fontSize: 13, color: "#4338CA", cursor: "pointer",
+        fontFamily: "inherit", fontWeight: 600,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function RawEventsTable({ events, onOpenNode }: { events: InstanceDetail["recentEvents"]; onOpenNode: (id: string) => void }) {
+  if (events.length === 0) return <div style={emptyStyle}>No events.</div>;
+  return (
+    <div>
+      {events.map((ev) => (
+        <div key={ev.id} style={{
+          display: "grid", gridTemplateColumns: "180px minmax(120px, 1fr) 2fr 110px",
+          padding: "8px 0", borderTop: "1px solid #F2F4F7",
+          alignItems: "start", fontSize: 11,
+        }}>
+          <code style={{ fontFamily: "var(--font-mono, monospace)", color: "#475467", fontWeight: 600 }}>{ev.eventType}</code>
+          <span>
+            {ev.nodeId ? (
+              <button onClick={() => onOpenNode(ev.nodeId!)} style={{
+                border: "none", background: "transparent", padding: 0,
+                fontFamily: "var(--font-mono, monospace)", fontSize: 11,
+                color: "#4338CA", cursor: "pointer", textDecoration: "underline",
+              }}>{ev.nodeId}</button>
+            ) : <span style={{ color: "#98A2B3" }}>—</span>}
+          </span>
+          <code style={{
+            fontFamily: "var(--font-mono, monospace)", color: "#667085",
+            whiteSpace: "pre-wrap", wordBreak: "break-word",
+          }}>
+            {ev.payload ? JSON.stringify(ev.payload) : ""}
+          </code>
+          <span style={{ color: "#9CA3AF", textAlign: "right" }}>
+            {new Date(ev.createdAt).toLocaleTimeString()}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatMs(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
+function IncidentsView({ errorMessage }: { errorMessage: string | null }) {
+  if (!errorMessage) {
+    return <div style={emptyStyle}>No incidents for this instance.</div>;
+  }
+  return (
+    <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, fontSize: 13, color: "#B42318" }}>
+      {errorMessage}
+    </div>
+  );
+}
+
+/* ─── Actions overflow menu ──────────────────────────────────────── */
+
+type MenuItem = { key: string; label: string; onClick: () => void; disabled?: boolean; destructive?: boolean };
+
+function ActionsMenu({ items }: { items: MenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB",
+          background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467",
+          cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 6,
+        }}
+      >
+        Actions
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="6 9 12 15 18 9" /></svg>
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 6px)", right: 0, minWidth: 220,
+          background: "#fff", border: "1px solid #E5E7EB", borderRadius: 10,
+          boxShadow: "0 12px 24px rgba(16,24,40,0.10)", zIndex: 50, padding: 4,
+        }}>
+          {items.map((it) => (
+            <button
+              key={it.key}
+              disabled={it.disabled}
+              onClick={() => { if (!it.disabled) { it.onClick(); setOpen(false); } }}
+              style={{
+                display: "block", width: "100%", textAlign: "left",
+                padding: "8px 12px", border: "none", background: "transparent",
+                fontSize: 13, fontWeight: 500,
+                color: it.destructive ? "#B42318" : "#101828",
+                cursor: it.disabled ? "not-allowed" : "pointer",
+                opacity: it.disabled ? 0.5 : 1, borderRadius: 6,
+                fontFamily: "inherit",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget.style.background = "#F9FAFB"); }}
+              onMouseLeave={(e) => { (e.currentTarget.style.background = "transparent"); }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Small helpers ──────────────────────────────────────────────── */
+
+function CopyableId({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard?.writeText(id).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+      title={id}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 4,
+        padding: "2px 8px", borderRadius: 4, border: "1px solid #E5E7EB",
+        background: "#F9FAFB", cursor: "pointer", fontFamily: "inherit",
+        fontSize: 11, color: "#667085",
+      }}
+    >
+      <code style={{ fontFamily: "var(--font-mono, monospace)" }}>{id.slice(0, 8)}…</code>
+      <span style={{ fontSize: 10, color: copied ? "#166534" : "#98A2B3" }}>{copied ? "✓" : "⧉"}</span>
+    </button>
+  );
+}
+
+function Dot() {
+  return <span style={{ color: "#D0D5DD" }}>·</span>;
+}
+
+function humanizeNodeType(t: string): string {
+  if (!t) return "Node";
+  const spaced = t.replace(/([A-Z])/g, " $1").toLowerCase().trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+const emptyStyle: React.CSSProperties = {
+  fontSize: 12, color: "#98A2B3", padding: "8px 0", lineHeight: 1.5,
+};
+
+const actionBtn: React.CSSProperties = {
+  padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB",
+  background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467",
+  cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+};
+
+const actionBtnPrimary: React.CSSProperties = {
+  ...actionBtn,
+  border: "1px solid #FDE68A", background: "#FFFBEB", color: "#92400E",
+};
+
+const linkBtn: React.CSSProperties = {
+  padding: "2px 6px", borderRadius: 4, border: "none",
+  background: "transparent", fontSize: 11, fontWeight: 600,
+  color: "#4338CA", cursor: "pointer", fontFamily: "inherit",
+};
+
+/* Event humanization for the operator UI. "Plumbing" events
+ * (token-created, edge-taken) are filtered out of the default view
+ * — they aren't useful to a business operator and clutter the
+ * picture. Users can toggle "Show all events" for the raw list. */
+const MEANINGFUL_EVENTS = new Set<string>([
+  "instance-started", "instance-completed", "instance-failed", "instance-cancelled",
+  "instance-suspended", "instance-resumed",
+  "node-entered", "node-exited", "node-failed",
+  "token-waiting", "token-completed", "token-failed",
+  "task-assigned", "task-reassigned", "task-completed", "task-claimed",
+  "variables-updated", "error", "incident-raised", "incident-resolved",
+  "replay", "impersonation",
+]);
+
+function isMeaningfulEvent(ev: { eventType: string }): boolean {
+  return MEANINGFUL_EVENTS.has(ev.eventType);
+}
+
+function humanizeEvent(type: string): { label: string; tone: "neutral" | "success" | "warning" | "danger" } {
+  const map: Record<string, { label: string; tone: "neutral" | "success" | "warning" | "danger" }> = {
+    "instance-started":    { label: "Process started", tone: "neutral" },
+    "instance-completed":  { label: "Process completed", tone: "success" },
+    "instance-failed":     { label: "Process failed", tone: "danger" },
+    "instance-cancelled":  { label: "Process cancelled", tone: "neutral" },
+    "instance-suspended":  { label: "Process paused", tone: "warning" },
+    "instance-resumed":    { label: "Process resumed", tone: "neutral" },
+    "node-entered":        { label: "Entered step", tone: "neutral" },
+    "node-exited":         { label: "Left step", tone: "neutral" },
+    "node-failed":         { label: "Step failed", tone: "danger" },
+    "token-created":       { label: "Execution started", tone: "neutral" },
+    "token-waiting":       { label: "Waiting for action", tone: "warning" },
+    "token-completed":     { label: "Step completed", tone: "success" },
+    "token-failed":        { label: "Step failed", tone: "danger" },
+    "edge-taken":          { label: "Moved to next step", tone: "neutral" },
+    "task-assigned":       { label: "Task assigned", tone: "neutral" },
+    "task-reassigned":     { label: "Task reassigned", tone: "neutral" },
+    "task-completed":      { label: "Task completed", tone: "success" },
+    "task-claimed":        { label: "Task claimed", tone: "neutral" },
+    "variables-updated":   { label: "Variables updated", tone: "neutral" },
+    "error":               { label: "Error", tone: "danger" },
+    "incident-raised":     { label: "Incident raised", tone: "danger" },
+    "incident-resolved":   { label: "Incident resolved", tone: "success" },
+    "replay":              { label: "Replayed from step", tone: "warning" },
+    "impersonation":       { label: "Admin acted as user", tone: "neutral" },
+  };
+  return map[type] ?? { label: type.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase()), tone: "neutral" };
+}
+
+function humanizeWaitingFor(raw: string | null): string {
+  if (!raw) return "—";
+  const map: Record<string, string> = {
+    userTask: "User action",
+    timer: "Timer",
+    message: "Message",
+    signal: "Signal",
+    serviceTask: "Service to run",
+  };
+  return map[raw] ?? raw;
+}
+
+function formatDuration(startedAt: string, completedAt: string | null): string {
+  const start = new Date(startedAt).getTime();
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+  const s = Math.max(0, Math.floor((end - start) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function formatAgo(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 2) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  return `${m}m ago`;
 }

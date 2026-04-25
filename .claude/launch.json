@@ -4,7 +4,7 @@
     {
       "name": "flowpro-web",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-c", "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" && nvm use 20.19.6 && cd web && VITE_API_PROXY=${VITE_API_PROXY:-http://localhost:3099} npx vite --port $PORT"],
+      "runtimeArgs": ["-c", "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" && nvm use 20.19.6 && cd web && VITE_API_PROXY=${VITE_API_PROXY:-http://localhost:3001} npx vite --port $PORT"],
       "port": 5180,
       "autoPort": true
     }
