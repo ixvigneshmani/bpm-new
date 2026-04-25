@@ -361,58 +361,59 @@ body {
  * dimmed. Applied to the node wrapper so the inner BPMN component
  * stays untouched and consistent with the designer. */
 
-.react-flow__node.inst-node-completed::before,
-.react-flow__node.inst-node-waiting::before,
-.react-flow__node.inst-node-failed::before,
-.react-flow__node.inst-node-selected::after {
+/* State indication on the diagram, scoped to the instance view.
+ * We do NOT add wrapper-level halo rings — they look oblong around
+ * event nodes because the wrapper is wider than tall. Instead:
+ *   • Completed → full opacity (default), node renders naturally.
+ *   • Unvisited → dimmed.
+ *   • Waiting/Failed → small status pill at the top-right corner.
+ *   • Selected → dashed indigo box.                                 */
+
+.instance-canvas-readonly .react-flow__node.inst-node-unvisited {
+  opacity: 0.5;
+}
+
+.instance-canvas-readonly .react-flow__node.inst-node-waiting::before,
+.instance-canvas-readonly .react-flow__node.inst-node-failed::before {
+  content: "";
+  position: absolute;
+  top: -6px; right: -6px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  pointer-events: none;
+  z-index: 5;
+}
+.instance-canvas-readonly .react-flow__node.inst-node-waiting::before {
+  background: #F59E0B;
+  box-shadow: 0 0 0 0 rgba(245,158,11,0.6);
+  animation: inst-pulse 1.6s ease-in-out infinite;
+}
+.instance-canvas-readonly .react-flow__node.inst-node-failed::before {
+  background: #EF4444;
+}
+
+.instance-canvas-readonly .react-flow__node.inst-node-selected::after {
   content: "";
   position: absolute;
   inset: -6px;
-  border-radius: 12px;
+  border-radius: 10px;
+  border: 2px dashed rgba(99, 102, 241, 0.9);
   pointer-events: none;
   z-index: 0;
 }
 
-/* Shape-aware ring: events become circular, gateways become rotated
- * squares (diamond), tasks/activities stay rounded rectangles. */
-.react-flow__node.inst-shape-circle::before,
-.react-flow__node.inst-shape-circle::after { border-radius: 50%; }
-
-.react-flow__node.inst-node-completed::before {
-  border: 1.75px solid rgba(16, 185, 129, 0.65);
-  background: transparent;
-}
-
-.react-flow__node.inst-node-waiting::before {
-  border: 2px solid rgba(245, 158, 11, 0.85);
-  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18);
-  animation: inst-pulse 1.6s ease-in-out infinite;
-}
-
-.react-flow__node.inst-node-failed::before {
-  border: 1.75px solid rgba(239, 68, 68, 0.7);
-  background: transparent;
-}
-
-.react-flow__node.inst-node-unvisited {
-  opacity: 0.55;
-}
-
-.react-flow__node.inst-node-selected::after {
-  inset: -10px;
-  border: 2px dashed rgba(99, 102, 241, 0.9);
-}
-
-/* Hide React Flow connection handles in the read-only instance view —
- * operators don't connect nodes, and the floating "+" dots are noise. */
-.instance-canvas-readonly .react-flow__handle {
-  opacity: 0 !important;
-  pointer-events: none !important;
+/* Hide every editor affordance in the read-only instance view: the
+ * React Flow handles AND the custom "+" connect chip rendered by the
+ * base node components. */
+.instance-canvas-readonly .react-flow__handle,
+.instance-canvas-readonly .bpmn-connect-chip {
+  display: none !important;
 }
 
 @keyframes inst-pulse {
-  0%, 100% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18); }
-  50%      { box-shadow: 0 0 0 10px rgba(245, 158, 11, 0.08); }
+  0%, 100% { box-shadow: 0 0 0 0   rgba(245,158,11, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(245,158,11, 0);    }
 }
 
 /* Edges: traversed = indigo bold, unvisited = dim */

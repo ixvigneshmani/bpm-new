@@ -753,10 +753,15 @@ function buildActivityFeed(args: {
   startedBy: string;
 }): ActivityRow[] {
   const { events, tokens, canvasNodes, startedBy } = args;
+  const nodeById = new Map(canvasNodes.map((n) => [n.id, n]));
   const labelOf = (id: string) => {
-    const n = canvasNodes.find((cn) => cn.id === id);
-    const lbl = (n?.data as { label?: string } | undefined)?.label;
+    const lbl = (nodeById.get(id)?.data as { label?: string } | undefined)?.label;
     return typeof lbl === "string" && lbl.trim() ? lbl : id;
+  };
+  const typeOf = (id: string) => nodeById.get(id)?.type ?? "";
+  const isStartEnd = (id: string) => {
+    const t = typeOf(id);
+    return t === "startEvent" || t === "endEvent";
   };
 
   const rows: ActivityRow[] = [];
@@ -775,7 +780,11 @@ function buildActivityFeed(args: {
       const at = new Date(ev.createdAt).getTime();
       const list = pendingEntries.get(ev.nodeId) ?? [];
       const entry = list.shift();
-      if (entry) {
+      // Start and end events fire at the same instant as
+      // instance-started / instance-completed — folding them into one
+      // row prevents duplicate "Process started + Leave submitted
+      // completed" lines for the same moment.
+      if (entry && !isStartEnd(ev.nodeId)) {
         rows.push({
           kind: "step",
           key: `step:${ev.id}`,
@@ -785,7 +794,7 @@ function buildActivityFeed(args: {
           enteredAt: entry.at,
           exitedAt: at,
           durationMs: at - entry.at,
-          userId: ev.userId ?? entry.userId ?? (rows.length === 0 ? startedBy : null),
+          userId: ev.userId ?? entry.userId ?? null,
         });
       }
       pendingEntries.set(ev.nodeId, list);
@@ -806,9 +815,13 @@ function buildActivityFeed(args: {
       });
       pendingEntries.set(ev.nodeId, list);
     } else if (ev.eventType === "instance-started") {
-      rows.push({ kind: "instance", key: ev.id, label: "Process started", tone: "neutral", at: new Date(ev.createdAt).getTime(), userId: ev.userId ?? startedBy });
+      const start = canvasNodes.find((n) => n.type === "startEvent");
+      const lbl = start ? `Process started — ${labelOf(start.id)}` : "Process started";
+      rows.push({ kind: "instance", key: ev.id, label: lbl, tone: "neutral", at: new Date(ev.createdAt).getTime(), userId: ev.userId ?? startedBy });
     } else if (ev.eventType === "instance-completed") {
-      rows.push({ kind: "instance", key: ev.id, label: "Process completed", tone: "success", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
+      const end = canvasNodes.find((n) => n.type === "endEvent");
+      const lbl = end ? `Process completed — ${labelOf(end.id)}` : "Process completed";
+      rows.push({ kind: "instance", key: ev.id, label: lbl, tone: "success", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
     } else if (ev.eventType === "instance-failed") {
       rows.push({ kind: "instance", key: ev.id, label: "Process failed", tone: "danger", at: new Date(ev.createdAt).getTime(), userId: ev.userId });
     } else if (ev.eventType === "instance-cancelled") {
