@@ -403,10 +403,15 @@ body {
   z-index: 0;
 }
 
-/* Hide every editor affordance in the read-only instance view: the
- * React Flow handles AND the custom "+" connect chip rendered by the
- * base node components. */
-.instance-canvas-readonly .react-flow__handle,
+/* Hide editor affordances in the read-only instance view. Note we
+ * use `visibility: hidden` (not `display: none`) on handles — React
+ * Flow needs the handle elements present to anchor edge endpoints,
+ * but they don't need to be visible or interactive. The "+" connect
+ * chip is purely decorative, so it can be removed outright. */
+.instance-canvas-readonly .react-flow__handle {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
 .instance-canvas-readonly .bpmn-connect-chip {
   display: none !important;
 }
