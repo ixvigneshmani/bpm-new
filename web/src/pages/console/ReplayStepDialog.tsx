@@ -4,11 +4,22 @@
  * Backed by POST /instances/:id/replay.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useActingForSnapshot } from "../../lib/acting-for";
+import {
+  BusinessDocForm,
+  coerceBusinessDocValues,
+  stringifyBusinessDocValues,
+  type BusinessDocSchema,
+} from "../../components/BusinessDocForm";
 
 export default function ReplayStepDialog(props: {
   targetNodeId: string;
+  /** Effective schema (businessDoc + step Outputs) used by the
+   *  optional "edit variables before replay" form. */
+  schema: BusinessDocSchema;
+  /** Current variables on the instance — pre-fills the edit form. */
+  currentVariables: Record<string, unknown>;
   onClose: () => void;
   onSubmit: (
     reason: string,
@@ -17,11 +28,31 @@ export default function ReplayStepDialog(props: {
     actingForSnapshot: string | null,
   ) => Promise<void>;
 }) {
-  const { targetNodeId, onClose, onSubmit } = props;
+  const { targetNodeId, schema, currentVariables, onClose, onSubmit } = props;
   const [reason, setReason] = useState("");
   const [patchJson, setPatchJson] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const hasSchema = useMemo(
+    () => !!schema && Object.keys(schema as Record<string, unknown>).length > 0,
+    [schema],
+  );
+  /* Replay variable choice — kept simple as a radio so the user
+   * always sees what's about to happen:
+   *   "current" → empty patch, current bag carries forward verbatim
+   *   "edit"    → form pre-filled from currentVariables; diff on submit
+   *   "json"    → raw patch JSON (existing behaviour, escape hatch)   */
+  const [varMode, setVarMode] = useState<"current" | "edit" | "json">("current");
+  const initialFormValues = useMemo(
+    () => stringifyBusinessDocValues(schema, currentVariables),
+    [schema, currentVariables],
+  );
+  const [formValues, setFormValues] = useState<Record<string, string>>(initialFormValues);
+  /* Two-step confirmation: the first click on the destructive button
+   * validates the form and flips into `confirming`; the second click
+   * actually fires the API call. Replaces the old window.confirm() so
+   * the entire flow stays inside the styled dialog. */
+  const [confirming, setConfirming] = useState(false);
   const actingForSnapshot = useActingForSnapshot();
   const idemKey = useRef<string>(
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -37,7 +68,16 @@ export default function ReplayStepDialog(props: {
       return;
     }
     let patch: Record<string, unknown> | undefined;
-    if (patchJson.trim()) {
+    if (varMode === "edit") {
+      // Coerce form values, then diff against current bag — same logic
+      // as EditVariablesDialog. Skip when there's no schema (defensive).
+      const next = coerceBusinessDocValues(schema, formValues);
+      const diff: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(next)) {
+        if (JSON.stringify(currentVariables[k]) !== JSON.stringify(v)) diff[k] = v;
+      }
+      patch = Object.keys(diff).length > 0 ? diff : undefined;
+    } else if (varMode === "json" && patchJson.trim()) {
       try {
         patch = JSON.parse(patchJson);
         if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
@@ -48,10 +88,15 @@ export default function ReplayStepDialog(props: {
         return;
       }
     }
-    const ok = window.confirm(
-      `Replay from "${targetNodeId}"?\n\nThis will CANCEL every live token on the instance and place a new token here. Cannot be undone.`,
-    );
-    if (!ok) return;
+    // varMode === "current" → patch stays undefined → engine uses
+    // existing variables verbatim.
+    if (!confirming) {
+      // First click: validation passed — arm the confirmation. The
+      // button label + a red callout below the form make the next
+      // click read clearly as "this is the destructive one".
+      setConfirming(true);
+      return;
+    }
     setSubmitting(true);
     try {
       await onSubmit(reason.trim(), patch, idemKey.current, actingForSnapshot);
@@ -103,22 +148,53 @@ export default function ReplayStepDialog(props: {
           </div>
 
           <div>
-            <Label>Variable patch (JSON, optional)</Label>
-            <div style={{ fontSize: 12, color: "#667085", marginBottom: 6 }}>
-              Shallow-merged before the token advances. <code>null</code> values delete keys.
+            <Label>Variables before replay</Label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+              <ReplayVarRadio
+                checked={varMode === "current"}
+                onChange={() => setVarMode("current")}
+                label="Replay with current values"
+                hint="The instance's existing variables carry forward unchanged."
+              />
+              {hasSchema && (
+                <ReplayVarRadio
+                  checked={varMode === "edit"}
+                  onChange={() => setVarMode("edit")}
+                  label="Edit variables before replay"
+                  hint="Pre-filled form. Only fields you change get patched."
+                />
+              )}
+              <ReplayVarRadio
+                checked={varMode === "json"}
+                onChange={() => setVarMode("json")}
+                label="Advanced — raw JSON patch"
+                hint="For unsetting keys (null) or sending values not in the schema."
+              />
             </div>
-            <textarea
-              value={patchJson}
-              onChange={(e) => setPatchJson(e.target.value)}
-              rows={8}
-              spellCheck={false}
-              placeholder="leave blank to replay with current variables"
-              style={{
-                width: "100%", padding: 12, borderRadius: 8, border: "1px solid #E5E7EB",
-                fontFamily: "var(--font-mono, monospace)", fontSize: 12, color: "#111827",
-                outline: "none", resize: "vertical",
-              }}
-            />
+
+            {varMode === "edit" && hasSchema && (
+              <BusinessDocForm
+                schema={schema}
+                values={formValues}
+                onChange={(name, v) => setFormValues((prev) => ({ ...prev, [name]: v }))}
+                disabled={submitting}
+              />
+            )}
+
+            {varMode === "json" && (
+              <textarea
+                value={patchJson}
+                onChange={(e) => setPatchJson(e.target.value)}
+                rows={8}
+                spellCheck={false}
+                placeholder='{"approved": true} — or leave blank to send no patch'
+                style={{
+                  width: "100%", padding: 12, borderRadius: 8, border: "1px solid #E5E7EB",
+                  fontFamily: "var(--font-mono, monospace)", fontSize: 12, color: "#111827",
+                  outline: "none", resize: "vertical",
+                }}
+              />
+            )}
           </div>
 
           {error && (
@@ -127,20 +203,35 @@ export default function ReplayStepDialog(props: {
             </div>
           )}
 
+          {confirming && !submitting && (
+            <div style={{ padding: "10px 14px", border: "1px solid #FCA5A5", background: "#FEF2F2", borderRadius: 8, fontSize: 13, color: "#B42318" }}>
+              <strong>Last chance.</strong> Click <em>Confirm — replay now</em> to cancel every live token and rewind to this step. Click <em>Back</em> to edit your inputs.
+            </div>
+          )}
+
           <div style={{ marginTop: "auto", display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <button type="button" onClick={onClose} disabled={submitting}
-              style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5E7EB", background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467", cursor: "pointer" }}>
-              Cancel
-            </button>
+            {confirming ? (
+              <button type="button" onClick={() => setConfirming(false)} disabled={submitting}
+                style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5E7EB", background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467", cursor: "pointer" }}>
+                Back
+              </button>
+            ) : (
+              <button type="button" onClick={onClose} disabled={submitting}
+                style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5E7EB", background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467", cursor: "pointer" }}>
+                Cancel
+              </button>
+            )}
             <button type="submit" disabled={submitting}
               style={{
                 padding: "9px 18px", borderRadius: 8, border: "none",
-                background: "linear-gradient(135deg, #D97706, #F59E0B)",
+                background: confirming
+                  ? "linear-gradient(135deg, #B42318, #D92D20)"
+                  : "linear-gradient(135deg, #D97706, #F59E0B)",
                 fontSize: 13, fontWeight: 600, color: "#fff", cursor: submitting ? "not-allowed" : "pointer",
                 opacity: submitting ? 0.7 : 1,
               }}
             >
-              {submitting ? "Replaying…" : "Replay instance"}
+              {submitting ? "Replaying…" : confirming ? "Confirm — replay now" : "Replay instance"}
             </button>
           </div>
         </form>
@@ -154,5 +245,30 @@ function Label(props: { children: React.ReactNode }) {
     <div style={{ fontSize: 11, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
       {props.children}
     </div>
+  );
+}
+
+function ReplayVarRadio(props: {
+  checked: boolean;
+  onChange: () => void;
+  label: string;
+  hint: string;
+}) {
+  const { checked, onChange, label, hint } = props;
+  return (
+    <label
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 10px",
+        border: "1px solid " + (checked ? "#C7D2FE" : "#E5E7EB"),
+        background: checked ? "#EEF2FF" : "#fff",
+        borderRadius: 8, cursor: "pointer",
+      }}
+    >
+      <input type="radio" checked={checked} onChange={onChange} style={{ marginTop: 2 }} />
+      <span>
+        <span style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#101828" }}>{label}</span>
+        <span style={{ display: "block", fontSize: 11, color: "#667085", marginTop: 2 }}>{hint}</span>
+      </span>
+    </label>
   );
 }

@@ -173,6 +173,17 @@ function harvestNodeOutputs(nodes: Node[]): FlatVariable[] {
     for (const m of readMappings(data, "outputMappings")) {
       if (m.target) push(m.target, coerceType(m.type), `Output: ${label}`);
     }
+
+    // Designer-declared task outputs (TaskOutputDecl[]). New flat
+    // declarative form on userTask + serviceTask — feeds the runtime
+    // form editor and shows up in autocomplete here.
+    const decls = data.outputs;
+    if (Array.isArray(decls)) {
+      for (const d of decls as Array<{ name?: unknown; type?: unknown }>) {
+        const name = typeof d.name === "string" ? d.name.trim() : "";
+        if (name) push(name, coerceType(typeof d.type === "string" ? d.type : undefined), `Output: ${label}`);
+      }
+    }
   }
 
   return out;
@@ -203,6 +214,15 @@ function outputDigest(nodes: Node[]): string {
     const generic = readMappings(d, "outputMappings")
       .map((m) => `${m.target ?? ""}/${m.type ?? ""}`).join(",");
     if (generic) parts.push(`g:${n.id}:${generic}`);
+    // TaskOutputDecl[] — included so adding/editing a declared output
+    // re-fires the registry memo. Cheap shallow signature.
+    const decls = d.outputs;
+    if (Array.isArray(decls)) {
+      const sig = (decls as Array<{ name?: unknown; type?: unknown }>)
+        .map((x) => `${typeof x.name === "string" ? x.name : ""}/${typeof x.type === "string" ? x.type : ""}`)
+        .join(",");
+      if (sig) parts.push(`d:${n.id}:${sig}`);
+    }
   }
   return parts.join("|");
 }

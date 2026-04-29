@@ -579,8 +579,19 @@ export default function DesignCanvasPage() {
             const payload = normalizeCanvasPayload(proc.canvasData);
             loadCanvasData(payload.nodes, payload.edges);
           }
-          // Resume at the correct step
-          setWizardStep(STEP_MAP[proc.step] || "details");
+          // Resume at the correct step. VX1 guard: even if the
+          // server says step="canvas", route the user back to the
+          // Document step when no businessDoc fields exist — the doc
+          // is mandatory before any canvas work. Catches legacy
+          // processes that were saved at canvas step before the
+          // gate landed.
+          const resolvedStep = STEP_MAP[proc.step] || "details";
+          const docFieldCount = proc.document?.schemaOverride
+            ? Object.keys(proc.document.schemaOverride).length
+            : 0;
+          setWizardStep(
+            resolvedStep === "canvas" && docFieldCount === 0 ? "document" : resolvedStep,
+          );
         } catch {
           navigate("/designer", { replace: true });
           return;

@@ -18,6 +18,7 @@
 import { useCallback, useState } from "react";
 import { apiGet, apiPost } from "../lib/api";
 import { useVisiblePoll } from "../lib/use-visible-poll";
+import ConfirmModal, { type ConfirmConfig } from "../components/ConfirmModal";
 
 type Task = {
   tokenId: string;
@@ -238,6 +239,7 @@ function TaskDrawer(props: {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CompleteResponse | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
   const isClaimed = !!task.assignedTo;
   const isRoleGated = !!task.candidateRole;
 
@@ -288,11 +290,19 @@ function TaskDrawer(props: {
     // prompt because the common "acknowledge and move on" flow
     // doesn't warrant a dialog.
     if (Object.keys(parsed).length > 0) {
-      const ok = window.confirm(
-        "Complete this task with the entered form data? This advances the process and can't be undone.",
-      );
-      if (!ok) return;
+      // Hand off to a styled confirm; doSubmit runs only on confirm.
+      setConfirm({
+        title: "Complete task with form data?",
+        confirmLabel: "Complete task",
+        body: "This advances the process and can't be undone. The form data you entered will be merged into the instance variables.",
+        onConfirm: () => { setConfirm(null); void doSubmit(parsed); },
+      });
+      return;
     }
+    void doSubmit(parsed);
+  };
+
+  const doSubmit = async (parsed: Record<string, unknown>) => {
     setSubmitting(true);
     try {
       const res = await apiPost<CompleteResponse>(
@@ -446,6 +456,7 @@ function TaskDrawer(props: {
           )}
         </div>
       </div>
+      {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
     </>
   );
 }

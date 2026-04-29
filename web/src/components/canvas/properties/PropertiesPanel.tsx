@@ -39,6 +39,7 @@ import type {
   CompensationMarker,
   VariableMapping,
   KeyValuePair,
+  TaskOutputDecl,
 } from "../../../types/bpmn-node-data";
 import type { GatewayKind } from "./sections/GatewayFlowsSection";
 import GeneralSection from "./sections/GeneralSection";
@@ -49,6 +50,7 @@ import ImplementationSection from "./sections/ImplementationSection";
 import ResilienceSection from "./sections/ResilienceSection";
 import GatewayFlowsSection from "./sections/GatewayFlowsSection";
 import VariablesSection from "./sections/VariablesSection";
+import OutputsSection from "./sections/OutputsSection";
 import ScriptSection from "./sections/ScriptSection";
 import MessageSection from "./sections/MessageSection";
 import ManualInstructionsSection from "./sections/ManualInstructionsSection";
@@ -110,8 +112,16 @@ export default function PropertiesPanel() {
   const setEdgeCondition = useCanvasStore((s) => s.setEdgeCondition);
   const setEdgeFlowType = useCanvasStore((s) => s.setEdgeFlowType);
   const setGatewayDefaultFlow = useCanvasStore((s) => s.setGatewayDefaultFlow);
+  const businessDoc = useCanvasStore((s) => s.processMeta.businessDoc);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+  // Reserved names = top-level keys in the process Business Document.
+  // Used by the Outputs section to warn the designer about shadowing —
+  // businessDoc wins at runtime merge time.
+  const reservedDocNames =
+    businessDoc && typeof businessDoc === "object"
+      ? Object.keys(businessDoc as Record<string, unknown>)
+      : [];
   const selectedEdge = !selectedNode ? edges.find((e) => e.selected) : undefined;
 
   if (!selectedNode && selectedEdge) {
@@ -258,6 +268,18 @@ export default function PropertiesPanel() {
         />
       ),
     });
+    sections.push({
+      id: "outputs",
+      title: "Outputs",
+      icon: <SectionIcon d="M5 12h14" extra={<polyline points="13 5 20 12 13 19" />} />,
+      content: (
+        <OutputsSection
+          outputs={d.outputs}
+          reservedNames={reservedDocNames}
+          onChange={(next: TaskOutputDecl[]) => update({ outputs: next })}
+        />
+      ),
+    });
   }
 
   if (bpmnType === "serviceTask") {
@@ -282,6 +304,18 @@ export default function PropertiesPanel() {
         <ResilienceSection
           resilience={d.resilience}
           onChange={(r: ResilienceConfig) => update({ resilience: r })}
+        />
+      ),
+    });
+    sections.push({
+      id: "outputs",
+      title: "Outputs",
+      icon: <SectionIcon d="M5 12h14" extra={<polyline points="13 5 20 12 13 19" />} />,
+      content: (
+        <OutputsSection
+          outputs={d.outputs}
+          reservedNames={reservedDocNames}
+          onChange={(next: TaskOutputDecl[]) => update({ outputs: next })}
         />
       ),
     });

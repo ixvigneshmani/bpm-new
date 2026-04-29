@@ -9,6 +9,7 @@ import { useParams, Link } from "react-router-dom";
 import { apiGet, apiPost } from "../../lib/api";
 import { Banner, primaryBtn, secondaryBtn } from "./ProcessesPanel";
 import InstanceCanvas from "./InstanceCanvas";
+import ConfirmModal, { type ConfirmConfig } from "../../components/ConfirmModal";
 
 type InstanceDetail = {
   id: string;
@@ -57,6 +58,7 @@ export default function InstancePanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -93,18 +95,33 @@ export default function InstancePanel() {
     return () => window.clearInterval(t);
   }, [refresh, detail?.status]);
 
-  const cancel = async () => {
+  const cancel = () => {
     if (!id || !detail) return;
-    if (!window.confirm(`Cancel instance ${id}? This terminates all running tokens.`)) return;
-    setCancelling(true);
-    try {
-      await apiPost(`/instances/${id}/cancel`, { reason: "console-cancel" });
-      await refresh();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setCancelling(false);
-    }
+    setConfirm({
+      title: "Cancel instance?",
+      danger: true,
+      confirmLabel: "Cancel instance",
+      cancelLabel: "Keep running",
+      body: (
+        <>
+          This terminates all running tokens on instance{" "}
+          <code style={{ background: "#F2F4F7", padding: "1px 6px", borderRadius: 4, fontSize: 12 }}>{id}</code>.
+          Cannot be undone.
+        </>
+      ),
+      onConfirm: async () => {
+        setConfirm(null);
+        setCancelling(true);
+        try {
+          await apiPost(`/instances/${id}/cancel`, { reason: "console-cancel" });
+          await refresh();
+        } catch (e) {
+          setError((e as Error).message);
+        } finally {
+          setCancelling(false);
+        }
+      },
+    });
   };
 
   // Prefer the live process canvas (has positions) over the versioned
@@ -260,6 +277,7 @@ export default function InstancePanel() {
         <strong>Force-ops</strong> (set variable, force-fail, force-resume) land in the Ops &amp; Security milestone (OS2).
         This panel will surface them here once the admin API exists.
       </div>
+      {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
     </div>
   );
 }

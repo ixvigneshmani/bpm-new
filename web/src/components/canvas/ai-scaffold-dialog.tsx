@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useReactFlow, type Node, type Edge } from "@xyflow/react";
 import useCanvasStore, { type RefineOp } from "../../store/canvas-store";
+import ConfirmModal, { type ConfirmConfig } from "../ConfirmModal";
 
 type ScaffoldResponse = {
   processName: string;
@@ -116,6 +117,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [reapplyingId, setReapplyingId] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -273,11 +275,20 @@ export default function AiScaffoldDialog({ onClose }: Props) {
     if (existingNodeCount > 0) {
       // One explicit confirm per session beats a quiet 10px footer
       // hint for the class of user who has real work on the canvas.
-      const ok = window.confirm(
-        `Replace the ${existingNodeCount} element(s) currently on the canvas with the AI scaffold? This cannot be undone.`,
-      );
-      if (!ok) return;
+      setConfirm({
+        title: "Replace canvas with AI scaffold?",
+        danger: true,
+        confirmLabel: "Replace and apply",
+        body: <>Replace the <strong>{existingNodeCount} element(s)</strong> currently on the canvas with the AI scaffold? Cannot be undone.</>,
+        onConfirm: () => { setConfirm(null); doApply(); },
+      });
+      return;
     }
+    doApply();
+  }
+
+  function doApply() {
+    if (!result || result.nodes.length === 0) return;
     loadCanvasData(result.nodes, result.edges);
     if (result.processName) {
       setProcessMeta({ name: result.processName, description: result.processDescription || "" });
@@ -298,10 +309,21 @@ export default function AiScaffoldDialog({ onClose }: Props) {
     if (skipped > 0) {
       // Ops were produced against the canvas snapshot at generate-time;
       // if the user edited during generation some targets may no longer
-      // exist. A mid-request alert beats a silent partial apply.
-      window.alert(
-        `${skipped} of ${refineResult.ops.length} change(s) skipped — the canvas changed since the AI started. Review the result.`,
-      );
+      // exist. A modal here beats a silent partial apply, but the
+      // canvas already updated so we close + auto-fit AFTER the user
+      // dismisses the notice.
+      setConfirm({
+        title: "Some changes skipped",
+        alertOnly: true,
+        body: `${skipped} of ${refineResult.ops.length} change(s) skipped — the canvas changed since the AI started. Review the result.`,
+        onConfirm: () => {
+          setConfirm(null);
+          setHistory(null);
+          onClose();
+          setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
+        },
+      });
+      return;
     }
     setHistory(null);
     onClose();
@@ -353,11 +375,22 @@ export default function AiScaffoldDialog({ onClose }: Props) {
     // Confirm before we spend a network round-trip fetching a ~20 KB
     // payload only to discard it.
     if (existingNodeCount > 0) {
-      const ok = window.confirm(
-        `Replace the ${existingNodeCount} element(s) currently on the canvas with this saved scaffold? This cannot be undone.`,
-      );
-      if (!ok) return;
+      // Wait for the user to confirm via the styled modal, then
+      // chain into the network fetch by re-invoking reapply with a
+      // sentinel that skips the gate. Cleaner than mid-async confirm.
+      setConfirm({
+        title: "Replace canvas with saved scaffold?",
+        danger: true,
+        confirmLabel: "Replace and apply",
+        body: <>Replace the <strong>{existingNodeCount} element(s)</strong> currently on the canvas with this saved scaffold? Cannot be undone.</>,
+        onConfirm: () => { setConfirm(null); void doReapply(id); },
+      });
+      return;
     }
+    return doReapply(id);
+  }
+
+  async function doReapply(id: string) {
     setReapplyingId(id);
     setHistoryError(null);
     try {
@@ -683,6 +716,7 @@ export default function AiScaffoldDialog({ onClose }: Props) {
           </div>
         </div>
       </div>
+      {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
     </div>
   );
 }

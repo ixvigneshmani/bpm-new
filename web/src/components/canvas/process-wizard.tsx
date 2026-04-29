@@ -765,6 +765,14 @@ function StepDocument() {
 
   const handleOpenCanvas = async () => {
     if (!processId) { setSaveError("Process not saved yet. Go back and save details first."); return; }
+    // VX1: businessDoc is mandatory before reaching the canvas. The
+    // earlier `!schemaChanged && initialSchemaJson` short-circuit
+    // would let an empty pre-existing schema pass through; now the
+    // hasSchema check applies in every path.
+    if (!hasSchema) {
+      setSaveError("Add at least one named field before opening the canvas. The Business Document is mandatory.");
+      return;
+    }
     if (!schemaChanged && initialSchemaJson) {
       setWizardStep("canvas");
       return;
@@ -788,6 +796,18 @@ function StepDocument() {
       setSource(processMeta.businessDocSource || "paste");
     }
     if (pendingNav) {
+      // VX1: don't let "discard changes" smuggle the user onto the
+      // canvas when the original schema is empty. Force them back to
+      // details (or stay) so the mandatory rule still applies.
+      const hasOriginalSchema =
+        !!processMeta.businessDoc &&
+        typeof processMeta.businessDoc === "object" &&
+        Object.keys(processMeta.businessDoc).length > 0;
+      if (pendingNav === "canvas" && !hasOriginalSchema) {
+        setSaveError("Add at least one named field before opening the canvas.");
+        setPendingNav(null);
+        return;
+      }
       setWizardStep(pendingNav);
       setPendingNav(null);
     }
@@ -964,13 +984,19 @@ function StepDocument() {
               background: "#fff", color: "#374151", fontSize: 14, fontWeight: 500,
               cursor: "pointer", fontFamily: "inherit",
             }}>← Details</button>
-            <button onClick={() => !saving && handleOpenCanvas()} style={{
-              padding: "11px 32px", borderRadius: 10, border: "none",
-              background: (hasSchema || initialSchemaJson) ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
-              color: (hasSchema || initialSchemaJson) ? "#fff" : "#9CA3AF", fontSize: 14, fontWeight: 600,
-              cursor: saving ? "not-allowed" : "pointer", fontFamily: "inherit",
-              boxShadow: (hasSchema || initialSchemaJson) ? "0 4px 12px rgba(79,70,229,0.25)" : "none",
-            }}>{saving ? "Saving..." : schemaChanged ? "Save & Open Canvas →" : wizardOrigin === "canvas" ? "Back to Canvas →" : "Open Canvas →"}</button>
+            <button
+              onClick={() => !saving && hasSchema && handleOpenCanvas()}
+              disabled={!hasSchema || saving}
+              title={hasSchema ? undefined : "Add at least one named field — the Business Document is mandatory."}
+              style={{
+                padding: "11px 32px", borderRadius: 10, border: "none",
+                background: hasSchema && !saving ? "linear-gradient(135deg, #4F46E5, #6366F1)" : "#E5E7EB",
+                color: hasSchema && !saving ? "#fff" : "#9CA3AF", fontSize: 14, fontWeight: 600,
+                cursor: !hasSchema || saving ? "not-allowed" : "pointer",
+                fontFamily: "inherit",
+                boxShadow: hasSchema && !saving ? "0 4px 12px rgba(79,70,229,0.25)" : "none",
+              }}
+            >{saving ? "Saving..." : schemaChanged ? "Save & Open Canvas →" : wizardOrigin === "canvas" ? "Back to Canvas →" : "Open Canvas →"}</button>
           </div>
           {saveError && (
             <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: 8, background: "#FEF2F2", border: "1px solid #FECACA", color: "#DC2626", fontSize: 12 }}>

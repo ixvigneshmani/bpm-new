@@ -15,6 +15,12 @@ import StepSnapshot from "./console/StepSnapshot";
 import EditVariablesDialog from "./console/EditVariablesDialog";
 import ReplayStepDialog from "./console/ReplayStepDialog";
 import AiCopilotDialog from "./console/AiCopilotDialog";
+import {
+  BusinessDocForm,
+  buildEffectiveSchema,
+  coerceBusinessDocValues,
+  type BusinessDocSchema,
+} from "../components/BusinessDocForm";
 import { useAuth } from "../lib/auth";
 import { useActingForSnapshot } from "../lib/acting-for";
 
@@ -94,6 +100,10 @@ export default function InstanceDetailPage() {
   const navigate = useNavigate();
   const [detail, setDetail] = useState<InstanceDetail | null>(null);
   const [processCanvas, setProcessCanvas] = useState<CanvasData | null>(null);
+  /* VX1: businessDoc schema fetched alongside the canvas so the
+   * runtime form (Edit / Replay / Complete) can render typed inputs
+   * instead of forcing the operator into raw JSON. */
+  const [businessDocSchema, setBusinessDocSchema] = useState<Record<string, string> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -102,6 +112,8 @@ export default function InstanceDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [suspendOpen, setSuspendOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit" | "replay">(null);
   const [activeTab, setActiveTab] = useState<TabKey>("activity");
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
@@ -117,8 +129,12 @@ export default function InstanceDetailPage() {
       setDetail(data);
       if (!processCanvas) {
         try {
-          const p = await apiGet<{ canvasData?: CanvasData }>(`/processes/${data.processId}`);
+          const p = await apiGet<{ canvasData?: CanvasData; document?: { schemaOverride?: Record<string, string> } }>(`/processes/${data.processId}`);
           if (p.canvasData) setProcessCanvas(p.canvasData);
+          // schemaOverride is the flat {fieldName: typeString} map saved
+          // at wizard step 2. Falls through to {} if a process predates
+          // the mandatory-doc gate.
+          setBusinessDocSchema(p.document?.schemaOverride ?? {});
         } catch { /* non-fatal */ }
       }
       setError(null);
@@ -167,30 +183,33 @@ export default function InstanceDetailPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedNodeId, pinned]);
 
-  const onCancel = async () => {
-    if (!detail || !window.confirm(`Cancel this instance? This cannot be undone.`)) return;
+  const onCancel = () => setCancelOpen(true);
+  const onCancelConfirmed = async (reason: string) => {
+    if (!detail) return;
     setCancelling(true);
     try {
-      await apiPost(`/instances/${detail.id}/cancel`, { reason: "Cancelled from UI" }, {
+      await apiPost(`/instances/${detail.id}/cancel`, { reason: reason || "Cancelled from UI" }, {
         headers: { "Idempotency-Key": newIdemKey() },
         actingForOverride: pageActingFor,
       });
+      setCancelOpen(false);
       await refresh();
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) { throw e; }
     finally { setCancelling(false); }
   };
 
-  const onSuspend = async () => {
+  const onSuspend = () => setSuspendOpen(true);
+  const onSuspendConfirmed = async (reason: string) => {
     if (!detail) return;
-    const reason = window.prompt("Reason for suspending? (optional)") ?? "";
     setBusyAction("suspend");
     try {
-      await apiPost(`/instances/${detail.id}/suspend`, reason.trim() ? { reason: reason.trim() } : {}, {
+      await apiPost(`/instances/${detail.id}/suspend`, reason ? { reason } : {}, {
         headers: { "Idempotency-Key": newIdemKey() },
         actingForOverride: pageActingFor,
       });
+      setSuspendOpen(false);
       await refresh();
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) { throw e; }
     finally { setBusyAction(null); }
   };
 
@@ -244,6 +263,7 @@ export default function InstanceDetailPage() {
    * are direct calls (with confirms where needed). */
   const [completeForToken, setCompleteForToken] = useState<string | null>(null);
   const [reassignForToken, setReassignForToken] = useState<string | null>(null);
+  const [skipForToken, setSkipForToken] = useState<string | null>(null);
 
   const onClaimTask = async (tokenId: string) => {
     try {
@@ -274,19 +294,25 @@ export default function InstanceDetailPage() {
     setReassignForToken(null);
     await refresh();
   };
-  const onSkipTask = async (tokenId: string) => {
-    const reason = window.prompt("Reason for skipping this task? (optional, but recommended for the audit trail)");
-    if (reason === null) return; // user cancelled
-    try {
-      await apiPost(`/tasks/${tokenId}/skip`, reason.trim() ? { reason: reason.trim() } : {}, {
-        headers: { "Idempotency-Key": newIdemKey() },
-        actingForOverride: pageActingFor,
-      });
-      await refresh();
-    } catch (e) { setError((e as Error).message); }
+  const onOpenSkip = (tokenId: string) => setSkipForToken(tokenId);
+  const onSubmitSkip = async (tokenId: string, reason: string) => {
+    await apiPost(`/tasks/${tokenId}/skip`, reason ? { reason } : {}, {
+      headers: { "Idempotency-Key": newIdemKey() },
+      actingForOverride: pageActingFor,
+    });
+    setSkipForToken(null);
+    await refresh();
   };
 
   const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
+
+  /* Effective schema for the runtime forms = process Business Document
+   * + step-declared Outputs harvested from the canvas. Memoised so
+   * dialogs don't recompute on every parent re-render. */
+  const fullEffectiveSchema: BusinessDocSchema = useMemo(
+    () => buildEffectiveSchema(businessDocSchema, canvas?.nodes),
+    [businessDocSchema, canvas?.nodes],
+  );
 
   const selectedNode: CanvasNode | null = useMemo(() => {
     if (!canvas || !selectedNodeId) return null;
@@ -499,7 +525,7 @@ export default function InstanceDetailPage() {
           onReleaseTask={onReleaseTask}
           onCompleteTask={onOpenComplete}
           onReassignTask={onOpenReassign}
-          onSkipTask={onSkipTask}
+          onSkipTask={onOpenSkip}
           canAdmin={canAdmin}
           pinned={pinned}
           onTogglePin={() => setPinned((v) => !v)}
@@ -513,6 +539,7 @@ export default function InstanceDetailPage() {
       {editOpen && (
         <EditVariablesDialog
           currentVariables={detail.variables}
+          schema={fullEffectiveSchema}
           onClose={() => setEditOpen(false)}
           onSubmit={onEditSubmit}
         />
@@ -520,6 +547,8 @@ export default function InstanceDetailPage() {
       {replayOpen && selectedNodeId && (
         <ReplayStepDialog
           targetNodeId={selectedNodeId}
+          schema={fullEffectiveSchema}
+          currentVariables={detail.variables}
           onClose={() => setReplayOpen(false)}
           onSubmit={onReplaySubmit}
         />
@@ -530,13 +559,23 @@ export default function InstanceDetailPage() {
           onClose={() => setAiOpen(false)}
         />
       )}
-      {completeForToken && (
-        <CompleteTaskDialog
-          tokenId={completeForToken}
-          onClose={() => setCompleteForToken(null)}
-          onSubmit={onSubmitComplete}
-        />
-      )}
+      {completeForToken && (() => {
+        // Per-step schema = businessDoc + just THIS userTask's outputs.
+        // Other tasks' outputs aren't relevant on this Complete and
+        // would clutter the form.
+        const tok = detail.tokens.find((t) => t.id === completeForToken);
+        const stepSchema = tok
+          ? buildEffectiveSchema(businessDocSchema, canvas?.nodes, { currentNodeId: tok.currentNodeId })
+          : (businessDocSchema ?? {});
+        return (
+          <CompleteTaskDialog
+            tokenId={completeForToken}
+            schema={stepSchema}
+            onClose={() => setCompleteForToken(null)}
+            onSubmit={onSubmitComplete}
+          />
+        );
+      })()}
       {reassignForToken && (
         <ReassignTaskDialog
           tokenId={reassignForToken}
@@ -544,6 +583,25 @@ export default function InstanceDetailPage() {
           currentAssignee={detail.tokens.find((t) => t.id === reassignForToken)?.assignedTo ?? null}
           onClose={() => setReassignForToken(null)}
           onSubmit={onSubmitReassign}
+        />
+      )}
+      {skipForToken && (
+        <SkipTaskDialog
+          tokenId={skipForToken}
+          onClose={() => setSkipForToken(null)}
+          onSubmit={onSubmitSkip}
+        />
+      )}
+      {cancelOpen && (
+        <CancelInstanceDialog
+          onClose={() => setCancelOpen(false)}
+          onSubmit={onCancelConfirmed}
+        />
+      )}
+      {suspendOpen && (
+        <SuspendInstanceDialog
+          onClose={() => setSuspendOpen(false)}
+          onSubmit={onSuspendConfirmed}
         />
       )}
     </div>
@@ -607,7 +665,10 @@ function NodeDrawer(props: {
         position: "fixed", top: 20, right: 20, bottom: 20, width: 400,
         background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12,
         boxShadow: "0 24px 48px -12px rgba(16,24,40,0.18), 0 8px 16px -6px rgba(16,24,40,0.10)",
-        zIndex: 40, display: "flex", flexDirection: "column", overflow: "hidden",
+        // overflow: visible (not hidden) so action-bar tooltips can escape
+        // the drawer bounds. The body has its own overflowY:auto that
+        // continues to clip scrolling content within its own rectangle.
+        zIndex: 40, display: "flex", flexDirection: "column", overflow: "visible",
       }}
     >
       <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid #EAECF0" }}>
@@ -689,103 +750,293 @@ function NodeDrawer(props: {
         </Collapsible>
       </div>
 
-      <div style={{ padding: "12px 16px", borderTop: "1px solid #EAECF0", background: "#FCFCFD" }}>
-        {canAdmin ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {(canClaim || canRelease || canComplete) && (
-              <ActionGroup label="Task actions">
-                {canClaim && (
-                  <button
-                    onClick={() => liveToken && onClaimTask(liveToken.id)}
-                    style={actionBtnPrimary}
-                    title="Take ownership of this task"
-                  >
-                    Claim
-                  </button>
-                )}
-                {canComplete && (
-                  <button
-                    onClick={() => liveToken && onCompleteTask(liveToken.id)}
-                    style={actionBtn}
-                    title="Mark this task as done"
-                  >
-                    Complete
-                  </button>
-                )}
-                {canRelease && (
-                  <button
-                    onClick={() => liveToken && onReleaseTask(liveToken.id)}
-                    style={actionBtn}
-                    title="Release back to the role queue"
-                  >
-                    Release
-                  </button>
-                )}
-              </ActionGroup>
-            )}
-
-            {isUserTask && isWaiting && !canClaim && !canRelease && !canComplete && (
-              <div style={{ fontSize: 11, color: "#667085", padding: "0 0 4px" }}>
-                You don't have permission to act on this task.
-                {liveToken?.candidateRole && ` Required role: ${liveToken.candidateRole}.`}
-              </div>
-            )}
-
-            {(canReassign || canSkip) && (
-              <ActionGroup label="Admin overrides">
-                {canReassign && (
-                  <button
-                    onClick={() => liveToken && onReassignTask(liveToken.id)}
-                    style={actionBtn}
-                    title="Reassign this task to a different user"
-                  >
-                    Reassign…
-                  </button>
-                )}
-                {canSkip && (
-                  <button
-                    onClick={() => liveToken && onSkipTask(liveToken.id)}
-                    style={actionBtn}
-                    title="Advance the token past this step without form data"
-                  >
-                    Skip step
-                  </button>
-                )}
-              </ActionGroup>
-            )}
-
-            <ActionGroup label="Step actions">
-              <button onClick={onReplay} style={actionBtn} title="Cancel live tokens and rewind to this step">
-                ⟲ Replay from this step
-              </button>
-            </ActionGroup>
-
-            <ActionGroup label="AI">
-              <button onClick={onExplain} style={actionBtn}>
-                ✨ Explain this step
-              </button>
-            </ActionGroup>
-          </div>
-        ) : (
-          <div style={{ fontSize: 12, color: "#667085", padding: "4px 0" }}>
-            Instance is not in a live state — actions are disabled.
-          </div>
-        )}
-      </div>
+      <DrawerActionBar
+        canAdmin={canAdmin}
+        isUserTask={isUserTask}
+        isWaiting={isWaiting}
+        candidateRole={liveToken?.candidateRole ?? null}
+        liveTokenId={liveToken?.id ?? null}
+        eligibility={{ canClaim, canComplete, canRelease, canReassign, canSkip }}
+        onClaim={onClaimTask}
+        onComplete={onCompleteTask}
+        onRelease={onReleaseTask}
+        onReassign={onReassignTask}
+        onSkip={onSkipTask}
+        onReplay={onReplay}
+        onExplain={onExplain}
+      />
     </aside>
   );
 }
 
-function ActionGroup({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div style={{ fontSize: 10, fontWeight: 700, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-        {label}
+/* ─── Drawer action bar (two-row compact toolbar) ────────────────────
+ * Top row: lifecycle buttons (Claim / Complete / Release). Only the
+ *   eligible one is shown filled; ineligible siblings render disabled
+ *   so the user always sees the full lifecycle map for this task.
+ * Bottom row: icon-only secondary actions (Reassign / Skip / Replay /
+ *   Explain). All admin-visible at all times; tooltips carry labels.
+ *   "Skip" gets a destructive tint to discourage accidental clicks.
+ * Nothing hides behind a menu — the user's earlier complaint with the
+ * overflow design. */
+function DrawerActionBar(props: {
+  canAdmin: boolean;
+  isUserTask: boolean;
+  isWaiting: boolean;
+  candidateRole: string | null;
+  liveTokenId: string | null;
+  eligibility: {
+    canClaim: boolean;
+    canComplete: boolean;
+    canRelease: boolean;
+    canReassign: boolean;
+    canSkip: boolean;
+  };
+  onClaim: (tokenId: string) => Promise<void> | void;
+  onComplete: (tokenId: string) => Promise<void> | void;
+  onRelease: (tokenId: string) => Promise<void> | void;
+  onReassign: (tokenId: string) => Promise<void> | void;
+  onSkip: (tokenId: string) => Promise<void> | void;
+  onReplay: () => void;
+  onExplain: () => void;
+}) {
+  const { canAdmin, isUserTask, isWaiting, candidateRole, liveTokenId,
+    eligibility: e, onClaim, onComplete, onRelease, onReassign, onSkip,
+    onReplay, onExplain } = props;
+
+  if (!canAdmin) {
+    return (
+      <div style={actionBarShell}>
+        <div style={{ fontSize: 12, color: "#667085", textAlign: "center" }}>
+          Instance is not in a live state — actions are disabled.
+        </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {children}
+    );
+  }
+
+  // Show the lifecycle row only on user tasks; for other node types
+  // (events, gateways, service tasks) lifecycle buttons aren't
+  // applicable and would be permanently disabled — visual noise.
+  const showLifecycle = isUserTask && isWaiting;
+  const noLifecyclePermission = showLifecycle && !e.canClaim && !e.canComplete && !e.canRelease;
+
+  // Pick the lifecycle button that gets the filled-primary treatment.
+  // Claim takes precedence (the act-first step); Complete next; Release
+  // last (a recovery action, not a primary). Only one filled at a time
+  // so the user's eye lands on the next correct step.
+  const primaryKey: "claim" | "complete" | "release" | null =
+    e.canClaim ? "claim" : e.canComplete ? "complete" : e.canRelease ? "release" : null;
+
+  const lifecycleBtn = (
+    key: "claim" | "complete" | "release",
+    label: string,
+    title: string,
+    enabled: boolean,
+    onClick: () => void,
+  ) => {
+    const isPrimary = primaryKey === key;
+    return (
+      <button
+        key={key}
+        onClick={enabled ? onClick : undefined}
+        disabled={!enabled}
+        title={enabled ? title : `${title} — not available in current state`}
+        style={{
+          flex: 1,
+          padding: "8px 10px",
+          fontSize: 13,
+          fontWeight: isPrimary ? 600 : 500,
+          borderRadius: 8,
+          fontFamily: "inherit",
+          cursor: enabled ? "pointer" : "not-allowed",
+          background: isPrimary ? "#6366F1" : "#fff",
+          color: !enabled ? "#98A2B3" : isPrimary ? "#fff" : "#344054",
+          border: isPrimary ? "1px solid #6366F1" : "1px solid #D0D5DD",
+          opacity: !enabled ? 0.6 : 1,
+          transition: "background 120ms",
+        }}
+      >
+        {label}
+      </button>
+    );
+  };
+
+  return (
+    <div style={actionBarShell}>
+      {showLifecycle && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          {lifecycleBtn("claim",    "Claim",    "Take ownership of this task",     e.canClaim,    () => liveTokenId && onClaim(liveTokenId))}
+          {lifecycleBtn("complete", "Complete", "Mark this task as done",          e.canComplete, () => liveTokenId && onComplete(liveTokenId))}
+          {lifecycleBtn("release",  "Release",  "Release back to the role queue",  e.canRelease,  () => liveTokenId && onRelease(liveTokenId))}
+        </div>
+      )}
+
+      {noLifecyclePermission && (
+        <div style={{ fontSize: 11, color: "#667085", marginBottom: 8 }}>
+          You don't have permission to act on this task.
+          {candidateRole && ` Required role: ${candidateRole}.`}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        {showLifecycle && (
+          <>
+            <IconActionButton
+              title="Reassign to another user"
+              onClick={() => liveTokenId && onReassign(liveTokenId)}
+              icon={<ReassignIcon />}
+            />
+            <IconActionButton
+              title="Skip this step (advance without form data)"
+              onClick={() => liveTokenId && onSkip(liveTokenId)}
+              icon={<SkipIcon />}
+              destructive
+            />
+            <DividerDot />
+          </>
+        )}
+        <IconActionButton
+          title="Replay from this step"
+          onClick={onReplay}
+          icon={<ReplayIcon />}
+        />
+        <IconActionButton
+          title="Explain this step (AI)"
+          onClick={onExplain}
+          icon={<SparkleIcon />}
+          accent
+        />
       </div>
     </div>
+  );
+}
+
+const actionBarShell: React.CSSProperties = {
+  padding: "10px 12px",
+  borderTop: "1px solid #EAECF0",
+  background: "#FCFCFD",
+};
+
+/** Square icon button with an instant custom tooltip. We deliberately
+ *  avoid the native `title` attribute — browsers gate it behind a
+ *  ~700 ms delay and won't let us style it, which is wrong for a
+ *  toolbar where users need to identify icons at a glance. The label
+ *  also doubles as `aria-label` for screen readers. */
+function IconActionButton(props: {
+  title: string;
+  onClick: () => void;
+  icon: React.ReactNode;
+  destructive?: boolean;
+  accent?: boolean;
+}) {
+  const { title, onClick, icon, destructive, accent } = props;
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const baseColor = destructive ? "#B42318" : accent ? "#7C3AED" : "#475467";
+  const hoverBg = destructive ? "#FEF3F2" : accent ? "#F5F3FF" : "#F2F4F7";
+  const showTooltip = hover || focus;
+  return (
+    <span style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
+      <button
+        onClick={onClick}
+        aria-label={title}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onFocus={() => setFocus(true)}
+        onBlur={() => setFocus(false)}
+        style={{
+          width: 34, height: 34, borderRadius: 8,
+          border: "1px solid " + (hover ? (destructive ? "#FCA5A5" : accent ? "#C4B5FD" : "#D0D5DD") : "#E5E7EB"),
+          background: hover ? hoverBg : "#fff",
+          color: baseColor,
+          cursor: "pointer", display: "inline-flex",
+          alignItems: "center", justifyContent: "center",
+          transition: "background 120ms, border-color 120ms",
+        }}
+      >
+        {icon}
+      </button>
+      {showTooltip && (
+        <span
+          role="tooltip"
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 6px)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "#101828",
+            color: "#fff",
+            fontSize: 11,
+            fontWeight: 500,
+            padding: "4px 8px",
+            borderRadius: 6,
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            boxShadow: "0 4px 12px rgba(16,24,40,0.14)",
+            zIndex: 60,
+          }}
+        >
+          {title}
+          {/* Caret pointing down to the button */}
+          <span
+            style={{
+              position: "absolute",
+              top: "100%",
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: 0, height: 0,
+              borderLeft: "4px solid transparent",
+              borderRight: "4px solid transparent",
+              borderTop: "4px solid #101828",
+            }}
+          />
+        </span>
+      )}
+    </span>
+  );
+}
+
+function DividerDot() {
+  return <div style={{ width: 1, height: 20, background: "#E5E7EB", margin: "0 4px" }} />;
+}
+
+/* ─── Action icons (16px, currentColor) ──────────────────────────── */
+
+function ReassignIcon() {
+  // Two-arrow circular swap — represents handoff between users
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 1l4 4-4 4" />
+      <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+      <path d="M7 23l-4-4 4-4" />
+      <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+    </svg>
+  );
+}
+
+function SkipIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M5 4l9 8-9 8V4z" />
+      <rect x="16" y="4" width="2" height="16" />
+    </svg>
+  );
+}
+
+function ReplayIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 1 0 3-6.7" />
+      <polyline points="3 4 3 9 8 9" />
+    </svg>
+  );
+}
+
+function SparkleIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 2l1.8 5.4L19 9l-5.2 1.6L12 16l-1.8-5.4L5 9l5.2-1.6L12 2z" />
+      <path d="M19 14l.8 2.4L22 17l-2.2.6L19 20l-.8-2.4L16 17l2.2-.6L19 14z" />
+    </svg>
   );
 }
 
@@ -1365,17 +1616,6 @@ const emptyStyle: React.CSSProperties = {
   fontSize: 12, color: "#98A2B3", padding: "8px 0", lineHeight: 1.5,
 };
 
-const actionBtn: React.CSSProperties = {
-  padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB",
-  background: "#fff", fontSize: 13, fontWeight: 600, color: "#475467",
-  cursor: "pointer", fontFamily: "inherit", textAlign: "left",
-};
-
-const actionBtnPrimary: React.CSSProperties = {
-  ...actionBtn,
-  border: "1px solid #FDE68A", background: "#FFFBEB", color: "#92400E",
-};
-
 const linkBtn: React.CSSProperties = {
   padding: "2px 6px", borderRadius: 4, border: "none",
   background: "transparent", fontSize: 11, fontWeight: 600,
@@ -1468,10 +1708,20 @@ function formatAgo(ts: number): string {
  * the gateway / next step to read. "Skip form" submits an empty {}. */
 function CompleteTaskDialog(props: {
   tokenId: string;
+  /** Effective schema for THIS step = businessDoc + the current
+   *  userTask's declared Outputs. When non-empty the dialog defaults
+   *  to the typed form. */
+  schema: BusinessDocSchema;
   onClose: () => void;
   onSubmit: (tokenId: string, formData: Record<string, unknown>) => Promise<void>;
 }) {
-  const { tokenId, onClose, onSubmit } = props;
+  const { tokenId, schema, onClose, onSubmit } = props;
+  const hasSchema = useMemo(
+    () => !!schema && Object.keys(schema as Record<string, unknown>).length > 0,
+    [schema],
+  );
+  const [mode, setMode] = useState<"form" | "advanced">(hasSchema ? "form" : "advanced");
+  const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [text, setText] = useState("{\n  \n}");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1488,6 +1738,13 @@ function CompleteTaskDialog(props: {
   };
 
   const onComplete = async () => {
+    if (mode === "form") {
+      // The form drops blanks via coerceBusinessDocValues, so an empty
+      // form is equivalent to "Skip form" — same shape, empty object.
+      const formData = coerceBusinessDocValues(schema, formValues);
+      await submit(formData);
+      return;
+    }
     let parsed: unknown;
     try { parsed = JSON.parse(text); }
     catch (e) { setErr(`Invalid JSON: ${(e as Error).message}`); return; }
@@ -1501,23 +1758,36 @@ function CompleteTaskDialog(props: {
 
   return (
     <ModalShell onClose={onClose} title="Complete task">
-      <p style={{ margin: "0 0 8px", fontSize: 13, color: "#475467" }}>
+      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475467" }}>
         Form data is merged into the instance variables. Gateways and downstream
-        steps read these to branch and fill templates. Common shape:
+        steps read these to branch and fill templates.
       </p>
-      <pre style={{ margin: "0 0 12px", padding: 8, background: "#F9FAFB", borderRadius: 6, fontSize: 11, fontFamily: "var(--font-mono, monospace)", color: "#475467" }}>
-{`{ "approved": true, "comment": "OK" }`}
-      </pre>
-      <textarea
-        value={text}
-        onChange={(e) => { setText(e.target.value); setErr(null); }}
-        spellCheck={false}
-        style={{
-          width: "100%", minHeight: 160, padding: 10, fontSize: 12,
-          fontFamily: "var(--font-mono, monospace)", border: "1px solid #D0D5DD",
-          borderRadius: 6, color: "#101828", boxSizing: "border-box", resize: "vertical",
-        }}
-      />
+      {hasSchema && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          <button type="button" onClick={() => setMode("form")} style={mode === "form" ? modeChipActive : modeChip}>Form</button>
+          <button type="button" onClick={() => setMode("advanced")} style={mode === "advanced" ? modeChipActive : modeChip}>Advanced (JSON)</button>
+        </div>
+      )}
+      {mode === "form" && hasSchema ? (
+        <BusinessDocForm
+          schema={schema}
+          values={formValues}
+          onChange={(name, v) => { setFormValues((prev) => ({ ...prev, [name]: v })); setErr(null); }}
+          disabled={busy}
+        />
+      ) : (
+        <textarea
+          value={text}
+          onChange={(e) => { setText(e.target.value); setErr(null); }}
+          spellCheck={false}
+          placeholder='{ "approved": true, "comment": "OK" }'
+          style={{
+            width: "100%", minHeight: 160, padding: 10, fontSize: 12,
+            fontFamily: "var(--font-mono, monospace)", border: "1px solid #D0D5DD",
+            borderRadius: 6, color: "#101828", boxSizing: "border-box", resize: "vertical",
+          }}
+        />
+      )}
       {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
         <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
@@ -1531,6 +1801,15 @@ function CompleteTaskDialog(props: {
     </ModalShell>
   );
 }
+
+const modeChip: React.CSSProperties = {
+  padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
+  background: "#fff", color: "#667085", fontSize: 11, fontWeight: 600,
+  cursor: "pointer", fontFamily: "inherit",
+};
+const modeChipActive: React.CSSProperties = {
+  ...modeChip, border: "1px solid #C7D2FE", background: "#EEF2FF", color: "#4F46E5",
+};
 
 /* ─── Reassign-task dialog ───────────────────────────────────────────
  * Admin-only. Shows tenant users; if the task carries a candidateRole,
@@ -1637,6 +1916,164 @@ function ReassignTaskDialog(props: {
   );
 }
 
+/* ─── Skip-task dialog ──────────────────────────────────────────────
+ * Replaces the earlier `window.prompt` so the flow stays inside the
+ * app's modal style (consistent with CompleteTaskDialog +
+ * ReassignTaskDialog) instead of the unstyled, blocking browser
+ * prompt. Reason is optional but encouraged — it lands in the
+ * task-skipped audit event payload. */
+function SkipTaskDialog(props: {
+  tokenId: string;
+  onClose: () => void;
+  onSubmit: (tokenId: string, reason: string) => Promise<void>;
+}) {
+  const { tokenId, onClose, onSubmit } = props;
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try { await onSubmit(tokenId, reason.trim()); }
+    catch (e) { setErr((e as Error).message); setBusy(false); }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Skip step">
+      <div style={{ padding: "10px 12px", border: "1px solid #FECACA", background: "#FEF2F2", borderRadius: 8, fontSize: 12, color: "#B42318", marginBottom: 12 }}>
+        This advances the token past the current user task <strong>without form data</strong>. Use it to unblock instances when the assignee is unavailable.
+      </div>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 500, color: "#344054", marginBottom: 6 }}>
+        Reason <span style={{ color: "#98A2B3", fontWeight: 400 }}>(optional, but recommended for the audit trail)</span>
+      </label>
+      <textarea
+        value={reason}
+        onChange={(e) => { setReason(e.target.value); setErr(null); }}
+        placeholder="e.g. Assignee on leave; manager approved skip in standup"
+        autoFocus
+        rows={3}
+        style={{
+          width: "100%", padding: 10, fontSize: 13, fontFamily: "inherit",
+          border: "1px solid #D0D5DD", borderRadius: 6, color: "#101828",
+          boxSizing: "border-box", resize: "vertical",
+        }}
+      />
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
+        <button onClick={submit} disabled={busy} style={modalBtnDanger}>
+          {busy ? "Skipping…" : "Skip step"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ─── Cancel-instance dialog ─────────────────────────────────────────
+ * Replaces the previous `window.confirm("Cancel this instance? …")`
+ * call. Cancellation is destructive and irreversible, so the dialog
+ * shows a red banner, requires an explicit click on a red Confirm
+ * button, and lets the operator capture a reason that lands on the
+ * instance-cancelled audit event. */
+function CancelInstanceDialog(props: {
+  onClose: () => void;
+  onSubmit: (reason: string) => Promise<void>;
+}) {
+  const { onClose, onSubmit } = props;
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try { await onSubmit(reason.trim()); }
+    catch (e) { setErr((e as Error).message); setBusy(false); }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Cancel instance">
+      <div style={{ padding: "10px 12px", border: "1px solid #FECACA", background: "#FEF2F2", borderRadius: 8, fontSize: 12, color: "#B42318", marginBottom: 12 }}>
+        This will <strong>cancel every live token</strong> and mark the instance as cancelled. Cannot be undone.
+      </div>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 500, color: "#344054", marginBottom: 6 }}>
+        Reason <span style={{ color: "#98A2B3", fontWeight: 400 }}>(optional)</span>
+      </label>
+      <textarea
+        value={reason}
+        onChange={(e) => { setReason(e.target.value); setErr(null); }}
+        placeholder="e.g. Customer withdrew the request"
+        autoFocus
+        rows={3}
+        style={{
+          width: "100%", padding: 10, fontSize: 13, fontFamily: "inherit",
+          border: "1px solid #D0D5DD", borderRadius: 6, color: "#101828",
+          boxSizing: "border-box", resize: "vertical",
+        }}
+      />
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <button onClick={onClose} disabled={busy} style={modalBtn}>Keep running</button>
+        <button onClick={submit} disabled={busy} style={modalBtnDanger}>
+          {busy ? "Cancelling…" : "Cancel instance"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ─── Suspend-instance dialog ────────────────────────────────────────
+ * Replaces the previous `window.prompt("Reason for suspending?")`.
+ * Suspend is reversible (Resume restores tokens) so the dialog is
+ * informational-tone, not destructive — neutral primary button. */
+function SuspendInstanceDialog(props: {
+  onClose: () => void;
+  onSubmit: (reason: string) => Promise<void>;
+}) {
+  const { onClose, onSubmit } = props;
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try { await onSubmit(reason.trim()); }
+    catch (e) { setErr((e as Error).message); setBusy(false); }
+  };
+
+  return (
+    <ModalShell onClose={onClose} title="Suspend instance">
+      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475467" }}>
+        Pauses every live token on this instance. Timers and service-task workers will not advance until you Resume.
+      </p>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 500, color: "#344054", marginBottom: 6 }}>
+        Reason <span style={{ color: "#98A2B3", fontWeight: 400 }}>(optional)</span>
+      </label>
+      <textarea
+        value={reason}
+        onChange={(e) => { setReason(e.target.value); setErr(null); }}
+        placeholder="e.g. Investigating data issue; pausing while ops fix the upstream feed"
+        autoFocus
+        rows={3}
+        style={{
+          width: "100%", padding: 10, fontSize: 13, fontFamily: "inherit",
+          border: "1px solid #D0D5DD", borderRadius: 6, color: "#101828",
+          boxSizing: "border-box", resize: "vertical",
+        }}
+      />
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
+        <button onClick={submit} disabled={busy} style={modalBtnPrimary}>
+          {busy ? "Suspending…" : "Suspend instance"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
 function ModalShell({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -1675,4 +2112,7 @@ const modalBtn: React.CSSProperties = {
 };
 const modalBtnPrimary: React.CSSProperties = {
   ...modalBtn, background: "#6366F1", color: "#fff", border: "1px solid #6366F1", fontWeight: 500,
+};
+const modalBtnDanger: React.CSSProperties = {
+  ...modalBtn, background: "#D92D20", color: "#fff", border: "1px solid #D92D20", fontWeight: 500,
 };

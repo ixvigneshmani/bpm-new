@@ -311,6 +311,30 @@ export type BaseNodeData = {
   height?: number;
 };
 
+/** Declaration of a variable that this step adds to the business document
+ *  at runtime. Unlike `outputMappings` (which uses FEEL expressions and is
+ *  developer-flavoured), TaskOutputDecl is a flat, designer-friendly
+ *  contract — name + type + optional flags. The form-driven Edit /
+ *  Replay / Complete dialogs read these to extend the businessDoc schema
+ *  for the runtime form, so step-declared variables become first-class
+ *  inputs without any JSON authoring. */
+export type TaskOutputDecl = {
+  /** Stable id used as a React key + reorder anchor. Generated client-side
+   *  on first add; never sent to the engine — purely UI bookkeeping. */
+  id: string;
+  /** Variable name that lands in the instance variable bag. Validated
+   *  client-side: non-empty, no whitespace, no FEEL syntax. */
+  name: string;
+  /** Type used by the form renderer to pick the right input control. */
+  type: "string" | "number" | "boolean" | "date" | "json";
+  /** When true, the form will mark the field with an asterisk and refuse
+   *  to submit blank. The engine doesn't enforce — purely UI hint. */
+  required?: boolean;
+  /** Free text shown under the field label. Helps the operator know what
+   *  to enter. */
+  description?: string;
+};
+
 /** Shared by all activities (tasks + subprocesses). */
 export type ActivityCommon = {
   loopMarker?: LoopMarker;
@@ -355,6 +379,9 @@ export type UserTaskData = BaseNodeData & ActivityCommon & {
   scheduling?: SchedulingConfig;
   sla?: SlaConfig;
   hooks?: TaskHooks;
+  /** Declared variables this task adds to the business document. Drives
+   *  the runtime form on Complete. See TaskOutputDecl for shape. */
+  outputs?: TaskOutputDecl[];
 };
 
 export type ServiceTaskData = BaseNodeData & ActivityCommon & {
@@ -362,6 +389,10 @@ export type ServiceTaskData = BaseNodeData & ActivityCommon & {
   implementation?: ServiceImplementation;
   resilience?: ResilienceConfig;
   errorMappings?: ErrorMapping[];
+  /** Declared variables this task adds to the business document. Useful
+   *  for service tasks whose handler returns predictable result fields,
+   *  so downstream form editors / autocomplete can pick them up. */
+  outputs?: TaskOutputDecl[];
 };
 
 export type ScriptTaskData = BaseNodeData & ActivityCommon & {

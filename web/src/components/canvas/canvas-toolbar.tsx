@@ -7,6 +7,7 @@ import { serializeCanvasToBpmn } from "../../lib/bpmn/serialize";
 import { parseBpmnToCanvas } from "../../lib/bpmn/parse";
 import { apiPost } from "../../lib/api";
 import StartInstanceDialog from "./start-instance-dialog";
+import ConfirmModal, { type ConfirmConfig } from "../ConfirmModal";
 
 type Props = {
   onOpenAi?: () => void;
@@ -27,6 +28,7 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<null | "export" | "import" | "start">(null);
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
   /** Abort + mounted guard for the Start-instance fetch. Without these,
    *  if the user navigates away while the POST is in flight, the
    *  resolved promise calls `navigate()` on an unmounted component
@@ -75,7 +77,13 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
     } catch (e) {
       if (controller.signal.aborted) return;
       if (mountedRef.current) {
-        alert(`Failed to start instance: ${(e as Error).message}`);
+        setConfirm({
+          title: "Failed to start instance",
+          alertOnly: true,
+          danger: true,
+          body: (e as Error).message,
+          onConfirm: () => setConfirm(null),
+        });
       }
     } finally {
       if (mountedRef.current) setBusy(null);
@@ -93,7 +101,16 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
       });
       if (warnings.length) {
         console.warn("BPMN export warnings:", warnings);
-        alert(`Export completed with ${warnings.length} warning(s):\n\n${warnings.join("\n\n")}`);
+        setConfirm({
+          title: "Export completed with warnings",
+          alertOnly: true,
+          body: (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {warnings.map((w, i) => <li key={i} style={{ marginBottom: 4 }}>{w}</li>)}
+            </ul>
+          ),
+          onConfirm: () => setConfirm(null),
+        });
       }
       const blob = new Blob([xml], { type: "application/bpmn+xml" });
       const url = URL.createObjectURL(blob);
@@ -107,7 +124,13 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error("BPMN export failed:", e);
-      alert(`Export failed: ${(e as Error).message}`);
+      setConfirm({
+        title: "Export failed",
+        alertOnly: true,
+        danger: true,
+        body: (e as Error).message,
+        onConfirm: () => setConfirm(null),
+      });
     } finally {
       setBusy(null);
     }
@@ -118,19 +141,33 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
     fileInputRef.current?.click();
   };
 
-  const handleImportFile = async (evt: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportFile = (evt: React.ChangeEvent<HTMLInputElement>) => {
     const file = evt.target.files?.[0];
     evt.target.value = ""; // reset so selecting same file twice still fires change
     if (!file) return;
 
     const { nodes: existing } = useCanvasStore.getState();
     if (existing.length > 0) {
-      const ok = window.confirm(
-        `Importing will replace ${existing.length} node(s) already on the canvas. Continue?`,
-      );
-      if (!ok) return;
+      // Defer the actual import behind a styled confirm. The file is
+      // captured in the closure so it survives the user thinking it
+      // over before clicking through.
+      setConfirm({
+        title: "Replace canvas with imported BPMN?",
+        danger: true,
+        confirmLabel: "Replace and import",
+        body: (
+          <>
+            Importing will replace <strong>{existing.length} node(s)</strong> already on the canvas. Cannot be undone.
+          </>
+        ),
+        onConfirm: () => { setConfirm(null); void runImport(file); },
+      });
+      return;
     }
+    void runImport(file);
+  };
 
+  const runImport = async (file: File) => {
     setBusy("import");
     try {
       const xml = await file.text();
@@ -144,14 +181,23 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
       store.setDocumentDirty(true);
       if (result.warnings.length) {
         console.warn("BPMN import warnings:", result.warnings);
-        alert(
-          `Imported ${result.nodes.length} element(s) with ${result.warnings.length} warning(s). See console for details.`,
-        );
+        setConfirm({
+          title: "Import completed with warnings",
+          alertOnly: true,
+          body: `Imported ${result.nodes.length} element(s) with ${result.warnings.length} warning(s). See the browser console for details.`,
+          onConfirm: () => setConfirm(null),
+        });
       }
       setTimeout(() => fitView({ padding: 0.2 }), 50);
     } catch (e) {
       console.error("BPMN import failed:", e);
-      alert(`Import failed: ${(e as Error).message}`);
+      setConfirm({
+        title: "Import failed",
+        alertOnly: true,
+        danger: true,
+        body: (e as Error).message,
+        onConfirm: () => setConfirm(null),
+      });
     } finally {
       setBusy(null);
     }
@@ -365,6 +411,7 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
           onSubmit={submitStartInstance}
         />
       )}
+      {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
     </div>
   );
 }

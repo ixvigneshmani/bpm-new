@@ -1,5 +1,10 @@
 import { useState, useMemo } from "react";
 import { createPortal } from "react-dom";
+import {
+  BusinessDocForm,
+  coerceBusinessDocValues,
+  type BusinessDocSchema,
+} from "../BusinessDocForm";
 
 /** Dialog that collects start-instance variables from the user, based
  *  on the process's Business Document schema. Closes the BUG-16 gap
@@ -7,13 +12,8 @@ import { createPortal } from "react-dom";
  *  any ${var} expressions (assignees, gateway conditions, mappings)
  *  silently unresolved.
  *
- *  The schema is the `{fieldName: typeString}` map saved at wizard
- *  step 2. Types supported: string, number, boolean, date, json. If
- *  the schema is missing or empty, we render a raw-JSON textarea so
- *  operators can still pass variables during testing. */
-
-type FieldType = "string" | "number" | "boolean" | "date" | "json" | string;
-type SchemaMap = Record<string, FieldType> | null | undefined;
+ *  Form rendering is delegated to <BusinessDocForm> so the same UX is
+ *  reused for Edit Variables, Replay-edit, and Complete-with-form. */
 
 export default function StartInstanceDialog({
   schema,
@@ -21,20 +21,16 @@ export default function StartInstanceDialog({
   onSubmit,
   submitting,
 }: {
-  schema: SchemaMap;
+  schema: BusinessDocSchema;
   onCancel: () => void;
   onSubmit: (variables: Record<string, unknown>) => void;
   submitting: boolean;
 }) {
-  const fields = useMemo(() => {
-    if (!schema || typeof schema !== "object") return [];
-    return Object.entries(schema).map(([name, type]) => ({
-      name,
-      type: String(type).toLowerCase(),
-    }));
-  }, [schema]);
+  const hasSchema = useMemo(
+    () => !!schema && typeof schema === "object" && Object.keys(schema).length > 0,
+    [schema],
+  );
 
-  const hasSchema = fields.length > 0;
   const [values, setValues] = useState<Record<string, string>>({});
   const [rawJson, setRawJson] = useState<string>("{}");
   const [jsonError, setJsonError] = useState<string | null>(null);
@@ -55,14 +51,7 @@ export default function StartInstanceDialog({
       }
       return;
     }
-    // Form mode — coerce values by declared type, drop blanks.
-    const out: Record<string, unknown> = {};
-    for (const { name, type } of fields) {
-      const raw = values[name];
-      if (raw === undefined || raw === "") continue;
-      out[name] = coerce(raw, type);
-    }
-    onSubmit(out);
+    onSubmit(coerceBusinessDocValues(schema, values));
   };
 
   // Portal to document.body so the fixed-positioned overlay escapes
@@ -117,17 +106,12 @@ export default function StartInstanceDialog({
           )}
 
           {mode === "form" && hasSchema && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {fields.map((f) => (
-                <FieldInput
-                  key={f.name}
-                  name={f.name}
-                  type={f.type}
-                  value={values[f.name] ?? ""}
-                  onChange={(v) => setValues((prev) => ({ ...prev, [f.name]: v }))}
-                />
-              ))}
-            </div>
+            <BusinessDocForm
+              schema={schema}
+              values={values}
+              onChange={(name, v) => setValues((prev) => ({ ...prev, [name]: v }))}
+              disabled={submitting}
+            />
           )}
 
           {mode === "raw" && (
@@ -218,83 +202,3 @@ function ModeChip({ active, onClick, label }: { active: boolean; onClick: () => 
   );
 }
 
-function FieldInput({
-  name, type, value, onChange,
-}: {
-  name: string;
-  type: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  const common: React.CSSProperties = {
-    width: "100%", padding: "8px 10px",
-    border: "1px solid #E5E7EB", borderRadius: 8,
-    fontSize: 12, color: "#111827", outline: "none",
-    fontFamily: "inherit",
-  };
-  return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 11, fontWeight: 600, color: "#344054" }}>
-        {name}
-        <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 500, color: "#9CA3AF" }}>
-          {type}
-        </span>
-      </span>
-      {type === "boolean" ? (
-        <select value={value} onChange={(e) => onChange(e.target.value)} style={common}>
-          <option value="">—</option>
-          <option value="true">true</option>
-          <option value="false">false</option>
-        </select>
-      ) : type === "number" ? (
-        <input
-          type="number"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          style={{ ...common, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
-        />
-      ) : type === "date" ? (
-        <input
-          type="date"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          style={common}
-        />
-      ) : type === "json" || type === "object" || type === "array" ? (
-        <textarea
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder='{"key": "value"}'
-          style={{ ...common, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", minHeight: 80, resize: "vertical" }}
-        />
-      ) : (
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          style={common}
-        />
-      )}
-    </label>
-  );
-}
-
-function coerce(raw: string, type: string): unknown {
-  switch (type) {
-    case "number": {
-      const n = Number(raw);
-      return Number.isFinite(n) ? n : raw;
-    }
-    case "boolean":
-      return raw === "true";
-    case "date":
-      return raw; // ISO date string passed through
-    case "json":
-    case "object":
-    case "array":
-      try { return JSON.parse(raw); }
-      catch { return raw; }
-    default:
-      return raw;
-  }
-}
