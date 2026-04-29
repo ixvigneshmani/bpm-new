@@ -51,6 +51,7 @@ import ResilienceSection from "./sections/ResilienceSection";
 import GatewayFlowsSection from "./sections/GatewayFlowsSection";
 import VariablesSection from "./sections/VariablesSection";
 import OutcomesSection from "./sections/OutcomesSection";
+import FeelExpressionInput from "./fields/FeelExpressionInput";
 import ScriptSection from "./sections/ScriptSection";
 import MessageSection from "./sections/MessageSection";
 import ManualInstructionsSection from "./sections/ManualInstructionsSection";
@@ -112,6 +113,7 @@ export default function PropertiesPanel() {
   const setEdgeCondition = useCanvasStore((s) => s.setEdgeCondition);
   const setEdgeFlowType = useCanvasStore((s) => s.setEdgeFlowType);
   const setGatewayDefaultFlow = useCanvasStore((s) => s.setGatewayDefaultFlow);
+  const reorderOutgoingEdges = useCanvasStore((s) => s.reorderOutgoingEdges);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedEdge = !selectedNode ? edges.find((e) => e.selected) : undefined;
@@ -493,6 +495,7 @@ export default function PropertiesPanel() {
           onDefaultFlowChange={(id) => setGatewayDefaultFlow(selectedNode.id, id ?? null)}
           onEdgeConditionChange={(edgeId, condition) => setEdgeCondition(edgeId, condition)}
           onEdgeLabelChange={(edgeId, label) => updateEdgeLabel(edgeId, label)}
+          onReorderOutgoing={(gwId, fromIdx, toIdx) => reorderOutgoingEdges(gwId, fromIdx, toIdx)}
         />
       ),
     });
@@ -792,20 +795,13 @@ function EdgeProperties({
             <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
               Condition (FEEL)
             </label>
-            <textarea
+            <FeelExpressionInput
               value={condition}
-              onChange={(e) => onConditionChange(e.target.value)}
-              placeholder="e.g. amount > 1000"
-              rows={3}
-              style={{
-                width: "100%", padding: "6px 10px",
-                borderRadius: 6, border: "1px solid #E5E7EB",
-                fontSize: 12, fontFamily: "ui-monospace, monospace", color: "#101828",
-                outline: "none", resize: "vertical",
-              }}
+              onChange={onConditionChange}
+              placeholder='outcome == "approve"  or  amount > 1000'
             />
             <div style={{ marginTop: 6, fontSize: 10, color: "#98a2b3" }}>
-              Evaluated when this edge is the outgoing flow from an exclusive or inclusive gateway.
+              Evaluated when this edge is the outgoing flow from an exclusive or inclusive gateway. Examples: <code>outcome == "approve"</code>, <code>amount &gt; 1000</code>, <code>daysRequested &gt; 5 && approved</code>.
             </div>
           </div>
         )}

@@ -88,6 +88,11 @@ export type CanvasState = {
    *  Writes `defaultFlowId` on the node *and* mirrors `isDefault` onto each
    *  outgoing edge so the slash marker renders. Pass `null` to clear. */
   setGatewayDefaultFlow: (gatewayId: string, flowId: string | null) => void;
+  /** Reorder a gateway's outgoing edges. The engine's exclusive
+   *  gateway picker walks `edges.filter(e => e.source === gw)` in
+   *  array order and takes the first matching condition — so this
+   *  is how priority is expressed. */
+  reorderOutgoingEdges: (gatewayId: string, fromIdx: number, toIdx: number) => void;
   reconnectEdge: (oldEdge: Edge, newConnection: Connection) => void;
 
   /* Selection-aware actions (multi-select) */
@@ -410,6 +415,26 @@ const useCanvasStore = create<CanvasState>()(
             return { ...e, data: next };
           }),
         });
+      },
+
+      reorderOutgoingEdges: (gatewayId, fromIdx, toIdx) => {
+        const all = get().edges;
+        const outgoing = all.filter((e) => e.source === gatewayId);
+        if (
+          fromIdx < 0 || fromIdx >= outgoing.length ||
+          toIdx   < 0 || toIdx   >= outgoing.length ||
+          fromIdx === toIdx
+        ) return;
+        const reordered = [...outgoing];
+        const [moved] = reordered.splice(fromIdx, 1);
+        reordered.splice(toIdx, 0, moved);
+        // Replace the gateway's outgoing slots in the global edges
+        // array, leaving every other edge in its original index. This
+        // keeps unrelated edges' relative ordering stable while
+        // changing the gateway-specific priority order the engine sees.
+        let i = 0;
+        const next = all.map((e) => (e.source === gatewayId ? reordered[i++] : e));
+        set({ edges: next });
       },
 
       setGatewayDefaultFlow: (gatewayId, flowId) => {
