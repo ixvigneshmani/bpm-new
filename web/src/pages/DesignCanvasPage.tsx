@@ -83,40 +83,39 @@ function CanvasInner() {
   // ─── Manual save ────────────────────────────────────────────────────
   // Replaces the former debounced auto-save. A user may leave a design
   // half-edited without committing — they control when to persist.
-  const [dirty, setDirty] = useState(false);
-  // Timestamp of the most recent load-or-save. nodes/edges mutations
-  // within a short window after this are considered load-induced (React
-  // Flow runs its own layout pass that nudges positions by <1px), so we
-  // only flag "dirty" for changes after the window closes.
-  const loadedAtRef = useRef<number>(0);
-
-  useEffect(() => {
-    if (!canvasProcessId) return;
-    loadedAtRef.current = Date.now();
-    setDirty(false);
-  }, [canvasProcessId]);
-
-  useEffect(() => {
-    if (!canvasProcessId) return;
-    if (Date.now() - loadedAtRef.current < 500) return;
-    setDirty(true);
-  }, [rawNodes, edges, canvasProcessId]);
+  //
+  // Dirty tracking: signature-diff. The PARENT (DesignCanvasPage's
+  // load effect) sets `canvasBaselineSig` in the store right after
+  // calling loadCanvasData — we read it here and compare against the
+  // current canvas payload. This replaces the fragile 500ms-load-
+  // window heuristic that mistakenly flagged "dirty" when React
+  // Flow's deferred layout pass nudged a position after the window
+  // closed, producing a phantom refresh popup on untouched canvases.
+  const canvasBaselineSig = useCanvasStore((s) => s.canvasBaselineSig);
+  const setCanvasBaselineSig = useCanvasStore((s) => s.setCanvasBaselineSig);
+  const dirty = useMemo(() => {
+    if (!canvasProcessId || canvasBaselineSig === null) return false;
+    const current = JSON.stringify(toCanvasPayload(rawNodes, edges));
+    return current !== canvasBaselineSig;
+  }, [canvasProcessId, canvasBaselineSig, rawNodes, edges]);
 
   const handleSave = useCallback(async () => {
     if (!canvasProcessId) return;
     setSaveStatus("saving");
     try {
+      const payload = toCanvasPayload(rawNodes, edges);
       await apiPut(`/processes/${canvasProcessId}/canvas`, {
-        canvasData: toCanvasPayload(rawNodes, edges),
+        canvasData: payload,
       });
       setSaveStatus("saved");
-      setDirty(false);
-      loadedAtRef.current = Date.now();
+      // Save succeeded — the on-disk state now matches in-memory, so
+      // reset the baseline. Dirty drops to false next render.
+      setCanvasBaselineSig(JSON.stringify(payload));
     } catch (e) {
       console.warn("Save failed:", (e as Error).message);
       setSaveStatus("error");
     }
-  }, [canvasProcessId, rawNodes, edges, setSaveStatus]);
+  }, [canvasProcessId, rawNodes, edges, setSaveStatus, setCanvasBaselineSig]);
 
   // Cmd/Ctrl + S shortcut.
   useEffect(() => {
@@ -578,6 +577,20 @@ export default function DesignCanvasPage() {
           if (proc.canvasData) {
             const payload = normalizeCanvasPayload(proc.canvasData);
             loadCanvasData(payload.nodes, payload.edges);
+            // Capture baseline signature so the dirty-check can flip
+            // back to false once React Flow finishes its layout pass.
+            // The signature is the canonical save payload — same shape
+            // we'd POST on save — so cosmetic React-Flow nudges (which
+            // toCanvasPayload strips) don't flip dirty.
+            useCanvasStore.getState().setCanvasBaselineSig(
+              JSON.stringify(toCanvasPayload(payload.nodes, payload.edges)),
+            );
+          } else {
+            // Empty canvas → empty baseline so a fresh paint of an
+            // empty canvas isn't flagged dirty either.
+            useCanvasStore.getState().setCanvasBaselineSig(
+              JSON.stringify(toCanvasPayload([], [])),
+            );
           }
           // Resume at the correct step. VX1 guard: even if the
           // server says step="canvas", route the user back to the

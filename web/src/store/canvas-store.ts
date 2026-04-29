@@ -37,6 +37,12 @@ export type CanvasState = {
   wizardStep: "details" | "document" | "canvas";
   wizardOrigin: "list" | "canvas";
   documentDirty: boolean;
+  /** Signature of the canvas as last loaded or saved. CanvasInner
+   *  compares the current canvas against this string to compute its
+   *  dirty state — replaces the fragile 500ms-load-window heuristic
+   *  that produced false-positive refresh prompts. Null = no baseline
+   *  yet (first paint after navigation). */
+  canvasBaselineSig: string | null;
   nodes: Node[];
   edges: Edge[];
   selectedNodeId: string | null;
@@ -105,6 +111,7 @@ export type CanvasState = {
   setWizardOrigin: (origin: "list" | "canvas") => void;
   setDocumentDirty: (dirty: boolean) => void;
   loadCanvasData: (nodes: Node[], edges: Edge[]) => void;
+  setCanvasBaselineSig: (sig: string | null) => void;
   /** Apply a sequence of AI refine ops in order (add/modify/remove
    *  node + edge). All ops land as one store update so undo sees the
    *  whole batch as a single entry. Returns a summary of applied vs
@@ -202,6 +209,7 @@ const useCanvasStore = create<CanvasState>()(
       wizardStep: "details" as const,
       wizardOrigin: "list" as const,
       documentDirty: false,
+      canvasBaselineSig: null,
       nodes: [],
       edges: [],
       selectedNodeId: null,
@@ -627,6 +635,7 @@ const useCanvasStore = create<CanvasState>()(
 
       loadCanvasData: (nodes, edges) =>
         set({ nodes: topoSortByParent(nodes), edges }),
+      setCanvasBaselineSig: (sig) => set({ canvasBaselineSig: sig }),
 
       applyRefineOps: (ops) => {
         const state = get();

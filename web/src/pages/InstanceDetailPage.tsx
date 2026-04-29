@@ -1763,9 +1763,12 @@ function CompleteTaskDialog(props: {
     }
   };
 
-  // Cmd/Ctrl+Enter fires the default outcome (or the only one).
+  // Cmd/Ctrl+Enter fires the default outcome. Convention: first
+  // outcome is the implicit default unless one is explicitly flagged
+  // (the simplified Outcomes UI no longer sets `default`, but legacy
+  // data may still carry the flag).
   const defaultOutcome = useMemo(
-    () => effectiveOutcomes.find((o) => o.default) ?? (effectiveOutcomes.length === 1 ? effectiveOutcomes[0] : null),
+    () => effectiveOutcomes.find((o) => o.default) ?? effectiveOutcomes[0] ?? null,
     [effectiveOutcomes],
   );
   useEffect(() => {
@@ -1824,10 +1827,15 @@ function CompleteTaskDialog(props: {
 
       <div style={{ borderTop: "1px solid #EAECF0", paddingTop: 14, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
         <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
-        {effectiveOutcomes.map((o) => (
+        {effectiveOutcomes.map((o, idx) => (
           <OutcomeActionButton
             key={o.uid}
             outcome={o}
+            // Convention: the first outcome gets primary styling unless
+            // an explicit style was set on the outcome itself. Keeps the
+            // default-action visually obvious without forcing the
+            // designer to think about UI.
+            implicitPrimary={idx === 0 && !o.style}
             disabled={busy}
             onClick={() => onPickOutcome(o)}
           />
@@ -1842,18 +1850,22 @@ function CompleteTaskDialog(props: {
   );
 }
 
-/** Action button for one outcome, styled per its declared treatment. */
+/** Action button for one outcome. The simplified designer UI no
+ *  longer asks for a style — by convention, the first outcome rendered
+ *  gets primary, the rest are neutral. Legacy data with explicit
+ *  `style` still wins. */
 function OutcomeActionButton(props: {
   outcome: Outcome;
+  implicitPrimary?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }) {
-  const { outcome, disabled, onClick } = props;
-  const style = outcome.style ?? "neutral";
+  const { outcome, implicitPrimary, disabled, onClick } = props;
+  const effectiveStyle = outcome.style ?? (implicitPrimary ? "primary" : "neutral");
   const css: React.CSSProperties = (() => {
-    if (style === "primary") return { background: "#6366F1", color: "#fff", border: "1px solid #6366F1" };
-    if (style === "danger")  return { background: "#D92D20", color: "#fff", border: "1px solid #D92D20" };
-    return                          { background: "#fff",    color: "#344054", border: "1px solid #D0D5DD" };
+    if (effectiveStyle === "primary") return { background: "#6366F1", color: "#fff", border: "1px solid #6366F1" };
+    if (effectiveStyle === "danger")  return { background: "#D92D20", color: "#fff", border: "1px solid #D92D20" };
+    return                                   { background: "#fff",    color: "#344054", border: "1px solid #D0D5DD" };
   })();
   return (
     <button
