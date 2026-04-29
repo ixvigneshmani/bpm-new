@@ -40,7 +40,6 @@ import type {
   VariableMapping,
   KeyValuePair,
   Outcome,
-  FormField,
 } from "../../../types/bpmn-node-data";
 import type { GatewayKind } from "./sections/GatewayFlowsSection";
 import GeneralSection from "./sections/GeneralSection";
@@ -52,7 +51,6 @@ import ResilienceSection from "./sections/ResilienceSection";
 import GatewayFlowsSection from "./sections/GatewayFlowsSection";
 import VariablesSection from "./sections/VariablesSection";
 import OutcomesSection from "./sections/OutcomesSection";
-import FormFieldsSection from "./sections/FormFieldsSection";
 import ScriptSection from "./sections/ScriptSection";
 import MessageSection from "./sections/MessageSection";
 import ManualInstructionsSection from "./sections/ManualInstructionsSection";
@@ -114,16 +112,8 @@ export default function PropertiesPanel() {
   const setEdgeCondition = useCanvasStore((s) => s.setEdgeCondition);
   const setEdgeFlowType = useCanvasStore((s) => s.setEdgeFlowType);
   const setGatewayDefaultFlow = useCanvasStore((s) => s.setGatewayDefaultFlow);
-  const businessDoc = useCanvasStore((s) => s.processMeta.businessDoc);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
-  // Reserved names = top-level keys in the process Business Document.
-  // Used by the Outputs section to warn the designer about shadowing —
-  // businessDoc wins at runtime merge time.
-  const reservedDocNames =
-    businessDoc && typeof businessDoc === "object"
-      ? Object.keys(businessDoc as Record<string, unknown>)
-      : [];
   const selectedEdge = !selectedNode ? edges.find((e) => e.selected) : undefined;
 
   if (!selectedNode && selectedEdge) {
@@ -279,19 +269,6 @@ export default function PropertiesPanel() {
         <OutcomesSection
           outcomes={d.outcomes}
           onChange={(next: Outcome[]) => update({ outcomes: next })}
-        />
-      ),
-    });
-    sections.push({
-      id: "formFields",
-      title: "Form fields",
-      icon: <SectionIcon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" extra={<><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="15" y2="17" /></>} />,
-      content: (
-        <FormFieldsSection
-          fields={d.formFields}
-          outcomes={d.outcomes}
-          reservedNames={reservedDocNames}
-          onChange={(next: FormField[]) => update({ formFields: next })}
         />
       ),
     });

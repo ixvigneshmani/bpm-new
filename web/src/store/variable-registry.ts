@@ -175,22 +175,15 @@ function harvestNodeOutputs(nodes: Node[]): FlatVariable[] {
     }
 
     // userTask outcomes — the chosen action lands as `outcome: <id>`
-    // in the bag. Harvest each declared id as a candidate value for
-    // gateway-condition autocomplete. We also surface the bare
-    // `outcome` variable so designers writing FEEL get it in the tree.
+    // in the bag. Surfacing it lets gateway-condition authors write
+    // `outcome == "approve"` with autocomplete. The host app submits
+    // any other variables alongside; those aren't statically known
+    // so they don't appear here (they're a runtime contract between
+    // host and BPM).
     if (type === "userTask") {
       const outcomes = (data as AnyData).outcomes;
       if (Array.isArray(outcomes) && outcomes.length > 0) {
         push("outcome", "string", `Outcome: ${label}`);
-      }
-      // Form fields declared on the userTask — each is a real
-      // typed variable produced when the task completes.
-      const fields = (data as AnyData).formFields;
-      if (Array.isArray(fields)) {
-        for (const f of fields as Array<{ name?: unknown; type?: unknown }>) {
-          const name = typeof f.name === "string" ? f.name.trim() : "";
-          if (name) push(name, coerceType(typeof f.type === "string" ? f.type : undefined), `Form: ${label}`);
-        }
       }
     }
   }
@@ -223,8 +216,8 @@ function outputDigest(nodes: Node[]): string {
     const generic = readMappings(d, "outputMappings")
       .map((m) => `${m.target ?? ""}/${m.type ?? ""}`).join(",");
     if (generic) parts.push(`g:${n.id}:${generic}`);
-    // userTask outcomes + form fields signature — drives memo
-    // invalidation when the designer edits these in the properties panel.
+    // userTask outcomes signature — drives memo invalidation when
+    // the designer edits the outcomes list in the properties panel.
     if (n.type === "userTask") {
       const outcomes = d.outcomes;
       if (Array.isArray(outcomes)) {
@@ -232,13 +225,6 @@ function outputDigest(nodes: Node[]): string {
           .map((x) => (typeof x.id === "string" ? x.id : ""))
           .join(",");
         if (sig) parts.push(`o:${n.id}:${sig}`);
-      }
-      const fields = d.formFields;
-      if (Array.isArray(fields)) {
-        const sig = (fields as Array<{ name?: unknown; type?: unknown }>)
-          .map((x) => `${typeof x.name === "string" ? x.name : ""}/${typeof x.type === "string" ? x.type : ""}`)
-          .join(",");
-        if (sig) parts.push(`f:${n.id}:${sig}`);
       }
     }
   }

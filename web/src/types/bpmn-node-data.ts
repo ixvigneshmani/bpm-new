@@ -344,30 +344,11 @@ export type Outcome = {
   default?: boolean;
 };
 
-/** ─── userTask Form Fields ──────────────────────────────────────────
- *  Auxiliary data captured alongside the outcome — comments,
- *  attachments, approved-amounts, etc. Orthogonal to outcomes:
- *  outcomes drive routing, form fields land in the bag as named
- *  variables for downstream templates / mappings. */
-export type FormFieldType = "string" | "number" | "boolean" | "date" | "json";
-
-export type FormField = {
-  /** Stable React-key id. */
-  uid: string;
-  /** Variable name written to the bag on submit. Validated UI-side. */
-  name: string;
-  /** Operator-facing label. Falls back to `name` if empty. */
-  label?: string;
-  type: FormFieldType;
-  /** Form refuses to submit blank when true (UI-enforced). */
-  required?: boolean;
-  description?: string;
-  /** Conditional visibility — render this field only when the
-   *  selected outcome matches `outcomeId`. Empty/undefined = always
-   *  visible. Useful for "approved amount" appearing only when
-   *  outcome=approve. */
-  showWhen?: { outcomeId: string };
-};
+/* FormField was removed in 2026-04-29 — headless BPM means the host
+ * application owns the UI / form. The BPM only declares the OUTCOMES
+ * (which drive routing) and a `formKey` pointer (which the host maps
+ * to its own React/native form). The earlier inline FormField[] model
+ * created two competing form definitions that would drift over time. */
 
 /** Shared by all activities (tasks + subprocesses). */
 export type ActivityCommon = {
@@ -418,9 +399,6 @@ export type UserTaskData = BaseNodeData & ActivityCommon & {
    *  gateways. When empty/missing, runtime falls back to a single
    *  implicit "Complete" outcome (id: "complete"). */
   outcomes?: Outcome[];
-  /** Auxiliary form fields captured alongside the outcome — comments,
-   *  amounts, attachments. Orthogonal to outcomes. */
-  formFields?: FormField[];
 };
 
 export type ServiceTaskData = BaseNodeData & ActivityCommon & {

@@ -15,7 +15,7 @@ import StepSnapshot from "./console/StepSnapshot";
 import EditVariablesDialog from "./console/EditVariablesDialog";
 import ReplayStepDialog from "./console/ReplayStepDialog";
 import AiCopilotDialog from "./console/AiCopilotDialog";
-import type { Outcome, FormField } from "../types/bpmn-node-data";
+import type { Outcome } from "../types/bpmn-node-data";
 import { useAuth } from "../lib/auth";
 import { useActingForSnapshot } from "../lib/acting-for";
 
@@ -552,17 +552,16 @@ export default function InstanceDetailPage() {
         />
       )}
       {completeForToken && (() => {
-        // Pull the current userTask's outcomes + form fields off the
-        // canvas snapshot. Empty/missing → CompleteTaskDialog falls
-        // back to a single implicit "Complete" outcome.
+        // Pull the current userTask's outcomes off the canvas
+        // snapshot. Empty/missing → CompleteTaskDialog falls back
+        // to a single implicit "Complete" outcome.
         const tok = detail.tokens.find((t) => t.id === completeForToken);
         const node = tok ? canvas?.nodes?.find((n) => n.id === tok.currentNodeId) : null;
-        const nodeData = (node?.data ?? {}) as { outcomes?: Outcome[]; formFields?: FormField[] };
+        const nodeData = (node?.data ?? {}) as { outcomes?: Outcome[] };
         return (
           <CompleteTaskDialog
             tokenId={completeForToken}
             outcomes={nodeData.outcomes}
-            formFields={nodeData.formFields}
             onClose={() => setCompleteForToken(null)}
             onSubmit={onSubmitComplete}
           />
@@ -1694,71 +1693,77 @@ function formatAgo(ts: number): string {
 }
 
 /* ─── Complete-task dialog ───────────────────────────────────────────
- * Two-zone layout matching the BPM-product norm (Camunda / Pega /
- * Bizagi):
- *   1. Form fields  — auxiliary data captured alongside the decision
- *      (comments, attachments, amounts). Optional; type-aware.
- *   2. Outcome buttons — discrete decision actions. Each button
- *      submits with `{ outcome: <id>, ...formFields }`. Downstream
- *      gateways read `${outcome}` to route.
+ * Headless-BPM dialog: outcome buttons drive routing, the host app
+ * owns any real form. The BPM only:
+ *   • Renders one button per declared outcome (or a single "Complete"
+ *     when none declared).
+ *   • Surfaces the form binding (`formKey` / external URL) so a host
+ *     reading this dialog knows which form to render in production.
+ *   • Provides a collapsed "Variables (raw JSON)" textarea for QA /
+ *     dogfooding inside FlowPro's built-in inbox — operators in real
+ *     deployments use the host's UI, not this dialog.
  *
- * If the task declares no outcomes, a single "Complete" button is
- * rendered with implicit id "complete". If a form field has
- * `showWhen.outcomeId`, it's hidden until that outcome is hovered or
- * a UX hook surfaces it (we display all fields; the showWhen flag
- * filters which fields are SUBMITTED with each outcome). */
+ * Submit shape: `{ outcome: <id>, ...rawVariablesIfAny }`. Downstream
+ * gateways read `${outcome}` to route. */
 function CompleteTaskDialog(props: {
   tokenId: string;
   /** The waiting userTask's outcomes. Empty/missing → single
    *  "Complete" button with implicit id. */
   outcomes: Outcome[] | undefined;
-  /** Form fields declared on the userTask. */
-  formFields: FormField[] | undefined;
   onClose: () => void;
   onSubmit: (tokenId: string, formData: Record<string, unknown>) => Promise<void>;
 }) {
-  const { tokenId, outcomes, formFields, onClose, onSubmit } = props;
+  const { tokenId, outcomes, onClose, onSubmit } = props;
   const effectiveOutcomes: Outcome[] = useMemo(() => {
     if (outcomes && outcomes.length > 0) return outcomes;
-    // Fallback: a single implicit "complete" so the dialog always has
-    // at least one action button. The id ends up in the bag so even
-    // single-outcome tasks can be referenced from gateways if needed.
     return [{ uid: "implicit", id: "complete", label: "Complete", style: "primary" }];
   }, [outcomes]);
-  const fields = useMemo(() => formFields ?? [], [formFields]);
 
-  const [formValues, setFormValues] = useState<Record<string, string>>({});
+  /* QA / dogfood-only escape hatch. In production the host app sends
+   * its own form data; here we let the operator paste raw JSON for
+   * test runs. Hidden behind a "Show advanced" toggle so it doesn't
+   * pollute the dialog when the host owns the form. */
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [rawJson, setRawJson] = useState("{}");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const onPickOutcome = async (outcome: Outcome) => {
-    // Validate required fields whose visibility matches this outcome.
-    const visible = fields.filter((f) => !f.showWhen || f.showWhen.outcomeId === outcome.id);
-    const missing = visible.filter((f) => f.required && !(formValues[f.name] ?? "").trim());
-    if (missing.length > 0) {
-      setErr(`Required: ${missing.map((f) => f.label || f.name).join(", ")}`);
-      return;
-    }
-    setBusy(true);
-    setErr(null);
+  const parseRawJson = (): Record<string, unknown> | null => {
+    if (!showAdvanced) return {};
+    const trimmed = rawJson.trim();
+    if (!trimmed || trimmed === "{}") return {};
     try {
-      // Submit shape: { outcome: <id>, ...visibleFormFields coerced }.
-      // Hidden (showWhen-mismatched) fields are intentionally dropped —
-      // they don't apply to this branch.
-      const submitted: Record<string, unknown> = { outcome: outcome.id };
-      for (const f of visible) {
-        const raw = (formValues[f.name] ?? "").trim();
-        if (!raw) continue;
-        submitted[f.name] = coerceFormField(f.type, raw);
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setErr("Variables must be a JSON object.");
+        return null;
       }
-      await onSubmit(tokenId, submitted);
+      return parsed as Record<string, unknown>;
+    } catch (e) {
+      setErr(`Invalid JSON: ${(e as Error).message}`);
+      return null;
+    }
+  };
+
+  const onPickOutcome = async (outcome: Outcome) => {
+    setErr(null);
+    const extra = parseRawJson();
+    if (extra === null) return;
+    setBusy(true);
+    try {
+      // Submit shape: { outcome: <id>, ...rawVariables }. The outcome
+      // id must NOT be overridden by the raw JSON — drop any key with
+      // that name to keep gateway routing predictable.
+      const { outcome: _drop, ...safe } = extra;
+      void _drop;
+      await onSubmit(tokenId, { outcome: outcome.id, ...safe });
     } catch (e) {
       setErr((e as Error).message);
       setBusy(false);
     }
   };
 
-  // Press Enter to fire the default outcome (or the only outcome).
+  // Cmd/Ctrl+Enter fires the default outcome (or the only one).
   const defaultOutcome = useMemo(
     () => effectiveOutcomes.find((o) => o.default) ?? (effectiveOutcomes.length === 1 ? effectiveOutcomes[0] : null),
     [effectiveOutcomes],
@@ -1777,34 +1782,46 @@ function CompleteTaskDialog(props: {
 
   return (
     <ModalShell onClose={onClose} title="Complete task">
-      {fields.length === 0 ? (
-        <p style={{ margin: "0 0 14px", fontSize: 13, color: "#475467" }}>
-          Pick the action that reflects your decision. The choice drives the
-          process flow — downstream gateways route on the outcome.
-        </p>
-      ) : (
-        <>
-          <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475467" }}>
-            Capture any auxiliary data, then choose your action below.
-          </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
-            {fields.map((f) => (
-              <FormFieldInput
-                key={f.uid}
-                field={f}
-                value={formValues[f.name] ?? ""}
-                onChange={(v) => { setFormValues((prev) => ({ ...prev, [f.name]: v })); setErr(null); }}
-                disabled={busy}
-              />
-            ))}
-          </div>
-        </>
-      )}
+      <p style={{ margin: "0 0 14px", fontSize: 13, color: "#475467" }}>
+        Pick the action that reflects your decision. The choice drives the
+        process flow — downstream gateways route on the outcome.
+      </p>
+
+      <div style={{ marginBottom: 14 }}>
+        <button
+          type="button"
+          onClick={() => { setShowAdvanced((v) => !v); setErr(null); }}
+          style={{
+            padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
+            background: showAdvanced ? "#EEF2FF" : "#fff",
+            color: showAdvanced ? "#4F46E5" : "#667085",
+            fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+          }}
+        >
+          {showAdvanced ? "▾" : "▸"} Variables (raw JSON) — for QA / dev
+        </button>
+        {showAdvanced && (
+          <textarea
+            value={rawJson}
+            onChange={(e) => { setRawJson(e.target.value); setErr(null); }}
+            spellCheck={false}
+            placeholder='{"comment": "approved", "approvedAmount": 1500}'
+            style={{
+              width: "100%", marginTop: 8, minHeight: 120, padding: 10, fontSize: 12,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              border: "1px solid #D0D5DD", borderRadius: 6, color: "#101828",
+              boxSizing: "border-box", resize: "vertical",
+            }}
+          />
+        )}
+      </div>
+
       {err && (
         <div style={{ marginBottom: 12, padding: "8px 10px", border: "1px solid #FECACA", background: "#FEF2F2", borderRadius: 6, fontSize: 12, color: "#B42318" }}>
           {err}
         </div>
       )}
+
       <div style={{ borderTop: "1px solid #EAECF0", paddingTop: 14, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
         <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
         {effectiveOutcomes.map((o) => (
@@ -1822,56 +1839,6 @@ function CompleteTaskDialog(props: {
         </div>
       )}
     </ModalShell>
-  );
-}
-
-/** Render a single form field with the right input control for its
- *  declared type. Mirrors BusinessDocForm's shape but on FormField,
- *  which carries a label/description distinct from the variable name. */
-function FormFieldInput(props: {
-  field: FormField;
-  value: string;
-  onChange: (v: string) => void;
-  disabled?: boolean;
-}) {
-  const { field, value, onChange, disabled } = props;
-  const common: React.CSSProperties = {
-    width: "100%", padding: "8px 10px", border: "1px solid #D0D5DD", borderRadius: 6,
-    fontSize: 13, color: "#101828", outline: "none", fontFamily: "inherit", boxSizing: "border-box",
-    background: disabled ? "#F9FAFB" : "#fff",
-  };
-  return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 11, fontWeight: 600, color: "#344054" }}>
-        {field.label || field.name}
-        {field.required && <span style={{ color: "#D92D20", marginLeft: 3 }}>*</span>}
-      </span>
-      {field.type === "boolean" ? (
-        <select disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common}>
-          <option value="">—</option>
-          <option value="true">Yes</option>
-          <option value="false">No</option>
-        </select>
-      ) : field.type === "number" ? (
-        <input type="number" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common} />
-      ) : field.type === "date" ? (
-        <input type="date" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common} />
-      ) : field.type === "json" ? (
-        <textarea
-          disabled={disabled}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          rows={3}
-          placeholder='{"key": "value"}'
-          style={{ ...common, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, resize: "vertical" }}
-        />
-      ) : (
-        <input type="text" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common} />
-      )}
-      {field.description && (
-        <span style={{ fontSize: 10, color: "#98A2B3" }}>{field.description}</span>
-      )}
-    </label>
   );
 }
 
@@ -1903,19 +1870,6 @@ function OutcomeActionButton(props: {
       {outcome.label}
     </button>
   );
-}
-
-function coerceFormField(type: FormField["type"], raw: string): unknown {
-  switch (type) {
-    case "number": {
-      const n = Number(raw);
-      return Number.isFinite(n) ? n : raw;
-    }
-    case "boolean": return raw === "true";
-    case "date":    return raw;
-    case "json":    try { return JSON.parse(raw); } catch { return raw; }
-    default:        return raw;
-  }
 }
 
 /* ─── Reassign-task dialog ───────────────────────────────────────────
