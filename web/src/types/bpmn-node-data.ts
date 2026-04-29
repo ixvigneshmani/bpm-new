@@ -311,28 +311,62 @@ export type BaseNodeData = {
   height?: number;
 };
 
-/** Declaration of a variable that this step adds to the business document
- *  at runtime. Unlike `outputMappings` (which uses FEEL expressions and is
- *  developer-flavoured), TaskOutputDecl is a flat, designer-friendly
- *  contract — name + type + optional flags. The form-driven Edit /
- *  Replay / Complete dialogs read these to extend the businessDoc schema
- *  for the runtime form, so step-declared variables become first-class
- *  inputs without any JSON authoring. */
-export type TaskOutputDecl = {
-  /** Stable id used as a React key + reorder anchor. Generated client-side
-   *  on first add; never sent to the engine — purely UI bookkeeping. */
+/** ─── userTask Outcomes ────────────────────────────────────────────
+ *  An *outcome* is a discrete decision the operator can take when
+ *  acting on a human task — Approve / Reject / Send-back style.
+ *  Outcomes are rendered as ACTION BUTTONS on the runtime Complete
+ *  dialog, and the chosen id is written to the instance variable bag
+ *  as `outcome` (e.g. `outcome: "approve"`). Downstream gateways read
+ *  that variable in their FEEL conditions: `${outcome == "approve"}`.
+ *
+ *  This matches the established pattern in Camunda / Pega / Bizagi /
+ *  SAP Workflow: decisions are buttons, not form fields. A single-
+ *  outcome task (e.g. "Sign document", "Notify employee") declares
+ *  one outcome rendered as a single "Complete" button. Multi-branch
+ *  tasks declare 2+ outcomes and the gateway routes accordingly. */
+export type OutcomeStyle = "primary" | "danger" | "neutral";
+
+export type Outcome = {
+  /** Stable React-key id; never sent to the engine. */
+  uid: string;
+  /** Variable-bag value when this outcome is chosen — also the
+   *  string a gateway condition compares against. Lowercase, snake_
+   *  case-friendly. Validated UI-side: `[a-z][a-z0-9_]*`. */
   id: string;
-  /** Variable name that lands in the instance variable bag. Validated
-   *  client-side: non-empty, no whitespace, no FEEL syntax. */
-  name: string;
-  /** Type used by the form renderer to pick the right input control. */
-  type: "string" | "number" | "boolean" | "date" | "json";
-  /** When true, the form will mark the field with an asterisk and refuse
-   *  to submit blank. The engine doesn't enforce — purely UI hint. */
-  required?: boolean;
-  /** Free text shown under the field label. Helps the operator know what
-   *  to enter. */
+  /** Operator-facing label on the action button. */
+  label: string;
+  /** Visual treatment for the action button. Defaults to "neutral". */
+  style?: OutcomeStyle;
+  /** Optional helper text. */
   description?: string;
+  /** When true, Enter on the dialog fires this outcome. UI keeps at
+   *  most one outcome flagged. */
+  default?: boolean;
+};
+
+/** ─── userTask Form Fields ──────────────────────────────────────────
+ *  Auxiliary data captured alongside the outcome — comments,
+ *  attachments, approved-amounts, etc. Orthogonal to outcomes:
+ *  outcomes drive routing, form fields land in the bag as named
+ *  variables for downstream templates / mappings. */
+export type FormFieldType = "string" | "number" | "boolean" | "date" | "json";
+
+export type FormField = {
+  /** Stable React-key id. */
+  uid: string;
+  /** Variable name written to the bag on submit. Validated UI-side. */
+  name: string;
+  /** Operator-facing label. Falls back to `name` if empty. */
+  label?: string;
+  type: FormFieldType;
+  /** Form refuses to submit blank when true (UI-enforced). */
+  required?: boolean;
+  description?: string;
+  /** Conditional visibility — render this field only when the
+   *  selected outcome matches `outcomeId`. Empty/undefined = always
+   *  visible. Useful for "approved amount" appearing only when
+   *  outcome=approve. */
+  showWhen?: { outcomeId: string };
 };
 
 /** Shared by all activities (tasks + subprocesses). */
@@ -379,9 +413,14 @@ export type UserTaskData = BaseNodeData & ActivityCommon & {
   scheduling?: SchedulingConfig;
   sla?: SlaConfig;
   hooks?: TaskHooks;
-  /** Declared variables this task adds to the business document. Drives
-   *  the runtime form on Complete. See TaskOutputDecl for shape. */
-  outputs?: TaskOutputDecl[];
+  /** Decision actions the operator picks via buttons. The chosen id
+   *  lands in the variable bag as `outcome` and drives downstream
+   *  gateways. When empty/missing, runtime falls back to a single
+   *  implicit "Complete" outcome (id: "complete"). */
+  outcomes?: Outcome[];
+  /** Auxiliary form fields captured alongside the outcome — comments,
+   *  amounts, attachments. Orthogonal to outcomes. */
+  formFields?: FormField[];
 };
 
 export type ServiceTaskData = BaseNodeData & ActivityCommon & {
@@ -389,10 +428,6 @@ export type ServiceTaskData = BaseNodeData & ActivityCommon & {
   implementation?: ServiceImplementation;
   resilience?: ResilienceConfig;
   errorMappings?: ErrorMapping[];
-  /** Declared variables this task adds to the business document. Useful
-   *  for service tasks whose handler returns predictable result fields,
-   *  so downstream form editors / autocomplete can pick them up. */
-  outputs?: TaskOutputDecl[];
 };
 
 export type ScriptTaskData = BaseNodeData & ActivityCommon & {

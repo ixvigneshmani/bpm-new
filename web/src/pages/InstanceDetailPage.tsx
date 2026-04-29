@@ -15,12 +15,7 @@ import StepSnapshot from "./console/StepSnapshot";
 import EditVariablesDialog from "./console/EditVariablesDialog";
 import ReplayStepDialog from "./console/ReplayStepDialog";
 import AiCopilotDialog from "./console/AiCopilotDialog";
-import {
-  BusinessDocForm,
-  buildEffectiveSchema,
-  coerceBusinessDocValues,
-  type BusinessDocSchema,
-} from "../components/BusinessDocForm";
+import type { Outcome, FormField } from "../types/bpmn-node-data";
 import { useAuth } from "../lib/auth";
 import { useActingForSnapshot } from "../lib/acting-for";
 
@@ -306,13 +301,10 @@ export default function InstanceDetailPage() {
 
   const canvas: CanvasData | null = processCanvas ?? (detail?.canvasData as CanvasData | null) ?? null;
 
-  /* Effective schema for the runtime forms = process Business Document
-   * + step-declared Outputs harvested from the canvas. Memoised so
-   * dialogs don't recompute on every parent re-render. */
-  const fullEffectiveSchema: BusinessDocSchema = useMemo(
-    () => buildEffectiveSchema(businessDocSchema, canvas?.nodes),
-    [businessDocSchema, canvas?.nodes],
-  );
+  /* Edit Variables + Replay use ONLY the Business Document schema.
+   * Step-declared outcomes/formFields belong on the Complete dialog
+   * (they're decisions and their auxiliary data, not bag-wide
+   * variables to fix mid-flight). */
 
   const selectedNode: CanvasNode | null = useMemo(() => {
     if (!canvas || !selectedNodeId) return null;
@@ -539,7 +531,7 @@ export default function InstanceDetailPage() {
       {editOpen && (
         <EditVariablesDialog
           currentVariables={detail.variables}
-          schema={fullEffectiveSchema}
+          schema={businessDocSchema}
           onClose={() => setEditOpen(false)}
           onSubmit={onEditSubmit}
         />
@@ -547,7 +539,7 @@ export default function InstanceDetailPage() {
       {replayOpen && selectedNodeId && (
         <ReplayStepDialog
           targetNodeId={selectedNodeId}
-          schema={fullEffectiveSchema}
+          schema={businessDocSchema}
           currentVariables={detail.variables}
           onClose={() => setReplayOpen(false)}
           onSubmit={onReplaySubmit}
@@ -560,17 +552,17 @@ export default function InstanceDetailPage() {
         />
       )}
       {completeForToken && (() => {
-        // Per-step schema = businessDoc + just THIS userTask's outputs.
-        // Other tasks' outputs aren't relevant on this Complete and
-        // would clutter the form.
+        // Pull the current userTask's outcomes + form fields off the
+        // canvas snapshot. Empty/missing → CompleteTaskDialog falls
+        // back to a single implicit "Complete" outcome.
         const tok = detail.tokens.find((t) => t.id === completeForToken);
-        const stepSchema = tok
-          ? buildEffectiveSchema(businessDocSchema, canvas?.nodes, { currentNodeId: tok.currentNodeId })
-          : (businessDocSchema ?? {});
+        const node = tok ? canvas?.nodes?.find((n) => n.id === tok.currentNodeId) : null;
+        const nodeData = (node?.data ?? {}) as { outcomes?: Outcome[]; formFields?: FormField[] };
         return (
           <CompleteTaskDialog
             tokenId={completeForToken}
-            schema={stepSchema}
+            outcomes={nodeData.outcomes}
+            formFields={nodeData.formFields}
             onClose={() => setCompleteForToken(null)}
             onSubmit={onSubmitComplete}
           />
@@ -1702,114 +1694,229 @@ function formatAgo(ts: number): string {
 }
 
 /* ─── Complete-task dialog ───────────────────────────────────────────
- * v1: a small JSON editor. The proper version (designer-defined form
- * schema rendered as a real form) is a separate epic; until then this
- * lets admins drive real test flows by typing the variables they want
- * the gateway / next step to read. "Skip form" submits an empty {}. */
+ * Two-zone layout matching the BPM-product norm (Camunda / Pega /
+ * Bizagi):
+ *   1. Form fields  — auxiliary data captured alongside the decision
+ *      (comments, attachments, amounts). Optional; type-aware.
+ *   2. Outcome buttons — discrete decision actions. Each button
+ *      submits with `{ outcome: <id>, ...formFields }`. Downstream
+ *      gateways read `${outcome}` to route.
+ *
+ * If the task declares no outcomes, a single "Complete" button is
+ * rendered with implicit id "complete". If a form field has
+ * `showWhen.outcomeId`, it's hidden until that outcome is hovered or
+ * a UX hook surfaces it (we display all fields; the showWhen flag
+ * filters which fields are SUBMITTED with each outcome). */
 function CompleteTaskDialog(props: {
   tokenId: string;
-  /** Effective schema for THIS step = businessDoc + the current
-   *  userTask's declared Outputs. When non-empty the dialog defaults
-   *  to the typed form. */
-  schema: BusinessDocSchema;
+  /** The waiting userTask's outcomes. Empty/missing → single
+   *  "Complete" button with implicit id. */
+  outcomes: Outcome[] | undefined;
+  /** Form fields declared on the userTask. */
+  formFields: FormField[] | undefined;
   onClose: () => void;
   onSubmit: (tokenId: string, formData: Record<string, unknown>) => Promise<void>;
 }) {
-  const { tokenId, schema, onClose, onSubmit } = props;
-  const hasSchema = useMemo(
-    () => !!schema && Object.keys(schema as Record<string, unknown>).length > 0,
-    [schema],
-  );
-  const [mode, setMode] = useState<"form" | "advanced">(hasSchema ? "form" : "advanced");
+  const { tokenId, outcomes, formFields, onClose, onSubmit } = props;
+  const effectiveOutcomes: Outcome[] = useMemo(() => {
+    if (outcomes && outcomes.length > 0) return outcomes;
+    // Fallback: a single implicit "complete" so the dialog always has
+    // at least one action button. The id ends up in the bag so even
+    // single-outcome tasks can be referenced from gateways if needed.
+    return [{ uid: "implicit", id: "complete", label: "Complete", style: "primary" }];
+  }, [outcomes]);
+  const fields = useMemo(() => formFields ?? [], [formFields]);
+
   const [formValues, setFormValues] = useState<Record<string, string>>({});
-  const [text, setText] = useState("{\n  \n}");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const submit = async (formData: Record<string, unknown>) => {
+  const onPickOutcome = async (outcome: Outcome) => {
+    // Validate required fields whose visibility matches this outcome.
+    const visible = fields.filter((f) => !f.showWhen || f.showWhen.outcomeId === outcome.id);
+    const missing = visible.filter((f) => f.required && !(formValues[f.name] ?? "").trim());
+    if (missing.length > 0) {
+      setErr(`Required: ${missing.map((f) => f.label || f.name).join(", ")}`);
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
-      await onSubmit(tokenId, formData);
+      // Submit shape: { outcome: <id>, ...visibleFormFields coerced }.
+      // Hidden (showWhen-mismatched) fields are intentionally dropped —
+      // they don't apply to this branch.
+      const submitted: Record<string, unknown> = { outcome: outcome.id };
+      for (const f of visible) {
+        const raw = (formValues[f.name] ?? "").trim();
+        if (!raw) continue;
+        submitted[f.name] = coerceFormField(f.type, raw);
+      }
+      await onSubmit(tokenId, submitted);
     } catch (e) {
       setErr((e as Error).message);
       setBusy(false);
     }
   };
 
-  const onComplete = async () => {
-    if (mode === "form") {
-      // The form drops blanks via coerceBusinessDocValues, so an empty
-      // form is equivalent to "Skip form" — same shape, empty object.
-      const formData = coerceBusinessDocValues(schema, formValues);
-      await submit(formData);
-      return;
-    }
-    let parsed: unknown;
-    try { parsed = JSON.parse(text); }
-    catch (e) { setErr(`Invalid JSON: ${(e as Error).message}`); return; }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      setErr("Form data must be a JSON object (e.g. {\"approved\": true}).");
-      return;
-    }
-    await submit(parsed as Record<string, unknown>);
-  };
-  const onSkipForm = () => submit({});
+  // Press Enter to fire the default outcome (or the only outcome).
+  const defaultOutcome = useMemo(
+    () => effectiveOutcomes.find((o) => o.default) ?? (effectiveOutcomes.length === 1 ? effectiveOutcomes[0] : null),
+    [effectiveOutcomes],
+  );
+  useEffect(() => {
+    if (!defaultOutcome) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !busy) {
+        e.preventDefault();
+        void onPickOutcome(defaultOutcome);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [defaultOutcome, busy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <ModalShell onClose={onClose} title="Complete task">
-      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475467" }}>
-        Form data is merged into the instance variables. Gateways and downstream
-        steps read these to branch and fill templates.
-      </p>
-      {hasSchema && (
-        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          <button type="button" onClick={() => setMode("form")} style={mode === "form" ? modeChipActive : modeChip}>Form</button>
-          <button type="button" onClick={() => setMode("advanced")} style={mode === "advanced" ? modeChipActive : modeChip}>Advanced (JSON)</button>
+      {fields.length === 0 ? (
+        <p style={{ margin: "0 0 14px", fontSize: 13, color: "#475467" }}>
+          Pick the action that reflects your decision. The choice drives the
+          process flow — downstream gateways route on the outcome.
+        </p>
+      ) : (
+        <>
+          <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475467" }}>
+            Capture any auxiliary data, then choose your action below.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+            {fields.map((f) => (
+              <FormFieldInput
+                key={f.uid}
+                field={f}
+                value={formValues[f.name] ?? ""}
+                onChange={(v) => { setFormValues((prev) => ({ ...prev, [f.name]: v })); setErr(null); }}
+                disabled={busy}
+              />
+            ))}
+          </div>
+        </>
+      )}
+      {err && (
+        <div style={{ marginBottom: 12, padding: "8px 10px", border: "1px solid #FECACA", background: "#FEF2F2", borderRadius: 6, fontSize: 12, color: "#B42318" }}>
+          {err}
         </div>
       )}
-      {mode === "form" && hasSchema ? (
-        <BusinessDocForm
-          schema={schema}
-          values={formValues}
-          onChange={(name, v) => { setFormValues((prev) => ({ ...prev, [name]: v })); setErr(null); }}
-          disabled={busy}
-        />
-      ) : (
-        <textarea
-          value={text}
-          onChange={(e) => { setText(e.target.value); setErr(null); }}
-          spellCheck={false}
-          placeholder='{ "approved": true, "comment": "OK" }'
-          style={{
-            width: "100%", minHeight: 160, padding: 10, fontSize: 12,
-            fontFamily: "var(--font-mono, monospace)", border: "1px solid #D0D5DD",
-            borderRadius: 6, color: "#101828", boxSizing: "border-box", resize: "vertical",
-          }}
-        />
-      )}
-      {err && <div style={{ marginTop: 8, fontSize: 12, color: "#B42318" }}>{err}</div>}
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+      <div style={{ borderTop: "1px solid #EAECF0", paddingTop: 14, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
         <button onClick={onClose} disabled={busy} style={modalBtn}>Cancel</button>
-        <button onClick={onSkipForm} disabled={busy} style={modalBtn} title="Submit with empty {} — no form data">
-          Skip form
-        </button>
-        <button onClick={onComplete} disabled={busy} style={modalBtnPrimary}>
-          {busy ? "Completing…" : "Complete task"}
-        </button>
+        {effectiveOutcomes.map((o) => (
+          <OutcomeActionButton
+            key={o.uid}
+            outcome={o}
+            disabled={busy}
+            onClick={() => onPickOutcome(o)}
+          />
+        ))}
       </div>
+      {defaultOutcome && (
+        <div style={{ marginTop: 8, fontSize: 10, color: "#98A2B3", textAlign: "right" }}>
+          ⌘/Ctrl + Enter → {defaultOutcome.label}
+        </div>
+      )}
     </ModalShell>
   );
 }
 
-const modeChip: React.CSSProperties = {
-  padding: "4px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
-  background: "#fff", color: "#667085", fontSize: 11, fontWeight: 600,
-  cursor: "pointer", fontFamily: "inherit",
-};
-const modeChipActive: React.CSSProperties = {
-  ...modeChip, border: "1px solid #C7D2FE", background: "#EEF2FF", color: "#4F46E5",
-};
+/** Render a single form field with the right input control for its
+ *  declared type. Mirrors BusinessDocForm's shape but on FormField,
+ *  which carries a label/description distinct from the variable name. */
+function FormFieldInput(props: {
+  field: FormField;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  const { field, value, onChange, disabled } = props;
+  const common: React.CSSProperties = {
+    width: "100%", padding: "8px 10px", border: "1px solid #D0D5DD", borderRadius: 6,
+    fontSize: 13, color: "#101828", outline: "none", fontFamily: "inherit", boxSizing: "border-box",
+    background: disabled ? "#F9FAFB" : "#fff",
+  };
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: "#344054" }}>
+        {field.label || field.name}
+        {field.required && <span style={{ color: "#D92D20", marginLeft: 3 }}>*</span>}
+      </span>
+      {field.type === "boolean" ? (
+        <select disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common}>
+          <option value="">—</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      ) : field.type === "number" ? (
+        <input type="number" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common} />
+      ) : field.type === "date" ? (
+        <input type="date" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common} />
+      ) : field.type === "json" ? (
+        <textarea
+          disabled={disabled}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={3}
+          placeholder='{"key": "value"}'
+          style={{ ...common, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, resize: "vertical" }}
+        />
+      ) : (
+        <input type="text" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} style={common} />
+      )}
+      {field.description && (
+        <span style={{ fontSize: 10, color: "#98A2B3" }}>{field.description}</span>
+      )}
+    </label>
+  );
+}
+
+/** Action button for one outcome, styled per its declared treatment. */
+function OutcomeActionButton(props: {
+  outcome: Outcome;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const { outcome, disabled, onClick } = props;
+  const style = outcome.style ?? "neutral";
+  const css: React.CSSProperties = (() => {
+    if (style === "primary") return { background: "#6366F1", color: "#fff", border: "1px solid #6366F1" };
+    if (style === "danger")  return { background: "#D92D20", color: "#fff", border: "1px solid #D92D20" };
+    return                          { background: "#fff",    color: "#344054", border: "1px solid #D0D5DD" };
+  })();
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={outcome.description || `Submit with outcome=${outcome.id}`}
+      style={{
+        padding: "8px 16px", fontSize: 13, fontWeight: 600, borderRadius: 6,
+        cursor: disabled ? "not-allowed" : "pointer", fontFamily: "inherit",
+        opacity: disabled ? 0.6 : 1,
+        ...css,
+      }}
+    >
+      {outcome.label}
+    </button>
+  );
+}
+
+function coerceFormField(type: FormField["type"], raw: string): unknown {
+  switch (type) {
+    case "number": {
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : raw;
+    }
+    case "boolean": return raw === "true";
+    case "date":    return raw;
+    case "json":    try { return JSON.parse(raw); } catch { return raw; }
+    default:        return raw;
+  }
+}
 
 /* ─── Reassign-task dialog ───────────────────────────────────────────
  * Admin-only. Shows tenant users; if the task carries a candidateRole,
