@@ -3,9 +3,10 @@
  * picks via buttons on the runtime Complete dialog. The chosen id
  * lands in the bag as `outcome` and drives downstream gateways.
  *
- * This is the proper BPM-product pattern (Camunda / Pega / Bizagi /
- * SAP Workflow) — decisions are explicit named actions, not boolean
- * form fields. A 3-way branch is 3 buttons, not a tri-state dropdown.
+ * NOTE: inline styles, not Tailwind. Tailwind utilities don't
+ * reliably resolve inside `.props-panel` in this codebase (see
+ * project_qa_bugs_gaps.md UX-05). Earlier sections like
+ * SchedulingSection migrated to inline for the same reason.
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { Outcome, OutcomeStyle } from "../../../../types/bpmn-node-data";
@@ -37,7 +38,6 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
     onChange(outcomes.filter((o) => o.uid !== uid));
   };
   const add = () => {
-    // Suggest a label/id to make the empty state useful.
     const suggested = outcomes.length === 0
       ? { id: "approve", label: "Approve", style: "primary" as const }
       : outcomes.length === 1
@@ -46,42 +46,35 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
     onChange([...outcomes, { uid: newUid(), ...suggested }]);
   };
   const setDefault = (uid: string) => {
-    // Only one outcome at a time can carry the default flag.
     onChange(outcomes.map((o) => ({ ...o, default: o.uid === uid })));
   };
 
-  // Track id duplicates so the designer can't ship two outcomes with
-  // the same id (gateway routing would be ambiguous).
   const idCounts = outcomes.reduce<Record<string, number>>((acc, o) => {
     if (o.id.trim()) acc[o.id.trim()] = (acc[o.id.trim()] ?? 0) + 1;
     return acc;
   }, {});
 
   return (
-    <div className="space-y-3">
-      <div className="text-[11px] leading-relaxed text-gray-500">
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={S.help}>
         Decision actions for this task. Each renders as a button on the runtime
-        Complete dialog. The chosen <code className="rounded bg-gray-100 px-1">id</code> lands
-        in the variable bag as <code className="rounded bg-gray-100 px-1">outcome</code> —
-        gateway conditions read it via <code className="rounded bg-gray-100 px-1">{"${outcome == \"approve\"}"}</code>.
+        Complete dialog. The chosen <code style={S.code}>id</code> lands in the variable bag
+        as <code style={S.code}>outcome</code> — gateway conditions read it via
+        <code style={S.code}>{`outcome == "approve"`}</code>.
       </div>
 
       {outcomes.length === 0 ? (
-        <div className="rounded-md border border-dashed border-gray-200 bg-gray-50 px-3 py-4 text-center">
-          <div className="text-[12px] text-gray-500">
+        <div style={S.emptyBox}>
+          <div style={{ fontSize: 12, color: "#6B7280" }}>
             No outcomes declared — runtime will show a single <strong>Complete</strong> button.
           </div>
-          <button
-            type="button"
-            onClick={add}
-            className="mt-2 rounded-md border border-gray-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-50"
-          >
+          <button type="button" onClick={add} style={{ ...S.btnGhost, marginTop: 8 }}>
             + Add outcome
           </button>
         </div>
       ) : (
         <>
-          <div className="space-y-2">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {outcomes.map((o) => {
               const trimmed = o.id.trim();
               const isInvalid = trimmed.length > 0 && !ID_RE.test(trimmed);
@@ -94,11 +87,8 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
               const style = o.style ?? "neutral";
               const stylePreview = STYLES.find((s) => s.value === style)!.preview;
               return (
-                <div
-                  key={o.uid}
-                  className="rounded-md border border-gray-200 bg-white p-2.5"
-                >
-                  <div className="flex items-start gap-2">
+                <div key={o.uid} style={S.row}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {/* Live preview of the rendered button */}
                     <span
                       style={{
@@ -116,46 +106,48 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
                       value={o.label}
                       onChange={(e) => update(o.uid, { label: e.target.value })}
                       placeholder="Label (e.g. Approve)"
-                      className="flex-1 rounded-md border border-gray-200 px-2 py-1 text-[12px] outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-50"
+                      style={{ ...S.input, flex: 1 }}
                     />
                     <button
                       type="button"
                       onClick={() => remove(o.uid)}
                       title="Remove outcome"
                       aria-label="Remove outcome"
-                      className="rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-500 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+                      style={S.btnRemove}
                     >
                       ✕
                     </button>
                   </div>
-                  <div className="mt-2 flex items-center gap-2">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
                     <input
                       type="text"
                       value={o.id}
                       onChange={(e) => update(o.uid, { id: e.target.value })}
                       placeholder="id (e.g. approve)"
-                      className={`flex-1 rounded-md border px-2 py-1 font-mono text-[11px] outline-none focus:ring-2 ${
-                        warning
-                          ? "border-red-300 focus:border-red-400 focus:ring-red-50"
-                          : "border-gray-200 focus:border-brand-400 focus:ring-brand-50"
-                      }`}
+                      style={{
+                        ...S.input,
+                        flex: 1,
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        fontSize: 11,
+                        borderColor: warning ? "#FCA5A5" : "#E5E7EB",
+                      }}
                     />
                     <select
                       value={style}
                       onChange={(e) => update(o.uid, { style: e.target.value as OutcomeStyle })}
-                      className="rounded-md border border-gray-200 px-2 py-1 text-[11px] outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-50"
+                      style={{ ...S.input, padding: "5px 8px" }}
                     >
                       {STYLES.map((s) => (
                         <option key={s.value} value={s.value}>{s.label}</option>
                       ))}
                     </select>
                     <label
-                      title="Pressing Enter on the runtime Complete dialog fires this outcome. Only one default per task."
-                      className="flex cursor-pointer items-center gap-1.5 text-[10px] text-gray-600"
+                      title="Pressing Cmd/Ctrl+Enter on the runtime Complete dialog fires this outcome. Only one default per task."
+                      style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "#6B7280", cursor: "pointer" }}
                     >
                       <input
                         type="radio"
-                        name={`default-outcome`}
+                        name="default-outcome"
                         checked={!!o.default}
                         onChange={() => setDefault(o.uid)}
                       />
@@ -163,17 +155,13 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
                     </label>
                   </div>
                   {warning && (
-                    <div className="mt-1.5 text-[10px] text-red-600">{warning}</div>
+                    <div style={{ marginTop: 6, fontSize: 10, color: "#B42318" }}>{warning}</div>
                   )}
                 </div>
               );
             })}
           </div>
-          <button
-            type="button"
-            onClick={add}
-            className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-50"
-          >
+          <button type="button" onClick={add} style={S.btnGhost}>
             + Add outcome
           </button>
         </>
@@ -181,3 +169,39 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
     </div>
   );
 }
+
+const S = {
+  help: {
+    fontSize: 11, lineHeight: 1.5, color: "#6B7280",
+  } as React.CSSProperties,
+  code: {
+    background: "#F2F4F7", padding: "1px 4px", borderRadius: 3,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 10, marginRight: 2, marginLeft: 2,
+  } as React.CSSProperties,
+  emptyBox: {
+    border: "1px dashed #E5E7EB", background: "#F9FAFB",
+    borderRadius: 8, padding: "14px 12px", textAlign: "center" as const,
+  } as React.CSSProperties,
+  row: {
+    border: "1px solid #E5E7EB", background: "#fff",
+    borderRadius: 8, padding: 10,
+  } as React.CSSProperties,
+  input: {
+    width: "100%", padding: "6px 8px", borderRadius: 6,
+    border: "1px solid #E5E7EB", fontSize: 12, color: "#111827",
+    outline: "none", fontFamily: "inherit", background: "#fff",
+    boxSizing: "border-box" as const,
+  } as React.CSSProperties,
+  btnRemove: {
+    padding: "4px 8px", borderRadius: 6, border: "1px solid #E5E7EB",
+    background: "#fff", color: "#6B7280", fontSize: 12,
+    cursor: "pointer", fontFamily: "inherit",
+  } as React.CSSProperties,
+  btnGhost: {
+    padding: "6px 12px", borderRadius: 6, border: "1px solid #E5E7EB",
+    background: "#fff", color: "#374151", fontSize: 11, fontWeight: 500,
+    cursor: "pointer", fontFamily: "inherit",
+    alignSelf: "flex-start" as const,
+  } as React.CSSProperties,
+};

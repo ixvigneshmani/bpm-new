@@ -6,6 +6,9 @@
  *
  * Optional `showWhen` lets a field appear only when a specific outcome
  * is chosen — e.g. "approved amount" shows only when outcome=approve.
+ *
+ * NOTE: inline styles (Tailwind doesn't reliably resolve inside
+ * `.props-panel` — see UX-05 in QA bugs).
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { FormField, FormFieldType, Outcome } from "../../../../types/bpmn-node-data";
@@ -51,28 +54,25 @@ export default function FormFieldsSection({ fields = [], outcomes = [], reserved
   }, {});
 
   return (
-    <div className="space-y-3">
-      <div className="text-[11px] leading-relaxed text-gray-500">
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={S.help}>
         Auxiliary data the operator captures alongside the outcome — comments,
         attachments, amounts. Each field lands as a named variable in the bag.
-        Use <code className="rounded bg-gray-100 px-1">Show when</code> to surface
-        a field only for certain outcomes.
+        Use <code style={S.code}>Show when</code> to surface a field only for certain outcomes.
       </div>
 
       {fields.length === 0 ? (
-        <div className="rounded-md border border-dashed border-gray-200 bg-gray-50 px-3 py-4 text-center">
-          <div className="text-[12px] text-gray-500">No form fields — operator just clicks an outcome button.</div>
-          <button
-            type="button"
-            onClick={add}
-            className="mt-2 rounded-md border border-gray-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-50"
-          >
+        <div style={S.emptyBox}>
+          <div style={{ fontSize: 12, color: "#6B7280" }}>
+            No form fields — operator just clicks an outcome button.
+          </div>
+          <button type="button" onClick={add} style={{ ...S.btnGhost, marginTop: 8 }}>
             + Add field
           </button>
         </div>
       ) : (
         <>
-          <div className="space-y-2">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {fields.map((f) => {
               const trimmed = f.name.trim();
               const isInvalid = trimmed.length > 0 && !NAME_RE.test(trimmed);
@@ -88,27 +88,26 @@ export default function FormFieldsSection({ fields = [], outcomes = [], reserved
                     : isReserved
                       ? "Shadows a Business Document field — the document value will win at runtime merge."
                       : null;
+              const warnColor = isReserved && !isReservedOutcome ? "#B45309" : "#B42318";
               return (
-                <div
-                  key={f.uid}
-                  className="rounded-md border border-gray-200 bg-white p-2.5"
-                >
-                  <div className="flex items-start gap-2">
+                <div key={f.uid} style={S.row}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <input
                       type="text"
                       value={f.name}
                       onChange={(e) => update(f.uid, { name: e.target.value })}
                       placeholder="variable name"
-                      className={`flex-1 rounded-md border px-2 py-1 font-mono text-[12px] outline-none focus:ring-2 ${
-                        warning && !isReserved
-                          ? "border-red-300 focus:border-red-400 focus:ring-red-50"
-                          : "border-gray-200 focus:border-brand-400 focus:ring-brand-50"
-                      }`}
+                      style={{
+                        ...S.input,
+                        flex: 1,
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        borderColor: warning && !isReserved ? "#FCA5A5" : "#E5E7EB",
+                      }}
                     />
                     <select
                       value={f.type}
                       onChange={(e) => update(f.uid, { type: e.target.value as FormFieldType })}
-                      className="rounded-md border border-gray-200 px-2 py-1 text-[12px] outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-50"
+                      style={{ ...S.input, padding: "5px 8px", width: "auto" }}
                     >
                       {TYPES.map((t) => (
                         <option key={t.value} value={t.value}>{t.label}</option>
@@ -119,13 +118,13 @@ export default function FormFieldsSection({ fields = [], outcomes = [], reserved
                       onClick={() => remove(f.uid)}
                       title="Remove field"
                       aria-label="Remove field"
-                      className="rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-500 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+                      style={S.btnRemove}
                     >
                       ✕
                     </button>
                   </div>
-                  <div className="mt-2 flex items-center gap-3">
-                    <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-gray-600">
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#374151", cursor: "pointer" }}>
                       <input
                         type="checkbox"
                         checked={!!f.required}
@@ -138,19 +137,21 @@ export default function FormFieldsSection({ fields = [], outcomes = [], reserved
                       value={f.label ?? ""}
                       onChange={(e) => update(f.uid, { label: e.target.value })}
                       placeholder="display label"
-                      className="flex-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-700 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-50"
+                      style={{ ...S.input, flex: 1, fontSize: 11 }}
                     />
                   </div>
                   {outcomes.length > 0 && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <span className="text-[10px] uppercase tracking-wide text-gray-400">Show when</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                      <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#9CA3AF" }}>
+                        Show when
+                      </span>
                       <select
                         value={f.showWhen?.outcomeId ?? ""}
                         onChange={(e) => {
                           const v = e.target.value;
                           update(f.uid, v ? { showWhen: { outcomeId: v } } : { showWhen: undefined });
                         }}
-                        className="rounded-md border border-gray-200 px-2 py-1 text-[11px] outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-50"
+                        style={{ ...S.input, padding: "5px 8px", width: "auto", fontSize: 11 }}
                       >
                         <option value="">always</option>
                         {outcomes.map((o) => (
@@ -164,26 +165,16 @@ export default function FormFieldsSection({ fields = [], outcomes = [], reserved
                     value={f.description ?? ""}
                     onChange={(e) => update(f.uid, { description: e.target.value })}
                     placeholder="description (shown under the field)"
-                    className="mt-2 w-full rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-700 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-50"
+                    style={{ ...S.input, fontSize: 11, marginTop: 8 }}
                   />
                   {warning && (
-                    <div
-                      className={`mt-1.5 text-[10px] ${
-                        isReserved && !isReservedOutcome ? "text-amber-700" : "text-red-600"
-                      }`}
-                    >
-                      {warning}
-                    </div>
+                    <div style={{ marginTop: 6, fontSize: 10, color: warnColor }}>{warning}</div>
                   )}
                 </div>
               );
             })}
           </div>
-          <button
-            type="button"
-            onClick={add}
-            className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-50"
-          >
+          <button type="button" onClick={add} style={S.btnGhost}>
             + Add field
           </button>
         </>
@@ -191,3 +182,39 @@ export default function FormFieldsSection({ fields = [], outcomes = [], reserved
     </div>
   );
 }
+
+const S = {
+  help: {
+    fontSize: 11, lineHeight: 1.5, color: "#6B7280",
+  } as React.CSSProperties,
+  code: {
+    background: "#F2F4F7", padding: "1px 4px", borderRadius: 3,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 10, marginRight: 2, marginLeft: 2,
+  } as React.CSSProperties,
+  emptyBox: {
+    border: "1px dashed #E5E7EB", background: "#F9FAFB",
+    borderRadius: 8, padding: "14px 12px", textAlign: "center" as const,
+  } as React.CSSProperties,
+  row: {
+    border: "1px solid #E5E7EB", background: "#fff",
+    borderRadius: 8, padding: 10,
+  } as React.CSSProperties,
+  input: {
+    width: "100%", padding: "6px 8px", borderRadius: 6,
+    border: "1px solid #E5E7EB", fontSize: 12, color: "#111827",
+    outline: "none", fontFamily: "inherit", background: "#fff",
+    boxSizing: "border-box" as const,
+  } as React.CSSProperties,
+  btnRemove: {
+    padding: "4px 8px", borderRadius: 6, border: "1px solid #E5E7EB",
+    background: "#fff", color: "#6B7280", fontSize: 12,
+    cursor: "pointer", fontFamily: "inherit",
+  } as React.CSSProperties,
+  btnGhost: {
+    padding: "6px 12px", borderRadius: 6, border: "1px solid #E5E7EB",
+    background: "#fff", color: "#374151", fontSize: 11, fontWeight: 500,
+    cursor: "pointer", fontFamily: "inherit",
+    alignSelf: "flex-start" as const,
+  } as React.CSSProperties,
+};
