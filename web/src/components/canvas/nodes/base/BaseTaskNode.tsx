@@ -139,17 +139,21 @@ function SideHandles() {
     <>
       {sides.map(({ pos, handleStyle }) => (
         <div key={pos}>
-          <Handle
-            type="source"
-            position={pos}
-            id={`s-${pos}`}
-            style={{ ...transparent, ...handleStyle, cursor: pos === Position.Right ? "crosshair" : "grab" }}
-          />
+          {/* Target FIRST so source ends up on top — dragging out of
+           *  the node grabs the source handle (outgoing connection).
+           *  Without this swap, the target handle catches the drag
+           *  and silently nothing happens. */}
           <Handle
             type="target"
             position={pos}
             id={`t-${pos}`}
             style={{ ...transparent, ...handleStyle }}
+          />
+          <Handle
+            type="source"
+            position={pos}
+            id={`s-${pos}`}
+            style={{ ...transparent, ...handleStyle, cursor: pos === Position.Right ? "crosshair" : "grab" }}
           />
         </div>
       ))}

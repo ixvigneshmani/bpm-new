@@ -56,20 +56,25 @@ function SideHandles({ showSource, showTarget }: { showSource: boolean; showTarg
     <>
       {sides.map(({ pos, size }) => (
         <div key={pos}>
-          {showSource && (
-            <Handle
-              type="source"
-              position={pos}
-              id={`s-${pos}`}
-              style={{ ...transparent, width: size, height: size, cursor: pos === Position.Right ? "crosshair" : "grab" }}
-            />
-          )}
+          {/* Target rendered first so source sits on top in the DOM
+           *  stacking order — outgoing-drag on a node grabs the
+           *  source handle. xyflow's drop hit-testing for incoming
+           *  connections is independent of order, so this doesn't
+           *  break inbound drops. */}
           {showTarget && (
             <Handle
               type="target"
               position={pos}
               id={`t-${pos}`}
               style={{ ...transparent, width: size, height: size }}
+            />
+          )}
+          {showSource && (
+            <Handle
+              type="source"
+              position={pos}
+              id={`s-${pos}`}
+              style={{ ...transparent, width: size, height: size, cursor: pos === Position.Right ? "crosshair" : "grab" }}
             />
           )}
         </div>

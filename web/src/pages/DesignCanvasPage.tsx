@@ -178,13 +178,16 @@ function CanvasInner() {
   }, [rawNodes]);
 
   const nodes = useMemo(() => {
-    const base = selectedNodeId
-      ? rawNodes.map((n) =>
-          n.selected === (n.id === selectedNodeId)
-            ? n
-            : { ...n, selected: n.id === selectedNodeId }
-        )
-      : rawNodes;
+    // Sync `selected` flag to our authoritative selectedNodeId in
+    // EVERY case — including when selectedNodeId becomes null (user
+    // clicked an edge or the pane). Without this, a stale
+    // `n.selected: true` lingers on the previously-selected node, so
+    // Backspace would delete that node along with the now-selected
+    // edge, and the Properties panel would still show node props.
+    const base = rawNodes.map((n) => {
+      const shouldBeSelected = n.id === selectedNodeId;
+      return n.selected === shouldBeSelected ? n : { ...n, selected: shouldBeSelected };
+    });
     if (!hiddenIds || hiddenIds.size === 0) return base;
     return base.map((n) => (hiddenIds.has(n.id) ? { ...n, hidden: true } : n));
   }, [rawNodes, selectedNodeId, hiddenIds]);
@@ -341,6 +344,15 @@ function CanvasInner() {
     [setSelectedNode]
   );
 
+  /* Clicking an edge must clear the previously-selected node so the
+   * Properties panel switches to edge-mode AND the Backspace handler
+   * deletes the edge (not the still-selected node). Without this,
+   * selecting node X then clicking an edge leaves selectedNodeId set,
+   * the panel keeps showing X's properties, and Delete would remove X. */
+  const onEdgeClick = useCallback(() => {
+    setSelectedNode(null);
+  }, [setSelectedNode]);
+
   const onPaneClick = useCallback(() => {
     setSelectedNode(null);
   }, [setSelectedNode]);
@@ -441,6 +453,7 @@ function CanvasInner() {
           onDragOver={onDragOver}
           onNodeDragStop={onNodeDragStop}
           onNodeClick={onNodeClick}
+          onEdgeClick={onEdgeClick}
           onPaneClick={onPaneClick}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
