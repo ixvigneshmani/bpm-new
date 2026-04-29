@@ -144,43 +144,15 @@ body {
   pointer-events: auto;
 }
 
-/* ─── Handle visibility on node hover ──────────────────────────────
- *  BPMN nodes have transparent handles by default to keep the canvas
- *  clean. That makes connection points undiscoverable — users don't
- *  know where to drag from to draw a new edge. On node hover we light
- *  up the handles with a subtle indigo dot so the four side anchors
- *  become obvious. We don't change the handle's actual width/height
- *  inline-style (the click target stays large), only the fill+border.
- *
- *  Scoped to the designer canvas via `:not(.instance-canvas-readonly)`
- *  so the read-only instance view stays free of these affordances. */
-.react-flow:not(.instance-canvas-readonly) .react-flow__node:hover > div .react-flow__handle {
-  background: rgba(99, 102, 241, 0.55) !important;
-  border: 1.5px solid #4F46E5 !important;
-  border-radius: 50% !important;
-  opacity: 1 !important;
-  transition: background 120ms, border-color 120ms;
-}
-.react-flow:not(.instance-canvas-readonly) .react-flow__node:hover > div .react-flow__handle:hover {
-  background: #4F46E5 !important;
-  border-color: #3730A3 !important;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
-}
-/* When dragging from a handle (xyflow adds .connectingfrom on the
- *  source handle), keep it visible so the user has feedback. */
-.react-flow:not(.instance-canvas-readonly) .react-flow__handle.connectingfrom {
-  background: #4F46E5 !important;
-  border: 1.5px solid #3730A3 !important;
-  opacity: 1 !important;
-}
-/* Reconnect handles (rendered when an edge is selected): make them
- *  obvious so users know they can drag the endpoint to remap. */
-.react-flow:not(.instance-canvas-readonly) .react-flow__edgeupdater {
-  fill: #6366F1 !important;
-  stroke: #fff !important;
-  stroke-width: 2 !important;
-  r: 5 !important;
-}
+/* Note: an earlier iteration tried lighting up all 4 side handles on
+ *  node hover (and styling the edge-updater circles indigo) for
+ *  discoverability. The user pushed back — too many dots, visually
+ *  noisy. Reverted. The functional fix (handle z-order in
+ *  Base{Task,Gateway,Event}Node — target rendered first so source is
+ *  on top for outgoing drags) handles the real bug; the existing
+ *  `.bpmn-connect-chip` remains the only on-hover affordance. xyflow
+ *  default styling for `.react-flow__edgeupdater` (the small circles
+ *  on a selected edge that allow drag-to-remap) is left untouched. */
 /* When selected, suppress chip — resize owns the node */
 .bpmn-task-node.is-selected .bpmn-connect-chip,
 .bpmn-event-node.is-selected .bpmn-connect-chip,
