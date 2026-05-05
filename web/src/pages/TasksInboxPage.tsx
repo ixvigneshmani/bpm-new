@@ -19,6 +19,8 @@ import { useCallback, useState } from "react";
 import { apiGet, apiPost } from "../lib/api";
 import { useVisiblePoll } from "../lib/use-visible-poll";
 import ConfirmModal, { type ConfirmConfig } from "../components/ConfirmModal";
+import CompleteTaskDialog from "../components/CompleteTaskDialog";
+import type { Outcome } from "../types/bpmn-node-data";
 
 type Task = {
   tokenId: string;
@@ -240,8 +242,21 @@ function TaskDrawer(props: {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CompleteResponse | null>(null);
   const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
+  const [outcomeDialogOpen, setOutcomeDialogOpen] = useState(false);
   const isClaimed = !!task.assignedTo;
   const isRoleGated = !!task.candidateRole;
+  /* VX2: a userTask with declared outcomes routes via the
+   * CompleteTaskDialog (Approve/Reject/etc. action buttons), not the
+   * raw JSON textarea. Without this, completing here bypasses the
+   * `outcome` variable and the next gateway fails-loud (BUG-18).
+   *
+   * `outcomes` lives on the task's nodeData snapshot — the engine
+   * stamps it onto the token when the userTask is entered, so the
+   * inbox doesn't need to re-fetch the process definition. */
+  const declaredOutcomes = (() => {
+    const o = (task.nodeData ?? {}) as { outcomes?: Outcome[] };
+    return Array.isArray(o.outcomes) && o.outcomes.length > 0 ? o.outcomes : null;
+  })();
 
   const claim = async () => {
     setError(null);
@@ -271,6 +286,15 @@ function TaskDrawer(props: {
 
   const submit = async () => {
     setError(null);
+    // VX2: when the task declares outcomes, completion goes through
+    // the CompleteTaskDialog so the operator must pick one. The
+    // chosen outcome lands in the variable bag as `outcome`, and
+    // downstream gateways read `${outcome}` to route. Skipping this
+    // step makes the next exclusive gateway fail-loud — BUG-18.
+    if (declaredOutcomes) {
+      setOutcomeDialogOpen(true);
+      return;
+    }
     let parsed: Record<string, unknown> = {};
     if (formJson.trim().length > 0) {
       try {
@@ -300,6 +324,33 @@ function TaskDrawer(props: {
       return;
     }
     void doSubmit(parsed);
+  };
+
+  /** Submit handler for the CompleteTaskDialog. The dialog supplies
+   *  `{ outcome, ...maybeRawJsonFromDialog }`. We additionally merge
+   *  any JSON the operator typed in the drawer's "Form data (advanced)"
+   *  textarea, with the dialog payload winning on key conflicts —
+   *  notably so a raw `outcome` key in the drawer textarea can't
+   *  override the picked outcome. */
+  const submitWithOutcome = async (
+    _tokenId: string,
+    formData: Record<string, unknown>,
+  ): Promise<void> => {
+    setOutcomeDialogOpen(false);
+    let drawerExtras: Record<string, unknown> = {};
+    if (formJson.trim().length > 0 && formJson.trim() !== "{}") {
+      try {
+        const parsed = JSON.parse(formJson);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          drawerExtras = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Silently ignore malformed drawer JSON when an outcome is
+        // declared — the operator's intent is the outcome click. The
+        // textarea is the secondary input here.
+      }
+    }
+    await doSubmit({ ...drawerExtras, ...formData });
   };
 
   const doSubmit = async (parsed: Record<string, unknown>) => {
@@ -361,11 +412,46 @@ function TaskDrawer(props: {
               }
             </div>
           )}
+          {declaredOutcomes && (
+            /* VX2: a userTask with declared outcomes is completed via
+             * the outcome-picker dialog, not the raw JSON textarea.
+             * Show the operator the action menu inline so they don't
+             * have to click Complete to discover the choice. */
+            <div style={{
+              padding: "12px 14px", borderRadius: 8, background: "#EEF2FF",
+              border: "1px solid #C7D2FE", marginBottom: 16, fontSize: 13, color: "#3730A3",
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                {declaredOutcomes.length} outcome{declaredOutcomes.length === 1 ? "" : "s"} declared
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                {declaredOutcomes.map((o) => (
+                  <span
+                    key={o.uid}
+                    style={{
+                      padding: "2px 8px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                      background: o.style === "danger" ? "#FEE4E2" : o.style === "primary" ? "#E0E7FF" : "#F2F4F7",
+                      color: o.style === "danger" ? "#B42318" : o.style === "primary" ? "#3730A3" : "#475467",
+                    }}
+                  >
+                    {o.label}
+                  </span>
+                ))}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>
+                Click <strong>Complete task</strong> to pick an outcome — the
+                choice drives downstream gateway routing.
+              </div>
+            </div>
+          )}
           <div style={{ marginBottom: 16, opacity: isRoleGated && !isClaimed ? 0.4 : 1 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Form data</div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#98A2B3", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
+              {declaredOutcomes ? "Form data (advanced)" : "Form data"}
+            </div>
             <div style={{ fontSize: 12, color: "#667085", marginBottom: 8 }}>
-              JSON object merged into the instance variables on completion.
-              Empty <code>{"{}"}</code> for tasks that just acknowledge.
+              {declaredOutcomes
+                ? <>Optional. Extra variables to merge alongside the outcome — paste raw JSON here for QA / dev runs. The host app would normally send these.</>
+                : <>JSON object merged into the instance variables on completion. Empty <code>{"{}"}</code> for tasks that just acknowledge.</>}
             </div>
             <textarea
               value={formJson}
@@ -457,6 +543,14 @@ function TaskDrawer(props: {
         </div>
       </div>
       {confirm && <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />}
+      {outcomeDialogOpen && declaredOutcomes && (
+        <CompleteTaskDialog
+          tokenId={task.tokenId}
+          outcomes={declaredOutcomes}
+          onClose={() => setOutcomeDialogOpen(false)}
+          onSubmit={submitWithOutcome}
+        />
+      )}
     </>
   );
 }
