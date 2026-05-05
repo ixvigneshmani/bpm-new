@@ -34,10 +34,19 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
    *  resolved promise calls `navigate()` on an unmounted component
    *  (React warning, and the navigate may redirect them away from the
    *  page they intentionally moved to). AbortController cancels the
-   *  request on unmount; mountedRef gates post-resolve side effects. */
+   *  request on unmount; mountedRef gates post-resolve side effects.
+   *
+   *  IMPORTANT: reset `mountedRef.current = true` at the *start* of the
+   *  effect body, not just at construction. React 18 StrictMode mounts
+   *  every effect twice in dev (mount → cleanup → remount); the cleanup
+   *  flips this to false, and without the reset on remount the flag
+   *  stays false forever — the success branch never fires, the dialog
+   *  stays on "Starting…" after a 201 response, and Cancel can't escape.
+   *  That was BUG-20. */
   const startAbortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       startAbortRef.current?.abort();
