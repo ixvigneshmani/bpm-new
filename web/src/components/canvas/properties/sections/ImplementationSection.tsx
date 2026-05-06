@@ -77,22 +77,52 @@ export default function ImplementationSection({ implementation, onChange }: Prop
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
           {BINDING_TYPES.map((bt) => {
             const active = currentType === bt.type;
+            /* GAP-T2-A: cards whose runtime type isn't in the
+             * executable set are disabled in the picker. Selecting one
+             * of them used to silently fall through to the engine's
+             * noop handler — service tasks pretended to succeed
+             * without doing anything. The GAP-T2-C banner still
+             * surfaces if a process was already saved with one of
+             * these types before this change. */
+            const isExecutable = EXECUTABLE_SERVICE_TASK_IMPL_TYPES.has(bt.type);
             return (
               <button
                 key={bt.type}
                 type="button"
-                onClick={() => setType(bt.type)}
+                disabled={!isExecutable}
+                onClick={isExecutable ? () => setType(bt.type) : undefined}
+                title={
+                  isExecutable
+                    ? bt.label
+                    : `${bt.label} isn't executable yet — track on the I-series roadmap (Mail / REST / Script / Connectors)`
+                }
                 style={{
+                  position: "relative",
                   padding: "10px 8px", borderRadius: 10, textAlign: "center",
                   border: `1.5px solid ${active ? "#fdba74" : "#e5e7eb"}`,
-                  background: active ? "#fff7ed" : "#fff",
-                  cursor: "pointer", transition: "all 0.15s",
+                  background: active ? "#fff7ed" : isExecutable ? "#fff" : "#f9fafb",
+                  cursor: isExecutable ? "pointer" : "not-allowed",
+                  opacity: isExecutable ? 1 : 0.55,
+                  transition: "all 0.15s",
                 }}
               >
                 <div style={{ fontSize: 18, marginBottom: 2 }}>{bt.icon}</div>
                 <div style={{ fontSize: 10, fontWeight: 600, color: active ? "#ea580c" : "#667085" }}>
                   {bt.label}
                 </div>
+                {!isExecutable && (
+                  <div
+                    style={{
+                      position: "absolute", top: 4, right: 4,
+                      fontSize: 8, fontWeight: 700, letterSpacing: "0.04em",
+                      textTransform: "uppercase",
+                      padding: "1px 5px", borderRadius: 999,
+                      background: "#e5e7eb", color: "#475467",
+                    }}
+                  >
+                    Soon
+                  </div>
+                )}
               </button>
             );
           })}
