@@ -129,6 +129,290 @@ const FORBIDDEN_VARIABLE_KEYS = new Set([
   "prototype",
 ]);
 
+/* ─── REST handler (I2) ───────────────────────────────────────────────
+ *
+ * Registered under the synthetic topic `__rest__`. Engine maps the
+ * service-task's `implementation.type === "rest"` to this topic in
+ * `resolveServiceTaskTopic` so the same WorkerService machinery (claim,
+ * retry, dead-letter) drives it.
+ *
+ * Reads `nodeData.implementation.config` (RestConfig from
+ * `web/src/types/bpmn-node-data.ts`):
+ *   • method       — GET/POST/PUT/PATCH/DELETE
+ *   • url          — string with `${var}` placeholders
+ *   • headers      — KeyValuePair[], values support `${var}`
+ *   • queryParams  — KeyValuePair[], values support `${var}`
+ *   • body         — string with `${var}` placeholders (POST/PUT/PATCH)
+ *   • auth         — none / bearer / basic / apiKey (oauth2 +
+ *                    credentialRef NOT supported in v1; throw on
+ *                    those so the operator sees the missing piece
+ *                    rather than silently sending an unauthenticated
+ *                    request).
+ *
+ * Response handling:
+ *   • 2xx with JSON object body  → merged into instance.variables
+ *   • 2xx with non-object body   → returned as
+ *                                  `{ responseStatus, responseBody }`
+ *                                  so the response is captured without
+ *                                  trampling the variables bag.
+ *   • 4xx/5xx                    → throws → WorkerService retries per
+ *                                  the node's `data.resilience.retry`.
+ *   • Network/DNS error          → same retry path.
+ *
+ * Variable interpolation:
+ *   `${foo}` → variables.foo
+ *   `${user.email}` → variables.user.email (one level of dotted access)
+ *   missing vars → empty string. Matches typical templating libs;
+ *   strict-mode validation lives in the canvas validator (which sees
+ *   the placeholder list at design time), not at runtime.
+ *
+ * Out of scope for v1 (tracked under I-series follow-ups):
+ *   • OAuth2 token refresh
+ *   • CredentialRef store integration
+ *   • Status-code → outcome mapping (would interact with VX2 outcomes)
+ *   • Streaming / multipart / file uploads
+ *   • mTLS
+ * ──────────────────────────────────────────────────────────────────── */
+
+/** Synthetic worker topic for rest-typed service tasks. Engine resolves
+ *  `impl.type === "rest"` to this constant; the handler reads the rest
+ *  config from `nodeData.implementation.config`. */
+export const REST_SERVICE_TASK_TOPIC = "__rest__";
+
+/** `${var}` placeholder pattern. Captures whatever's between the braces
+ *  so a one-level dotted lookup (`user.email`) can be split inside the
+ *  callback. Multi-level paths or array index syntax aren't supported
+ *  in v1 — keep templating simple, push complex projection to script
+ *  tasks. */
+const REST_VAR_INTERPOLATION_RE = /\$\{([^}]+)\}/g;
+
+function interpolateRestTemplate(
+  template: string,
+  variables: Record<string, unknown>,
+): string {
+  return template.replace(REST_VAR_INTERPOLATION_RE, (_, expr) => {
+    const path = String(expr).trim();
+    if (!path) return "";
+    const parts = path.split(".");
+    let cur: unknown = variables;
+    for (const p of parts) {
+      if (
+        cur != null &&
+        typeof cur === "object" &&
+        Object.prototype.hasOwnProperty.call(cur, p)
+      ) {
+        cur = (cur as Record<string, unknown>)[p];
+      } else {
+        // Missing var → empty string. Keeps URL/body well-formed; the
+        // designer-side variable-registry validator already flags
+        // unresolved placeholders at edit time so a runtime "" here
+        // means the operator chose to allow it.
+        return "";
+      }
+    }
+    return cur == null ? "" : String(cur);
+  });
+}
+
+type RestKeyValuePair = { key: string; value: string };
+
+type RestAuthConfig =
+  | { type: "none" }
+  | { type: "bearer"; token: string }
+  | { type: "basic"; username: string; password: string }
+  | { type: "apiKey"; headerName: string; value: string }
+  | { type: "oauth2"; credentialRef?: string }
+  | { type: "credentialRef"; refId?: string };
+
+type RestImplConfig = {
+  method?: string;
+  url?: string;
+  headers?: RestKeyValuePair[];
+  queryParams?: RestKeyValuePair[];
+  body?: string;
+  auth?: RestAuthConfig;
+};
+
+const REST_VALID_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const REST_BODY_METHODS = new Set(["POST", "PUT", "PATCH"]);
+const REST_RESPONSE_BODY_LIMIT = 500;
+
+export const restHandler: ServiceTaskHandler = async (input) => {
+  const impl = input.nodeData.implementation as
+    | { type?: unknown; config?: RestImplConfig }
+    | undefined;
+  if (!impl || impl.type !== "rest" || !impl.config || typeof impl.config !== "object") {
+    throw new Error(
+      'rest handler: nodeData.implementation must be { type: "rest", config: RestConfig }.',
+    );
+  }
+  const cfg = impl.config;
+
+  const method = String(cfg.method ?? "GET").toUpperCase();
+  if (!REST_VALID_METHODS.has(method)) {
+    throw new Error(`rest handler: unsupported HTTP method "${method}".`);
+  }
+
+  const rawUrl = typeof cfg.url === "string" ? cfg.url : "";
+  if (!rawUrl) {
+    throw new Error("rest handler: implementation.config.url is required.");
+  }
+
+  let url = interpolateRestTemplate(rawUrl, input.variables);
+  // Validate URL parses before adding query params — clearer error
+  // than letting `new URL` blow up halfway through the builder.
+  try {
+    new URL(url);
+  } catch (e) {
+    throw new Error(
+      `rest handler: invalid URL after variable interpolation ("${url}"): ${(e as Error).message}`,
+    );
+  }
+
+  // Build query string from queryParams (if any). Each value goes
+  // through interpolation too so `${env}` etc. resolve.
+  const queryParams = Array.isArray(cfg.queryParams) ? cfg.queryParams : [];
+  if (queryParams.length > 0) {
+    const u = new URL(url);
+    for (const kv of queryParams) {
+      if (kv && typeof kv.key === "string" && kv.key) {
+        u.searchParams.append(
+          kv.key,
+          interpolateRestTemplate(String(kv.value ?? ""), input.variables),
+        );
+      }
+    }
+    url = u.toString();
+  }
+
+  // Headers: KV pairs first, then auth, then default Content-Type for
+  // body methods if the user didn't override it.
+  const headers: Record<string, string> = {};
+  for (const kv of cfg.headers ?? []) {
+    if (kv && typeof kv.key === "string" && kv.key) {
+      headers[kv.key] = interpolateRestTemplate(
+        String(kv.value ?? ""),
+        input.variables,
+      );
+    }
+  }
+
+  const auth = cfg.auth;
+  if (auth && auth.type) {
+    switch (auth.type) {
+      case "none":
+        break;
+      case "bearer": {
+        const token = interpolateRestTemplate(
+          String(auth.token ?? ""),
+          input.variables,
+        );
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        break;
+      }
+      case "basic": {
+        const u = interpolateRestTemplate(
+          String(auth.username ?? ""),
+          input.variables,
+        );
+        const p = interpolateRestTemplate(
+          String(auth.password ?? ""),
+          input.variables,
+        );
+        if (u || p) {
+          headers["Authorization"] =
+            `Basic ${Buffer.from(`${u}:${p}`).toString("base64")}`;
+        }
+        break;
+      }
+      case "apiKey": {
+        const headerName = typeof auth.headerName === "string" ? auth.headerName : "";
+        const value = interpolateRestTemplate(
+          String(auth.value ?? ""),
+          input.variables,
+        );
+        if (headerName && value) headers[headerName] = value;
+        break;
+      }
+      case "oauth2":
+      case "credentialRef":
+        // Refusing to silently send unauthenticated when the canvas
+        // declared an auth requirement is the safer failure mode; an
+        // operator gets a clean error in the audit trail rather than
+        // a downstream 401 they have to debug.
+        throw new Error(
+          `rest handler: auth type "${auth.type}" is not supported in this engine version.`,
+        );
+      default:
+        // Future-proofing: if a new auth type lands in the type union
+        // before the runtime catches up, we want a clear error rather
+        // than a silent no-auth call.
+        throw new Error(
+          `rest handler: unknown auth type "${(auth as { type?: string }).type ?? "<unset>"}".`,
+        );
+    }
+  }
+
+  let body: string | undefined;
+  if (REST_BODY_METHODS.has(method) && typeof cfg.body === "string" && cfg.body !== "") {
+    body = interpolateRestTemplate(cfg.body, input.variables);
+    const hasContentType = Object.keys(headers).some(
+      (h) => h.toLowerCase() === "content-type",
+    );
+    if (!hasContentType) {
+      headers["Content-Type"] = "application/json";
+    }
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, { method, headers, body });
+  } catch (e) {
+    // DNS / network / abort / TLS — anything before a status code is
+    // visible. Throw to feed the worker's retry loop.
+    throw new Error(
+      `rest handler: ${method} ${url} failed before response: ${(e as Error).message}`,
+    );
+  }
+
+  const text = await res.text();
+  let parsed: unknown = undefined;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // Not JSON — treat body as opaque text below.
+    }
+  }
+
+  if (!res.ok) {
+    const truncated =
+      text.length > REST_RESPONSE_BODY_LIMIT
+        ? `${text.slice(0, REST_RESPONSE_BODY_LIMIT)}… (truncated)`
+        : text;
+    throw new Error(
+      `rest handler: ${method} ${url} returned ${res.status} ${res.statusText}: ${truncated || "<empty body>"}`,
+    );
+  }
+
+  // 2xx success. If the body parsed to a JSON object, merge it
+  // directly into instance.variables so callers can do
+  // `${responseField}` without unwrapping. Anything else (array,
+  // primitive, plain text, empty body) → wrap so we don't drop info.
+  if (
+    parsed !== undefined &&
+    parsed !== null &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed)
+  ) {
+    return parsed as Record<string, unknown>;
+  }
+  return {
+    responseStatus: res.status,
+    responseBody: parsed === undefined ? text : parsed,
+  };
+};
+
 /** Sets a variable: reads `key` and `value` from `nodeData.input`
  *  (canvas-defined static input on the service task) and writes them
  *  back into instance variables. The simplest non-trivial handler;

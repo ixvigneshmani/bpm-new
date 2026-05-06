@@ -46,7 +46,7 @@ import {
   users,
 } from "../database/schema";
 import { inArray } from "drizzle-orm";
-import { SERVICE_TASK_TOPIC } from "./service-task-registry";
+import { REST_SERVICE_TASK_TOPIC, SERVICE_TASK_TOPIC } from "./service-task-registry";
 import { WorkerService } from "./worker.service";
 
 /** RFC4122-ish UUID matcher; we use it to defensively validate the
@@ -3381,12 +3381,28 @@ export function evalCondition(
 }
 
 /** Resolve a serviceTask node's user-defined topic for the worker
- *  registry. E5 supports the `externalWorker` strategy
- *  (`data.implementation = { type: "externalWorker", config: { jobType: "..." } }`).
- *  Other strategies (rest, connector, soap, wasmModule, inlineScript)
- *  haven't shipped a handler yet — we still suspend the token but
- *  fall back to the `noop` handler so the instance doesn't dead-end
- *  in `waiting`. Logged as warn. */
+ *  registry. Two strategies are wired today:
+ *    • `externalWorker` — `data.implementation = { type: "externalWorker",
+ *                          config: { jobType: "<topic>" } }`. The user's
+ *                          job type IS the worker topic.
+ *    • `rest` (I2) —      `data.implementation = { type: "rest",
+ *                          config: <RestConfig> }`. Mapped to the
+ *                          synthetic topic `__rest__`; the built-in
+ *                          REST handler reads the config out of
+ *                          `nodeData.implementation.config` at run
+ *                          time. See `restHandler` in
+ *                          `service-task-registry.ts`.
+ *
+ *  Other strategies (connector, soap, wasmModule, inlineScript) still
+ *  fall through to `noop` with a warn log — the designer surfaces a
+ *  banner (GAP-T2-C) so authors know the no-op is happening, but we
+ *  keep the dispatch defensive in case a process is migrated through
+ *  here with one of those types persisted.
+ *
+ *  Keep the supported set IN SYNC with
+ *  `web/src/lib/bpmn/capabilities.ts::EXECUTABLE_SERVICE_TASK_IMPL_TYPES`
+ *  — the designer reads that set to enable/disable the impl-type
+ *  picker cards. */
 export function resolveServiceTaskTopic(
   node: EngineNode,
   logger?: { warn?: (msg: string) => void },
@@ -3401,9 +3417,16 @@ export function resolveServiceTaskTopic(
     );
     return "noop";
   }
+  if (impl.type === "rest") {
+    // The handler validates the rest config itself (URL required,
+    // method valid, etc.) so a malformed config surfaces inside the
+    // worker's retry loop rather than being lost as a silent noop
+    // here. Keep this branch tight — just route to the handler.
+    return REST_SERVICE_TASK_TOPIC;
+  }
   if (impl.type !== "externalWorker") {
     logger?.warn?.(
-      `Service task ${node.id}: implementation type "${String(impl.type)}" not supported in E5; using "noop".`,
+      `Service task ${node.id}: implementation type "${String(impl.type)}" not yet executable; using "noop".`,
     );
     return "noop";
   }

@@ -37,4 +37,7 @@ export const EVENT_BASED_VALID_TARGETS: ReadonlySet<string> = new Set([
  *  existing process has a non-executable type already saved. */
 export const EXECUTABLE_SERVICE_TASK_IMPL_TYPES: ReadonlySet<string> = new Set([
   "externalWorker",
+  // I2 — REST handler shipped 2026-05-06. Reads the canvas RestConfig
+  // straight out of `nodeData.implementation.config` at runtime.
+  "rest",
 ]);

@@ -25,6 +25,8 @@ import { EngineService, parseDurationToMs } from "./engine.service";
 import {
   logHandler,
   noopHandler,
+  REST_SERVICE_TASK_TOPIC,
+  restHandler,
   SERVICE_TASK_TOPIC,
   ServiceTaskRegistry,
   setVariableHandler,
@@ -85,6 +87,11 @@ export class ServiceTaskService implements OnModuleInit {
     this.registry.register("noop", noopHandler);
     this.registry.register("log", logHandler);
     this.registry.register("set-variable", setVariableHandler);
+    // I2: REST handler keyed under a synthetic topic. Engine maps any
+    // serviceTask with `implementation.type === "rest"` to this topic
+    // (see resolveServiceTaskTopic) so the same retry/dead-letter
+    // machinery drives it.
+    this.registry.register(REST_SERVICE_TASK_TOPIC, restHandler);
 
     // Single worker registration: dispatches by inner userTopic.
     // The onDead callback closes the loop on permanent failure so

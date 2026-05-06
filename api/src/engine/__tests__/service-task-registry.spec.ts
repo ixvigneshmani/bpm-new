@@ -3,10 +3,11 @@
  * is a Map wrapper and handlers are pure functions over their input.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   logHandler,
   noopHandler,
+  restHandler,
   ServiceTaskRegistry,
   setVariableHandler,
   type ServiceTaskHandler,
@@ -104,5 +105,216 @@ describe("Built-in service-task handlers", () => {
       );
       expect(out).toEqual({ [ok]: 1 });
     }
+  });
+});
+
+/* ─── restHandler (I2) tests ──────────────────────────────────────────
+ * The handler hits `fetch` directly, so we stub the global between
+ * tests. No real network. Each test asserts on either the request
+ * shape (URL, headers, body, method) we passed to fetch, or on the
+ * return value the engine would merge into instance variables.
+ * ──────────────────────────────────────────────────────────────────── */
+
+const restInput = (
+  overrides: { config?: Record<string, unknown>; variables?: Record<string, unknown> } = {},
+): ServiceTaskInput => baseInput({
+  nodeData: { implementation: { type: "rest", config: overrides.config ?? {} } },
+  variables: overrides.variables ?? {},
+});
+
+const fakeOk = (body: unknown, status = 200, contentType = "application/json"): Response => {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  return new Response(text, { status, headers: { "content-type": contentType } });
+};
+const fakeErr = (status: number, body = ""): Response =>
+  new Response(body, { status, headers: { "content-type": "text/plain" } });
+
+describe("restHandler (I2)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects when implementation.type isn't rest", async () => {
+    await expect(
+      restHandler(baseInput({ nodeData: {} })),
+    ).rejects.toThrow(/implementation must be/);
+  });
+
+  it("rejects when url is missing", async () => {
+    await expect(
+      restHandler(restInput({ config: { method: "GET" } })),
+    ).rejects.toThrow(/url is required/);
+  });
+
+  it("rejects unsupported HTTP method", async () => {
+    await expect(
+      restHandler(restInput({ config: { method: "TRACE", url: "https://example.com/" } })),
+    ).rejects.toThrow(/unsupported HTTP method/);
+  });
+
+  it("rejects malformed URL after interpolation", async () => {
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "not-a-url" },
+      })),
+    ).rejects.toThrow(/invalid URL/);
+  });
+
+  it("performs a GET and returns the JSON body merged into variables", async () => {
+    fetchMock.mockResolvedValue(fakeOk({ orderId: "o-9", total: 42 }));
+    const out = await restHandler(restInput({
+      config: { method: "GET", url: "https://api.example.com/orders/9" },
+    }));
+    expect(out).toEqual({ orderId: "o-9", total: 42 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, init] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("https://api.example.com/orders/9");
+    expect(init.method).toBe("GET");
+  });
+
+  it("interpolates ${var} in URL, headers, query params, and body", async () => {
+    fetchMock.mockResolvedValue(fakeOk({}));
+    await restHandler(restInput({
+      config: {
+        method: "POST",
+        url: "https://api.example.com/o/${order.id}",
+        headers: [{ key: "X-Tenant", value: "${tenant}" }],
+        queryParams: [{ key: "env", value: "${env}" }],
+        body: '{"customer":"${customer}"}',
+      },
+      variables: {
+        order: { id: "ABC" },
+        tenant: "acme",
+        env: "prod",
+        customer: "Alice",
+      },
+    }));
+    const [calledUrl, init] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("https://api.example.com/o/ABC?env=prod");
+    expect(init.headers["X-Tenant"]).toBe("acme");
+    // Default Content-Type when body is set and user didn't override.
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(init.body).toBe('{"customer":"Alice"}');
+  });
+
+  it("missing variables collapse to empty string (no throw)", async () => {
+    fetchMock.mockResolvedValue(fakeOk({}));
+    await restHandler(restInput({
+      config: {
+        method: "GET",
+        url: "https://api.example.com/x?missing=${nope}",
+      },
+    }));
+    const [calledUrl] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("https://api.example.com/x?missing=");
+  });
+
+  it("bearer auth adds Authorization: Bearer header", async () => {
+    fetchMock.mockResolvedValue(fakeOk({}));
+    await restHandler(restInput({
+      config: {
+        method: "GET",
+        url: "https://api.example.com/",
+        auth: { type: "bearer", token: "${apiToken}" },
+      },
+      variables: { apiToken: "secret-123" },
+    }));
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["Authorization"]).toBe("Bearer secret-123");
+  });
+
+  it("basic auth base64-encodes user:pass", async () => {
+    fetchMock.mockResolvedValue(fakeOk({}));
+    await restHandler(restInput({
+      config: {
+        method: "GET",
+        url: "https://api.example.com/",
+        auth: { type: "basic", username: "alice", password: "p@ss" },
+      },
+    }));
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["Authorization"]).toBe(
+      `Basic ${Buffer.from("alice:p@ss").toString("base64")}`,
+    );
+  });
+
+  it("apiKey auth puts the value under the configured headerName", async () => {
+    fetchMock.mockResolvedValue(fakeOk({}));
+    await restHandler(restInput({
+      config: {
+        method: "GET",
+        url: "https://api.example.com/",
+        auth: { type: "apiKey", headerName: "X-API-Key", value: "k-77" },
+      },
+    }));
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["X-API-Key"]).toBe("k-77");
+  });
+
+  it("oauth2 + credentialRef are explicitly rejected (not silent no-auth)", async () => {
+    for (const auth of [{ type: "oauth2" }, { type: "credentialRef", refId: "r1" }]) {
+      await expect(
+        restHandler(restInput({
+          config: {
+            method: "GET",
+            url: "https://api.example.com/",
+            auth,
+          },
+        })),
+      ).rejects.toThrow(/not supported/);
+    }
+  });
+
+  it("4xx response throws a clear error so the worker retries", async () => {
+    fetchMock.mockResolvedValue(fakeErr(404, "Not Found"));
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "https://api.example.com/missing" },
+      })),
+    ).rejects.toThrow(/returned 404[^]*Not Found/);
+  });
+
+  it("network error before response throws a clear error", async () => {
+    fetchMock.mockRejectedValue(new Error("ENOTFOUND example.invalid"));
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "https://example.invalid/notify" },
+      })),
+    ).rejects.toThrow(/failed before response[^]*ENOTFOUND/);
+  });
+
+  it("non-object 2xx body wraps under responseStatus / responseBody", async () => {
+    fetchMock.mockResolvedValue(fakeOk("plain text", 200, "text/plain"));
+    const out = await restHandler(restInput({
+      config: { method: "GET", url: "https://api.example.com/" },
+    }));
+    expect(out).toEqual({ responseStatus: 200, responseBody: "plain text" });
+  });
+
+  it("array 2xx body also wraps (avoids trampling variables)", async () => {
+    fetchMock.mockResolvedValue(fakeOk([1, 2, 3]));
+    const out = await restHandler(restInput({
+      config: { method: "GET", url: "https://api.example.com/" },
+    }));
+    expect(out).toEqual({ responseStatus: 200, responseBody: [1, 2, 3] });
+  });
+
+  it("does NOT add a default Content-Type when the user supplied one", async () => {
+    fetchMock.mockResolvedValue(fakeOk({}));
+    await restHandler(restInput({
+      config: {
+        method: "POST",
+        url: "https://api.example.com/",
+        headers: [{ key: "Content-Type", value: "application/xml" }],
+        body: "<order/>",
+      },
+    }));
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers["Content-Type"]).toBe("application/xml");
   });
 });
