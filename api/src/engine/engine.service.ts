@@ -1165,6 +1165,57 @@ export class EngineService {
     });
   }
 
+  /** Record a per-attempt service-task failure to the audit trail.
+   *  Called by the worker on EVERY failed attempt — both the ones that
+   *  will retry and the final one that flips the token to dead. Without
+   *  this, operators only saw the terminal "service task dead after N
+   *  attempts" summary; debugging a flaky integration ("attempt 1
+   *  timed out, attempt 2 returned 502") was impossible from the audit
+   *  trail alone. GAP-T2-B remediation.
+   *
+   *  Best-effort: a write failure here does NOT abort the worker's
+   *  retry loop. Logged at warn so a degraded audit pipeline is
+   *  visible without taking down the engine.
+   *
+   *  No token-status mutation: this method ONLY writes the audit row.
+   *  Token + instance terminal flips happen in failServiceTaskFromWorker
+   *  on the dead-job path, after the final retry. */
+  async recordServiceTaskAttemptFailed(args: {
+    tokenId: string;
+    instanceId: string;
+    tenantId: string;
+    nodeId: string | null;
+    attempt: number;
+    maxAttempts: number;
+    error: string;
+    willRetry: boolean;
+    nextAttemptAt: Date | null;
+  }): Promise<void> {
+    try {
+      await this.db.insert(instanceEvents).values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: args.tokenId,
+        nodeId: args.nodeId,
+        eventType: "service-task-attempt-failed",
+        payload: {
+          attempt: args.attempt,
+          maxAttempts: args.maxAttempts,
+          // Cap the error string so a chatty handler can't bloat the
+          // audit row. The terminal `error` event keeps the full last-
+          // attempt message anyway.
+          error: args.error.length > 1000 ? `${args.error.slice(0, 1000)}…` : args.error,
+          willRetry: args.willRetry,
+          nextAttemptAt: args.nextAttemptAt ? args.nextAttemptAt.toISOString() : null,
+        },
+      });
+    } catch (e) {
+      this.logger.warn(
+        `recordServiceTaskAttemptFailed: audit write failed for token ${args.tokenId}: ${(e as Error).message}`,
+      );
+    }
+  }
+
   /** Variant of loadWaitingTokenForCompletion for the service-task
    *  resume path. Validates `waitingFor === "service-task"` (vs the
    *  user-task helper's "userTask"). No assignedTo check — service

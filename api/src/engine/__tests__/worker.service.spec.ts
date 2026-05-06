@@ -296,4 +296,99 @@ describe("WorkerService.enqueue + tick", () => {
     expect(out).toHaveLength(2);
     expect(out.map((r) => r.topic).sort()).toEqual(["a", "b"]);
   });
+
+  /* ─── onAttemptFailed callback (GAP-T2-B) ────────────────────── */
+
+  it("onAttemptFailed fires on a transient failure with willRetry=true and a future nextAttemptAt", async () => {
+    const onAttemptFailed = vi.fn(async () => {});
+    worker.registerHandler(
+      "flaky-with-cb",
+      vi.fn(async () => { throw new Error("transient"); }),
+      undefined,
+      onAttemptFailed,
+    );
+    await worker.enqueue({
+      tenantId: "t1",
+      jobType: "service-task",
+      topic: "flaky-with-cb",
+      maxAttempts: 3,
+    });
+
+    const before = Date.now();
+    await worker.tick();
+
+    expect(onAttemptFailed).toHaveBeenCalledTimes(1);
+    const [job, error, willRetry, nextAttemptAt] = onAttemptFailed.mock.calls[0] as [
+      { topic: string; attempts: number },
+      string,
+      boolean,
+      Date | null,
+    ];
+    expect(job.topic).toBe("flaky-with-cb");
+    expect(job.attempts).toBe(1);
+    expect(error).toBe("transient");
+    expect(willRetry).toBe(true);
+    expect(nextAttemptAt).toBeInstanceOf(Date);
+    expect((nextAttemptAt as Date).getTime()).toBeGreaterThan(before);
+  });
+
+  it("onAttemptFailed fires on the final dead attempt with willRetry=false and nextAttemptAt=null", async () => {
+    const onAttemptFailed = vi.fn(async () => {});
+    const onDead = vi.fn(async () => {});
+    worker.registerHandler(
+      "always-fails-cb",
+      vi.fn(async () => { throw new Error("permanent"); }),
+      onDead,
+      onAttemptFailed,
+    );
+    await worker.enqueue({
+      tenantId: "t1",
+      jobType: "service-task",
+      topic: "always-fails-cb",
+      maxAttempts: 2,
+    });
+
+    // Drive ticks until dead.
+    for (let i = 0; i < 6; i++) {
+      env.rows[0].scheduledFor = new Date(0);
+      await worker.tick();
+      if (env.rows[0].status === "dead") break;
+    }
+
+    // Fires every attempt — both retries AND the final dead one.
+    expect(onAttemptFailed.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // Last call's flags reflect the dead state.
+    const last = onAttemptFailed.mock.calls.at(-1) as [
+      unknown,
+      string,
+      boolean,
+      Date | null,
+    ];
+    expect(last[2]).toBe(false); // willRetry
+    expect(last[3]).toBeNull();  // nextAttemptAt
+    // onDead also fires exactly once at the end.
+    expect(onDead).toHaveBeenCalledTimes(1);
+  });
+
+  it("a thrown onAttemptFailed callback does NOT abort the worker's retry path", async () => {
+    const onAttemptFailed = vi.fn(async () => { throw new Error("audit blew up"); });
+    worker.registerHandler(
+      "flaky-cb-throws",
+      vi.fn(async () => { throw new Error("transient"); }),
+      undefined,
+      onAttemptFailed,
+    );
+    await worker.enqueue({
+      tenantId: "t1",
+      jobType: "service-task",
+      topic: "flaky-cb-throws",
+      maxAttempts: 3,
+    });
+
+    await worker.tick();
+
+    // Job is still scheduled for retry — the audit callback's throw was swallowed.
+    expect(env.rows[0].status).toBe("queued");
+    expect(env.rows[0].lastError).toBe("transient");
+  });
 });

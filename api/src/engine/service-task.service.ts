@@ -95,11 +95,15 @@ export class ServiceTaskService implements OnModuleInit {
 
     // Single worker registration: dispatches by inner userTopic.
     // The onDead callback closes the loop on permanent failure so
-    // tokens don't sit in `waiting` forever.
+    // tokens don't sit in `waiting` forever. The onAttemptFailed
+    // callback writes a per-attempt audit row (GAP-T2-B) so the
+    // activity feed shows retry history rather than just the terminal
+    // summary.
     this.worker.registerHandler(
       SERVICE_TASK_TOPIC,
       this.runJob,
       this.handleDeadJob,
+      this.handleAttemptFailed,
     );
   }
 
@@ -158,6 +162,48 @@ export class ServiceTaskService implements OnModuleInit {
       result: (result ?? {}) as Record<string, unknown>,
     });
     return result ?? {};
+  };
+
+  /** Bound arrow for the worker's per-attempt-failed hook. Writes a
+   *  `service-task-attempt-failed` audit event so the activity feed
+   *  carries each retry attempt's timestamp, error, and next-scheduled
+   *  time. GAP-T2-B remediation. Best-effort — the engine swallows
+   *  audit-write failures so the retry loop is never aborted by an
+   *  audit hiccup.
+   *
+   *  Note: this fires on the FINAL attempt too, alongside the
+   *  `error` and `instance-failed` events that handleDeadJob causes.
+   *  An operator reading the feed sees the per-attempt history first,
+   *  then the terminal summary — no information lost. */
+  private handleAttemptFailed = async (
+    job: ClaimedJob,
+    error: string,
+    willRetry: boolean,
+    nextAttemptAt: Date | null,
+  ): Promise<void> => {
+    if (!job.tenantId || !job.tokenId || !job.instanceId) {
+      // Service-task jobs always have these set (the engine populates
+      // them at enqueue time); a missing one means the job row was
+      // tampered with or this is a non-service-task topic by mistake.
+      // Skip without throwing — worker retry path is already running.
+      this.logger.warn(
+        `handleAttemptFailed: service-task job ${job.id} missing tenant/token/instance; skipping audit.`,
+      );
+      return;
+    }
+    const input = job.input as { nodeId?: unknown } | null;
+    const nodeId = typeof input?.nodeId === "string" ? input.nodeId : null;
+    await this.engine.recordServiceTaskAttemptFailed({
+      tokenId: job.tokenId,
+      instanceId: job.instanceId,
+      tenantId: job.tenantId,
+      nodeId,
+      attempt: job.attempts,
+      maxAttempts: job.maxAttempts,
+      error,
+      willRetry,
+      nextAttemptAt,
+    });
   };
 
   /** Bound arrow for the worker's onDead hook. Idempotent inside the

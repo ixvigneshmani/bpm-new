@@ -781,6 +781,13 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "task-completed",
   "task-reassigned",
   "task-skipped",
+  // GAP-T2-B: emitted by the worker on every failed service-task
+  // attempt, NOT just the final one. Payload carries
+  // { attempt, maxAttempts, error, willRetry, nextAttemptAt }. The
+  // existing terminal `error` + `instance-failed` events still fire
+  // on the last attempt — these are additive so the activity feed
+  // can show per-attempt history without losing the summary.
+  "service-task-attempt-failed",
   "variable-set",
   "variable-edited",
   "variable-unresolved",

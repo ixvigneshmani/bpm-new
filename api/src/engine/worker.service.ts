@@ -52,6 +52,22 @@ export type JobHandler = (job: ClaimedJob) => Promise<unknown>;
  *  one just leave the dead row in place. */
 export type JobOnDead = (job: ClaimedJob, error: string) => Promise<void>;
 
+/** Called on EVERY failed attempt — both the ones that will retry and
+ *  the final one that flips the job to dead. Lets topic owners write
+ *  a per-attempt audit row so operators can see flaky-integration
+ *  history. Side-effect-only; throwing here does NOT abort the worker's
+ *  retry loop (the next attempt is already scheduled).
+ *
+ *  `willRetry` is true for non-final attempts; `nextAttemptAt` is the
+ *  scheduled time of the next try (null on final). Optional; topics
+ *  without one just don't get per-attempt audit. */
+export type JobOnAttemptFailed = (
+  job: ClaimedJob,
+  error: string,
+  willRetry: boolean,
+  nextAttemptAt: Date | null,
+) => Promise<void>;
+
 export type ClaimedJob = {
   id: string;
   tenantId: string;
@@ -84,6 +100,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerService.name);
   private readonly handlers = new Map<string, JobHandler>();
   private readonly onDeadCallbacks = new Map<string, JobOnDead>();
+  private readonly onAttemptFailedCallbacks = new Map<string, JobOnAttemptFailed>();
   private readonly workerId = `${process.pid}-${randomUUID().slice(0, 8)}`;
   private timer: NodeJS.Timeout | null = null;
   /** When false, the tick loop exits at the next iteration boundary
@@ -100,20 +117,26 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
    *  not enforced — for service tasks E5 will use `service-task:<topic>`,
    *  for webhooks E4.5c uses `webhook-dispatch`. The first
    *  registration wins; re-registering the same topic logs a warning. */
-  registerHandler(topic: string, handler: JobHandler, onDead?: JobOnDead): void {
+  registerHandler(
+    topic: string,
+    handler: JobHandler,
+    onDead?: JobOnDead,
+    onAttemptFailed?: JobOnAttemptFailed,
+  ): void {
     if (this.handlers.has(topic)) {
-      // First-wins: ignore the new handler AND ignore its onDead. The
-      // old log just said "ignoring" which left it ambiguous whether
-      // onDead was applied; spell out both so re-registration bugs
-      // ("I rebound my handler but the dead path still uses the old
-      // hook") are visible in logs.
+      // First-wins: ignore the new handler AND ignore its onDead AND
+      // its onAttemptFailed. The old log just said "ignoring" which
+      // left it ambiguous whether onDead was applied; spell out all
+      // three so re-registration bugs ("I rebound my handler but the
+      // dead path still uses the old hook") are visible in logs.
       this.logger.warn(
-        `Worker handler for "${topic}" already registered; both handler + onDead are ignored (first-wins).`,
+        `Worker handler for "${topic}" already registered; handler + onDead + onAttemptFailed all ignored (first-wins).`,
       );
       return;
     }
     this.handlers.set(topic, handler);
     if (onDead) this.onDeadCallbacks.set(topic, onDead);
+    if (onAttemptFailed) this.onAttemptFailedCallbacks.set(topic, onAttemptFailed);
     this.logger.log(`Registered worker handler: ${topic}`);
   }
 
@@ -316,6 +339,8 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       const message = (err as Error).message;
       const isFinalAttempt = job.attempts >= Math.min(job.maxAttempts, BACKOFF_MS.length);
+      const onAttemptFailed = this.onAttemptFailedCallbacks.get(job.topic);
+      let nextAttemptAt: Date | null = null;
       if (isFinalAttempt) {
         await this.markDead(job.id, message);
         this.logger.error(
@@ -334,10 +359,26 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
         }
       } else {
         const delay = BACKOFF_MS[Math.min(job.attempts - 1, BACKOFF_MS.length - 1)];
-        await this.markRetry(job.id, message, new Date(Date.now() + delay));
+        nextAttemptAt = new Date(Date.now() + delay);
+        await this.markRetry(job.id, message, nextAttemptAt);
         this.logger.warn(
           `Job ${job.id} (${job.topic}) failed (attempt ${job.attempts}); retry in ${delay}ms`,
         );
+      }
+      // Per-attempt audit hook fires on EVERY failure (both transient
+      // retries and the final dead one). Topic owners use this to
+      // surface attempt-level history in the activity feed (GAP-T2-B).
+      // Callback throws are isolated — they must not abort the
+      // worker's retry/dead path.
+      if (onAttemptFailed) {
+        try {
+          await onAttemptFailed(job, message, !isFinalAttempt, nextAttemptAt);
+        } catch (cbErr) {
+          this.logger.error(
+            `onAttemptFailed callback for ${job.topic} threw: ${(cbErr as Error).message}`,
+            (cbErr as Error).stack,
+          );
+        }
       }
     }
   }

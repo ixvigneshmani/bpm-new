@@ -1625,6 +1625,10 @@ const MEANINGFUL_EVENTS = new Set<string>([
   "node-entered", "node-exited", "node-failed",
   "token-waiting", "token-completed", "token-failed",
   "task-assigned", "task-reassigned", "task-completed", "task-claimed",
+  // GAP-T2-B: surface per-attempt service-task failures in the
+  // user-facing feed so flaky-integration history is visible at a
+  // glance ("attempt 1 timed out, attempt 2 returned 502").
+  "service-task-attempt-failed",
   "variables-updated", "error", "incident-raised", "incident-resolved",
   "replay", "impersonation",
 ]);
@@ -1653,6 +1657,7 @@ function humanizeEvent(type: string): { label: string; tone: "neutral" | "succes
     "task-reassigned":     { label: "Task reassigned", tone: "neutral" },
     "task-completed":      { label: "Task completed", tone: "success" },
     "task-claimed":        { label: "Task claimed", tone: "neutral" },
+    "service-task-attempt-failed": { label: "Service-task attempt failed", tone: "warning" },
     "variables-updated":   { label: "Variables updated", tone: "neutral" },
     "error":               { label: "Error", tone: "danger" },
     "incident-raised":     { label: "Incident raised", tone: "danger" },
