@@ -19,3 +19,22 @@ export const EVENT_BASED_VALID_TARGETS: ReadonlySet<string> = new Set([
   "signalIntermediateCatchEvent",
   "conditionalIntermediateCatchEvent",
 ]);
+
+/** Service-task `implementation.type` values the engine actually
+ *  executes. Other types still serialize cleanly (and the designer
+ *  preserves their config) but at runtime the engine logs a `warn` and
+ *  no-ops the task — see `resolveServiceTaskTopic` in
+ *  `api/src/engine/engine.service.ts`.
+ *
+ *  Keep this set IN SYNC with the engine's switch. When a new
+ *  integration lands (REST handler / inline-script sandbox / connector
+ *  framework / etc.), add the type here in the same commit that wires
+ *  the engine handler so the picker stops banner-warning the moment
+ *  it becomes executable.
+ *
+ *  GAP-T2-A / T2-C remediation: the designer reads this set to disable
+ *  un-implemented impl-type cards and to surface a banner when an
+ *  existing process has a non-executable type already saved. */
+export const EXECUTABLE_SERVICE_TASK_IMPL_TYPES: ReadonlySet<string> = new Set([
+  "externalWorker",
+]);

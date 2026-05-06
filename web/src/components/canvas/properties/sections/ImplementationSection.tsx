@@ -3,6 +3,7 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { ServiceImplementation, RestConfig, BindingType } from "../../../../types/bpmn-node-data";
+import { EXECUTABLE_SERVICE_TASK_IMPL_TYPES } from "../../../../lib/bpmn/capabilities";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 import AiAssistButton from "../fields/AiAssistButton";
 
@@ -45,6 +46,17 @@ const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
 export default function ImplementationSection({ implementation, onChange }: Props) {
   const currentType = implementation?.type || "rest";
+  /* GAP-T2-C: warn when the persisted implementation type isn't
+   * something the engine knows how to execute. Without this, processes
+   * authored on (or migrated through) a card that the engine silently
+   * no-ops — REST API / Script / Connector / SOAP / WASM today —
+   * appear to be configured correctly while service tasks pass through
+   * with no side effects. The banner only renders for already-saved
+   * data; un-implemented cards are also visually disabled in the
+   * picker (GAP-T2-A) so a fresh authoring session can't reach this
+   * state in the first place. */
+  const isExecutableType =
+    !implementation || EXECUTABLE_SERVICE_TASK_IMPL_TYPES.has(implementation.type);
 
   const setType = (type: BindingType) => {
     switch (type) {
@@ -86,6 +98,35 @@ export default function ImplementationSection({ implementation, onChange }: Prop
           })}
         </div>
       </div>
+
+      {/* Non-executable type banner (GAP-T2-C) */}
+      {!isExecutableType && (
+        <div
+          role="alert"
+          style={{
+            padding: "10px 12px", borderRadius: 10,
+            background: "#fffbeb", border: "1px solid #fde68a",
+            display: "flex", gap: 10, alignItems: "flex-start",
+            fontSize: 12, color: "#92400e", lineHeight: 1.5,
+          }}
+        >
+          <span aria-hidden style={{ fontSize: 14, flexShrink: 0 }}>⚠️</span>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 2 }}>
+              This implementation type isn't executable yet
+            </div>
+            <div>
+              The engine doesn't run <code style={{
+                fontFamily: "var(--font-mono, monospace)",
+                background: "#fef3c7", padding: "1px 4px", borderRadius: 3,
+              }}>{implementation?.type}</code> service tasks today.
+              Configuration round-trips cleanly, but at runtime the task is
+              silently no-op'd. Switch to <strong>Job Worker</strong> to
+              actually exercise this step until the integration ships.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* REST */}
       {implementation?.type === "rest" && (
