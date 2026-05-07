@@ -12,6 +12,7 @@ import {
   ParseUUIDPipe,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { EngineService } from "../engine/engine.service";
 import { ProcessesService } from "./processes.service";
 import { CreateProcessDto } from "./dto/create-process.dto";
 import { UpdateProcessDto } from "./dto/update-process.dto";
@@ -22,7 +23,10 @@ import { AuthenticatedRequest } from "../common/types/authenticated-request";
 @Controller("processes")
 @UseGuards(JwtAuthGuard)
 export class ProcessesController {
-  constructor(private readonly processesService: ProcessesService) {}
+  constructor(
+    private readonly processesService: ProcessesService,
+    private readonly engineService: EngineService,
+  ) {}
 
   // ─── Business Document Templates (must be before :id routes) ─────
 
@@ -100,4 +104,24 @@ export class ProcessesController {
     return this.processesService.getDocument(id, req.user.tenantId);
   }
 
+  // ─── Publish lifecycle (GAP-05) ───────────────────────────────────
+
+  /** POST /processes/:id/publish
+   *  Mark a process ACTIVE so others can start instances against it.
+   *  Snapshots the current canvas into PROCESS_VERSIONS — idempotent
+   *  on identical canvas (returns the existing version with reused=true),
+   *  bumps to a new numbered version when the canvas has changed since
+   *  the last publish. Running instances pin to their original
+   *  PROCESS_VERSIONS row and are unaffected. */
+  @Post(":id/publish")
+  publish(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    return this.engineService.publishProcess({
+      processId: id,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+    });
+  }
 }

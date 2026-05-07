@@ -6,6 +6,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from "@nestjs/common";
@@ -40,20 +41,23 @@ export class EngineController {
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: StartInstanceDto,
+    @Query("testRun") testRunParam?: string,
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     const effective = await resolveActingFor(req, this.users);
+    const testRun = testRunParam === "true" || testRunParam === "1";
     return this.idempotency.wrap({
       tenantId: req.user.tenantId,
       endpoint: "start-instance",
       key: idempotencyKey,
-      // actingBy is part of the idempotency body so replaying the
-      // same key with vs without impersonation doesn't collide.
+      // actingBy + testRun are part of the idempotency body so the
+      // same key + body combo collapses correctly across replays.
       requestBody: {
         processId: id,
         variables: dto.variables ?? null,
         businessKey: dto.businessKey ?? null,
         actingBy: effective.actingBy,
+        testRun,
       },
       handler: () =>
         this.engine.startInstance({
@@ -63,6 +67,7 @@ export class EngineController {
           actingBy: effective.actingBy,
           variables: dto.variables,
           businessKey: dto.businessKey,
+          testRun,
         }),
     });
   }

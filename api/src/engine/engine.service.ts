@@ -128,6 +128,12 @@ export class EngineService {
     actingBy?: string | null;
     variables?: Record<string, unknown>;
     businessKey?: string;
+    /** Designer-only escape hatch: run an instance against a DRAFT
+     *  process. Without this flag, DRAFT starts are rejected so the
+     *  Publish lifecycle has teeth. The instance-started audit row
+     *  records the flag so test runs are distinguishable in the
+     *  trail. */
+    testRun?: boolean;
   }): Promise<{
     instanceId: string;
     status: "running" | "completed" | "failed";
@@ -135,6 +141,11 @@ export class EngineService {
     eventCount: number;
   }> {
     const proc = await this.loadProcessForInstance(args.processId, args.tenantId);
+    if (proc.status !== "ACTIVE" && !args.testRun) {
+      throw new BadRequestException(
+        "Process is in DRAFT — publish it first, or pass testRun=true to run a test from the designer.",
+      );
+    }
     const canvas = projectCanvas(proc.canvasData);
     const startNode = findStartEvent(canvas);
 
@@ -186,6 +197,7 @@ export class EngineService {
         payload: {
           processId: args.processId,
           definitionHash,
+          ...(args.testRun ? { testRun: true } : {}),
           ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
       });
@@ -3112,6 +3124,86 @@ export class EngineService {
     }
   }
 
+  /** GAP-05 — Publish lifecycle. Marks a process ACTIVE so non-test
+   *  starts are allowed, and snapshots the current canvas into
+   *  PROCESS_VERSIONS for version pinning. Idempotent: republishing
+   *  with an unchanged canvas reuses the existing snapshot row.
+   *  Republishing after edits creates a new row and the latest
+   *  numbered version becomes the active one. */
+  async publishProcess(args: {
+    processId: string;
+    tenantId: string;
+    userId: string;
+  }): Promise<{
+    processId: string;
+    status: "ACTIVE";
+    versionId: string;
+    versionNumber: number;
+    /** True when this publish reused an existing snapshot (no canvas
+     *  changes since the last publish). Useful for the UI to render
+     *  "no changes — already up to date" rather than a "v3 published"
+     *  toast. */
+    reused: boolean;
+  }> {
+    const proc = await this.loadProcessForInstance(
+      args.processId,
+      args.tenantId,
+    );
+    const canvas = projectCanvas(proc.canvasData);
+    // Validate fail-loud: a process with no start event is not
+    // shippable. Engine would error at startInstance anyway, but
+    // catching it at publish saves operators from a confusing
+    // post-publish failure.
+    findStartEvent(canvas);
+
+    const snapshot = canonicalise(canvas);
+    const definitionHash = sha256Hex(JSON.stringify(snapshot));
+
+    // Detect reuse before insert: lookup existing (processId, hash).
+    const existing = await this.db
+      .select({ id: processVersions.id, version: processVersions.version })
+      .from(processVersions)
+      .where(
+        and(
+          eq(processVersions.processId, args.processId),
+          eq(processVersions.hash, definitionHash),
+        ),
+      )
+      .limit(1);
+    const reused = !!existing[0];
+
+    const versionId = await this.getOrCreateProcessVersion({
+      processId: args.processId,
+      tenantId: args.tenantId,
+      userId: args.userId,
+      hash: definitionHash,
+      canvas: snapshot,
+    });
+    const [versionRow] = await this.db
+      .select({ version: processVersions.version })
+      .from(processVersions)
+      .where(eq(processVersions.id, versionId))
+      .limit(1);
+
+    await this.db
+      .update(processes)
+      .set({ status: "ACTIVE", updatedAt: new Date() })
+      .where(
+        and(
+          eq(processes.id, args.processId),
+          eq(processes.tenantId, args.tenantId),
+        ),
+      );
+
+    return {
+      processId: args.processId,
+      status: "ACTIVE",
+      versionId,
+      versionNumber: versionRow?.version ?? 1,
+      reused,
+    };
+  }
+
   /** Resolve the canvas to execute against for an instance. New
    *  instances reference PROCESS_VERSIONS via processVersionId;
    *  legacy rows (pre-E4.5b) still carry the snapshot inline.
@@ -3150,9 +3242,12 @@ export class EngineService {
   private async loadProcessForInstance(
     processId: string,
     tenantId: string,
-  ): Promise<{ canvasData: unknown }> {
+  ): Promise<{ canvasData: unknown; status: string }> {
     const rows = await this.db
-      .select({ canvasData: processes.canvasData })
+      .select({
+        canvasData: processes.canvasData,
+        status: processes.status,
+      })
       .from(processes)
       .where(
         and(eq(processes.id, processId), eq(processes.tenantId, tenantId)),

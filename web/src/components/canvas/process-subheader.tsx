@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import useCanvasStore from "../../store/canvas-store";
+import { apiPost } from "../../lib/api";
 import { STATUS_COLORS, STATUS_DISPLAY } from "../../lib/constants";
 import { formatRelativeTime } from "../../lib/utils";
 
@@ -10,12 +11,18 @@ export default function ProcessSubheader({
   dirty?: boolean;
   onSave?: () => void | Promise<void>;
 } = {}) {
+  const processId = useCanvasStore((s) => s.processId);
   const processMeta = useCanvasStore((s) => s.processMeta);
+  const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const setWizardStep = useCanvasStore((s) => s.setWizardStep);
   const setWizardOrigin = useCanvasStore((s) => s.setWizardOrigin);
   const saveStatus = useCanvasStore((s) => s.saveStatus);
   const lastSavedAt = useCanvasStore((s) => s.lastSavedAt);
+
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [publishedToast, setPublishedToast] = useState<string | null>(null);
 
   // Re-render once a minute so "Saved 30s ago" stays current.
   const [, setTick] = useState(0);
@@ -29,6 +36,32 @@ export default function ProcessSubheader({
 
   const statusLabel = STATUS_DISPLAY[processMeta.status] || "Draft";
   const status = STATUS_COLORS[statusLabel] || STATUS_COLORS.Draft;
+  const isDraft = processMeta.status === "DRAFT";
+
+  const onPublish = async () => {
+    if (!processId || publishing) return;
+    setPublishing(true);
+    setPublishError(null);
+    try {
+      const res = await apiPost<{
+        status: "ACTIVE";
+        versionNumber: number;
+        reused: boolean;
+      }>(`/processes/${processId}/publish`, {});
+      setProcessMeta({ status: res.status });
+      setPublishedToast(
+        res.reused
+          ? `Already up to date · v${res.versionNumber}`
+          : `Published v${res.versionNumber}`,
+      );
+      window.setTimeout(() => setPublishedToast(null), 3500);
+    } catch (e) {
+      setPublishError((e as Error).message);
+      window.setTimeout(() => setPublishError(null), 5000);
+    } finally {
+      setPublishing(false);
+    }
+  };
 
   return (
     <div style={{
@@ -119,6 +152,55 @@ export default function ProcessSubheader({
         )}
 
         <div style={{ width: 1, height: 16, background: "#E5E7EB" }} />
+
+        {processId && (
+          <button
+            onClick={onPublish}
+            disabled={publishing}
+            title={
+              isDraft
+                ? "Mark this process Active so others can start instances against it."
+                : "Snapshot the current canvas as a new published version."
+            }
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "5px 12px", borderRadius: 6,
+              border: "1px solid " + (isDraft ? "#10B981" : "#E5E7EB"),
+              background: isDraft ? "#10B981" : "#fff",
+              color: isDraft ? "#fff" : "#374151",
+              fontSize: 12, fontWeight: 600,
+              cursor: publishing ? "not-allowed" : "pointer",
+              fontFamily: "inherit",
+              opacity: publishing ? 0.6 : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 12l5 5L20 7" />
+            </svg>
+            {publishing ? "Publishing…" : isDraft ? "Publish" : "Republish"}
+          </button>
+        )}
+
+        {publishedToast && (
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "#047857", fontWeight: 500,
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10B981" }} />
+            {publishedToast}
+          </span>
+        )}
+        {publishError && (
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "#B91C1C", fontWeight: 500,
+            maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }} title={publishError}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#EF4444" }} />
+            Publish failed: {publishError}
+          </span>
+        )}
 
         <button
           onClick={() => { setWizardOrigin("canvas"); setWizardStep("details"); }}

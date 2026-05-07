@@ -74,8 +74,12 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
     const controller = new AbortController();
     startAbortRef.current = controller;
     try {
+      // Designer's "Start instance" is the test-run path: it must
+      // work whether or not the process has been published yet.
+      // Real (non-test) starts go through the Tasks/Running flows
+      // which don't pass this flag.
       const out = await apiPost<{ instanceId: string; status: string }>(
-        `/processes/${processId}/instances`,
+        `/processes/${processId}/instances?testRun=true`,
         { variables },
         { headers: { "Idempotency-Key": idempotencyKey }, signal: controller.signal },
       );
