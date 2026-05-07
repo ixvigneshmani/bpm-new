@@ -1,4 +1,29 @@
-export default function WelcomeBanner() {
+import { useAuth } from "../../lib/auth";
+
+type Props = {
+  taskCount: number;
+  runningCount: number;
+  failedCount: number;
+};
+
+function greeting() {
+  const h = new Date().getHours();
+  if (h < 12) return "Good morning";
+  if (h < 18) return "Good afternoon";
+  return "Good evening";
+}
+
+export default function WelcomeBanner({ taskCount, runningCount, failedCount }: Props) {
+  const { user } = useAuth();
+  const name = user?.displayName ?? "there";
+
+  const subParts: string[] = [];
+  subParts.push(taskCount === 1 ? "1 task in your inbox" : `${taskCount} tasks in your inbox`);
+  subParts.push(runningCount === 1 ? "1 instance running" : `${runningCount} instances running`);
+  if (failedCount > 0) {
+    subParts.push(failedCount === 1 ? "1 failed instance" : `${failedCount} failed instances`);
+  }
+
   return (
     <div
       style={{
@@ -25,17 +50,17 @@ export default function WelcomeBanner() {
       />
       <div style={{ position: "relative", zIndex: 1 }}>
         <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.01em" }}>
-          Good morning, Alex
+          {greeting()}, {name}
         </div>
         <div style={{ fontSize: 14, opacity: 0.75, marginTop: 4 }}>
-          You have 18 approvals pending and 3 processes need attention
+          {subParts.join(" · ")}
         </div>
       </div>
       <div style={{ position: "relative", zIndex: 1, display: "flex", gap: 24 }}>
         {[
-          { value: "247", label: "Active" },
-          { value: "56", label: "Completed" },
-          { value: "94%", label: "SLA" },
+          { value: String(taskCount), label: "Tasks" },
+          { value: String(runningCount), label: "Running" },
+          { value: String(failedCount), label: "Failed" },
         ].map((m) => (
           <div key={m.label} style={{ textAlign: "center" }}>
             <div style={{ fontFamily: "var(--font-mono,'JetBrains Mono',monospace)", fontSize: 24, fontWeight: 600 }}>
