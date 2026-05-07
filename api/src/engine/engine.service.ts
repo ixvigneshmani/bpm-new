@@ -1472,9 +1472,22 @@ export class EngineService {
           `Task requires role "${row.candidateRole}" which you do not hold.`,
         );
       }
-      await this.updateTokenWithLock(tx, args.tokenId, row.version, {
-        assignedTo: args.userId,
-      });
+      try {
+        await this.updateTokenWithLock(tx, args.tokenId, row.version, {
+          assignedTo: args.userId,
+        });
+      } catch (err) {
+        // Translate the optimistic-lock collision into the same
+        // user-facing message as the pre-check path above. Without
+        // this, a race-loser sees the engine's internal "token
+        // version" message which leaks the lock impl + tokenId.
+        if (err instanceof ConflictException) {
+          throw new ForbiddenException(
+            "Task is already claimed by another user.",
+          );
+        }
+        throw err;
+      }
       await tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: row.instanceId,
@@ -1538,9 +1551,18 @@ export class EngineService {
           "Task is not role-assigned; cannot be unclaimed.",
         );
       }
-      await this.updateTokenWithLock(tx, args.tokenId, row.version, {
-        assignedTo: null,
-      });
+      try {
+        await this.updateTokenWithLock(tx, args.tokenId, row.version, {
+          assignedTo: null,
+        });
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          throw new ConflictException(
+            "Task assignment changed; please refresh and try again.",
+          );
+        }
+        throw err;
+      }
       await tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: row.instanceId,
@@ -1632,9 +1654,18 @@ export class EngineService {
         return { reassigned: false, from: row.assignedTo, to: args.targetUserId };
       }
 
-      await this.updateTokenWithLock(tx, args.tokenId, row.version, {
-        assignedTo: args.targetUserId,
-      });
+      try {
+        await this.updateTokenWithLock(tx, args.tokenId, row.version, {
+          assignedTo: args.targetUserId,
+        });
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          throw new ConflictException(
+            "Task assignment changed; please refresh and try again.",
+          );
+        }
+        throw err;
+      }
       await tx.insert(instanceEvents).values({
         tenantId: args.tenantId,
         instanceId: row.instanceId,
