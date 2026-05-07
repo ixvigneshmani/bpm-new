@@ -295,10 +295,11 @@ export const processes = pgTable(
     step: wizardStepEnum("STEP").notNull().default("DETAILS"),
     /** D1 — stable cross-environment identifier. UUIDs are env-local;
      *  slugs survive export/import. Auto-generated on create from
-     *  name (slugify + numeric suffix on collision). Nullable until
-     *  the migration backfills existing rows; subsequent push will
-     *  ALTER to NOT NULL once every row has one. */
-    slug: varchar("SLUG", { length: 64 }),
+     *  name (slugify + numeric suffix on collision). NOT NULL —
+     *  every write goes through ProcessesService.create() which
+     *  allocates a slug before insert, and the migration backfilled
+     *  every existing row. */
+    slug: varchar("SLUG", { length: 64 }).notNull(),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),

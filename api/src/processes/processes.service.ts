@@ -2,6 +2,7 @@ import { Injectable, Inject, NotFoundException } from "@nestjs/common";
 import { eq, and, desc } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import * as schema from "../database/schema";
+import { slugify, appendSlugSuffix } from "./slugify";
 
 @Injectable()
 export class ProcessesService {
@@ -13,6 +14,7 @@ export class ProcessesService {
   // ─── Process CRUD ─────────────────────────────────────────────────
 
   async create(tenantId: string, userId: string, name: string, description?: string) {
+    const slug = await this.allocateSlug(tenantId, slugify(name));
     const [process] = await this.db
       .insert(schema.processes)
       .values({
@@ -22,9 +24,31 @@ export class ProcessesService {
         description: description || null,
         status: "DRAFT",
         step: "DOCUMENT", // completed details → now on document step
+        slug,
       })
       .returning();
     return process;
+  }
+
+  /** Find the first slug variant that doesn't collide within the
+   *  tenant. Tries the base slug first, then base-2, base-3, … up
+   *  to 999. The (TENANT_ID, SLUG) unique index would also catch a
+   *  race at insert time; this loop just gets a clean slug ahead of
+   *  the insert so the operator sees a sensible value. */
+  private async allocateSlug(tenantId: string, base: string): Promise<string> {
+    const existing = await this.db
+      .select({ slug: schema.processes.slug })
+      .from(schema.processes)
+      .where(eq(schema.processes.tenantId, tenantId));
+    const taken = new Set(existing.map((r) => r.slug).filter(Boolean));
+    if (!taken.has(base)) return base;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = appendSlugSuffix(base, n);
+      if (!taken.has(candidate)) return candidate;
+    }
+    // Pathological — 1000 collisions in one tenant. Append a random
+    // suffix as a last resort rather than throwing.
+    return appendSlugSuffix(base, Math.floor(Math.random() * 1_000_000));
   }
 
   async findAll(tenantId: string) {
