@@ -4,6 +4,7 @@ import { UsersModule } from "../users/users.module";
 import { CleanupService } from "./cleanup.service";
 import { EngineController } from "./engine.controller";
 import { EngineService } from "./engine.service";
+import { HealthController } from "./health.controller";
 import { IdempotencyService } from "./idempotency.service";
 import { InstancesController } from "./instances.controller";
 import { OutboxService } from "./outbox.service";
@@ -18,6 +19,7 @@ import { WorkerService } from "./worker.service";
   imports: [AuthModule, UsersModule],
   controllers: [
     EngineController,
+    HealthController,
     InstancesController,
     TasksController,
     WebhooksController,

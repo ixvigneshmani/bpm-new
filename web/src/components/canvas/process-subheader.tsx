@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import useCanvasStore from "../../store/canvas-store";
 import { apiPost } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
 import { STATUS_COLORS, STATUS_DISPLAY } from "../../lib/constants";
 import { formatRelativeTime } from "../../lib/utils";
 
@@ -11,6 +12,10 @@ export default function ProcessSubheader({
   dirty?: boolean;
   onSave?: () => void | Promise<void>;
 } = {}) {
+  const { user } = useAuth();
+  const canPublish =
+    user?.systemRole === "owner" || user?.systemRole === "admin";
+
   const processId = useCanvasStore((s) => s.processId);
   const processMeta = useCanvasStore((s) => s.processMeta);
   const setProcessMeta = useCanvasStore((s) => s.setProcessMeta);
@@ -153,7 +158,7 @@ export default function ProcessSubheader({
 
         <div style={{ width: 1, height: 16, background: "#E5E7EB" }} />
 
-        {processId && (
+        {processId && canPublish && (
           <button
             onClick={onPublish}
             disabled={publishing}

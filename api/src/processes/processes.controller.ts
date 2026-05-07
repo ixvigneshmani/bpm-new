@@ -10,6 +10,7 @@ import {
   Req,
   UseGuards,
   ParseUUIDPipe,
+  ForbiddenException,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { EngineService } from "../engine/engine.service";
@@ -118,6 +119,19 @@ export class ProcessesController {
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
   ) {
+    // Publishing has external effect (other users can start instances
+    // against the published version). Until we have a per-process
+    // editor model, gate on the platform-level admin/owner roles.
+    // Drafts and canvas saves stay open to any tenant member —
+    // publishing is the trust boundary.
+    if (
+      req.user.systemRole !== "owner" &&
+      req.user.systemRole !== "admin"
+    ) {
+      throw new ForbiddenException(
+        "Only owner or admin may publish processes.",
+      );
+    }
     return this.engineService.publishProcess({
       processId: id,
       tenantId: req.user.tenantId,
