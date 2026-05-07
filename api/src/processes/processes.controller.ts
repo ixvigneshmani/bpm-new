@@ -19,6 +19,7 @@ import { CreateProcessDto } from "./dto/create-process.dto";
 import { UpdateProcessDto } from "./dto/update-process.dto";
 import { SaveDocumentDto } from "./dto/save-document.dto";
 import { SaveCanvasDto } from "./dto/save-canvas.dto";
+import { ImportProcessDto } from "./dto/import-process.dto";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 
 @Controller("processes")
@@ -115,6 +116,26 @@ export class ProcessesController {
    *  the last publish. Running instances pin to their original
    *  PROCESS_VERSIONS row and are unaffected. */
   // ─── D1 — Cross-environment deployment ────────────────────────────
+
+  /** POST /processes/import
+   *  Accept a .flowpro.json bundle from another environment. Creates
+   *  or updates the process by slug, validates required role-keys,
+   *  snapshots into PROCESS_VERSIONS with provenance. Does NOT
+   *  auto-publish — preserves the GAP-05 contract. */
+  @Post("import")
+  importBundle(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: ImportProcessDto,
+  ) {
+    // DTO validation (class-validator) already enforced the
+    // envelope; the structural cast here just bridges the DTO
+    // class to the internal ProcessExportBundle type alias.
+    return this.engineService.importProcess({
+      bundle: dto as unknown as import("../engine/engine.service").ProcessExportBundle,
+      tenantId: req.user.tenantId,
+      userId: req.user.sub,
+    });
+  }
 
   /** GET /processes/:id/export
    *  Returns the latest published version of the process as a

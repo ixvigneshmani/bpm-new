@@ -126,6 +126,28 @@ export type ProcessExportBundle = {
   };
 };
 
+/** D1.0 — walk a canvas and collect every role-key referenced by
+ *  userTask `assignment.type === "role"` nodes. Used at import time
+ *  to validate that the destination tenant has provisioned the
+ *  roles before accepting the bundle. */
+export function extractRoleKeysFromCanvas(
+  canvas: Record<string, unknown>,
+): Set<string> {
+  const out = new Set<string>();
+  const nodes = (canvas as { nodes?: unknown[] }).nodes;
+  if (!Array.isArray(nodes)) return out;
+  for (const node of nodes) {
+    if (!node || typeof node !== "object") continue;
+    const data = (node as { data?: { assignment?: { type?: string; value?: string } } })
+      .data;
+    const a = data?.assignment;
+    if (a?.type === "role" && typeof a.value === "string" && a.value) {
+      out.add(a.value);
+    }
+  }
+  return out;
+}
+
 /** Hard cap on advance-loop iterations per call. A well-formed E2
  *  process terminates in O(nodes) hops; if we exceed this it's a cycle
  *  or runaway model error and we fail loudly rather than spin. The
@@ -3353,6 +3375,200 @@ export class EngineService {
         publishedBy: null,
         publishedAt: null,
       },
+    };
+  }
+
+  /** D1.0 — import a process bundle into this environment. Creates
+   *  or updates the PROCESSES row by slug, validates that every
+   *  role-key referenced in the canvas exists in the destination
+   *  tenant, then snapshots the canvas as a new PROCESS_VERSIONS
+   *  row with IMPORTED_FROM provenance set.
+   *
+   *  Slug-collision policy: REFUSE. If the destination already has
+   *  the slug at an equal-or-higher version (with a different
+   *  hash), reject with HTTP 400 — operator must reconcile
+   *  manually. Same-hash dedupes and returns the existing row.
+   *
+   *  Does NOT auto-publish. Imported processes land as DRAFT (or
+   *  retain their existing status); operator publishes separately.
+   *  This preserves the GAP-05 contract that publish is an
+   *  explicit decision.
+   *
+   *  Permissions: any tenant member with JWT today; future
+   *  process:write API token scope when that auth path lands. */
+  async importProcess(args: {
+    bundle: ProcessExportBundle;
+    tenantId: string;
+    userId: string;
+  }): Promise<{
+    processId: string;
+    slug: string;
+    versionId: string;
+    versionNumber: number;
+    /** True when the bundle's hash matched an existing
+     *  PROCESS_VERSIONS row — no new snapshot was written. */
+    reused: boolean;
+    /** True when this is the first time the slug appeared on this
+     *  destination — i.e., a fresh PROCESSES row was created
+     *  rather than updating an existing one. */
+    created: boolean;
+  }> {
+    const { bundle } = args;
+
+    // 1. Validate role-keys referenced in the canvas exist on the
+    //    destination tenant. We refuse silently-creating roles —
+    //    a typo in source would otherwise auto-grant unintended
+    //    permissions in the destination.
+    const requiredRoleKeys = extractRoleKeysFromCanvas(bundle.process.canvas);
+    if (requiredRoleKeys.size > 0) {
+      const found = await this.db
+        .select({ key: roles.key })
+        .from(roles)
+        .where(
+          and(
+            eq(roles.tenantId, args.tenantId),
+            inArray(roles.key, Array.from(requiredRoleKeys)),
+          ),
+        );
+      const foundKeys = new Set(found.map((r) => r.key));
+      const missing = Array.from(requiredRoleKeys).filter(
+        (k) => !foundKeys.has(k),
+      );
+      if (missing.length > 0) {
+        throw new BadRequestException(
+          `Import refused: destination tenant is missing required role(s): ${missing.join(", ")}. Provision the role(s) and retry.`,
+        );
+      }
+    }
+
+    // 2. Find or create the destination process by slug.
+    const [existingProc] = await this.db
+      .select({
+        id: processes.id,
+        slug: processes.slug,
+      })
+      .from(processes)
+      .where(
+        and(
+          eq(processes.tenantId, args.tenantId),
+          eq(processes.slug, bundle.process.slug),
+        ),
+      )
+      .limit(1);
+
+    let processId: string;
+    let created = false;
+    if (existingProc) {
+      processId = existingProc.id;
+    } else {
+      const [newProc] = await this.db
+        .insert(processes)
+        .values({
+          tenantId: args.tenantId,
+          createdBy: args.userId,
+          name: bundle.process.name,
+          description: bundle.process.description ?? null,
+          slug: bundle.process.slug,
+          canvasData: bundle.process.canvas,
+          status: "DRAFT",
+          step: "CANVAS",
+        })
+        .returning({ id: processes.id });
+      processId = newProc.id;
+      created = true;
+    }
+
+    // 3. Slug-collision policy on existing process: refuse if the
+    //    destination already has a higher-or-equal-numbered version
+    //    with a DIFFERENT hash. Same hash = idempotent dedupe.
+    if (!created) {
+      const [destLatest] = await this.db
+        .select({
+          id: processVersions.id,
+          version: processVersions.version,
+          hash: processVersions.hash,
+        })
+        .from(processVersions)
+        .where(eq(processVersions.processId, processId))
+        .orderBy(desc(processVersions.version))
+        .limit(1);
+
+      if (destLatest && destLatest.hash === bundle.process.hash) {
+        // Idempotent: bundle already imported (or independently
+        // produced the same canvas). Return the existing row.
+        return {
+          processId,
+          slug: bundle.process.slug,
+          versionId: destLatest.id,
+          versionNumber: destLatest.version ?? 1,
+          reused: true,
+          created: false,
+        };
+      }
+
+      if (
+        destLatest &&
+        (destLatest.version ?? 0) >= bundle.process.version &&
+        destLatest.hash !== bundle.process.hash
+      ) {
+        throw new BadRequestException(
+          `Import refused: destination already has slug "${bundle.process.slug}" at version ${destLatest.version} (different content). Source bundle is v${bundle.process.version}. Reconcile manually before retrying.`,
+        );
+      }
+    }
+
+    // 4. Compute next version number for destination.
+    const [maxRow] = await this.db
+      .select({ v: processVersions.version })
+      .from(processVersions)
+      .where(eq(processVersions.processId, processId))
+      .orderBy(desc(processVersions.version))
+      .limit(1);
+    const nextVersion = (maxRow?.v ?? 0) + 1;
+
+    // 5. Insert the new version with provenance.
+    const importedFrom = {
+      sourceTenantId: bundle.exportedFrom.tenantId,
+      sourceTenantName: bundle.exportedFrom.tenantName,
+      sourceVersion: bundle.process.version,
+      sourceHash: bundle.process.hash,
+      importedAt: new Date().toISOString(),
+    };
+    const [versionRow] = await this.db
+      .insert(processVersions)
+      .values({
+        tenantId: args.tenantId,
+        processId,
+        hash: bundle.process.hash,
+        canvasData: bundle.process.canvas,
+        version: nextVersion,
+        publishedBy: args.userId,
+        importedFrom,
+      })
+      .returning({ id: processVersions.id });
+
+    // 6. Update the PROCESSES row's live canvasData so the designer
+    //    shows the imported snapshot. Updating an existing row also
+    //    refreshes name/description from the bundle.
+    if (!created) {
+      await this.db
+        .update(processes)
+        .set({
+          name: bundle.process.name,
+          description: bundle.process.description ?? null,
+          canvasData: bundle.process.canvas,
+          updatedAt: new Date(),
+        })
+        .where(eq(processes.id, processId));
+    }
+
+    return {
+      processId,
+      slug: bundle.process.slug,
+      versionId: versionRow.id,
+      versionNumber: nextVersion,
+      reused: false,
+      created,
     };
   }
 
