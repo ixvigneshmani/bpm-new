@@ -293,6 +293,12 @@ export const processes = pgTable(
     status: processStatusEnum("STATUS").notNull().default("DRAFT"),
     version: varchar("VERSION", { length: 20 }).default("v1.0"),
     step: wizardStepEnum("STEP").notNull().default("DETAILS"),
+    /** D1 — stable cross-environment identifier. UUIDs are env-local;
+     *  slugs survive export/import. Auto-generated on create from
+     *  name (slugify + numeric suffix on collision). Nullable until
+     *  the migration backfills existing rows; subsequent push will
+     *  ALTER to NOT NULL once every row has one. */
+    slug: varchar("SLUG", { length: 64 }),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -300,7 +306,10 @@ export const processes = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("PROCESS_TENANT_IDX").on(t.tenantId)],
+  (t) => [
+    index("PROCESS_TENANT_IDX").on(t.tenantId),
+    uniqueIndex("PROCESS_TENANT_SLUG_IDX").on(t.tenantId, t.slug),
+  ],
 );
 
 // ─── PROCESS_VERSIONS ───────────────────────────────────────────────
@@ -350,6 +359,11 @@ export const processVersions = pgTable(
     publishedAt: timestamp("PUBLISHED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    /** D1 — provenance for cross-environment imports. NULL when the
+     *  version was published locally; populated for imports with
+     *  { sourceEnvName, sourceProcessSlug, sourceVersion, importedAt }
+     *  so operators can trace "this v5 came from staging's v4". */
+    importedFrom: jsonb("IMPORTED_FROM"),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -358,6 +372,93 @@ export const processVersions = pgTable(
     uniqueIndex("PROC_VER_PROCESS_HASH_IDX").on(t.processId, t.hash),
     index("PROC_VER_TENANT_PUBLISHED_IDX").on(t.tenantId, t.publishedAt.desc()),
     index("PROC_VER_PROCESS_VERSION_IDX").on(t.processId, t.version),
+  ],
+);
+
+// ─── ENVIRONMENT_BINDINGS (D1.1) ────────────────────────────────────
+// Per-tenant key/value store for environment-specific config that
+// shouldn't travel cross-environment via process exports. Examples:
+// SMTP host, REST connector tokens, role-id mappings (when a
+// process references a slug-keyed role, the resolver may dereference
+// here for backward compat with non-slug deployments).
+//
+// VALUE_SECRET ships PLAINTEXT for D1.1 — see project_d1_design.md
+// "Follow-up: encrypt env-binding secrets" for the OS8 migration plan.
+// Acceptable for internal/dev tier; NOT acceptable for regulated
+// customers. Closing this loop is a same-milestone deliverable when
+// OS8 lands.
+
+export const environmentBindings = pgTable(
+  "ENVIRONMENT_BINDINGS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    key: varchar("KEY", { length: 128 }).notNull(),
+    /** 'plain' | 'secret' | 'role-key'. UI uses this to decide
+     *  whether to mask the value; engine resolver uses it to pick
+     *  VALUE_PLAIN vs VALUE_SECRET on read. */
+    valueKind: varchar("VALUE_KIND", { length: 32 }).notNull(),
+    valuePlain: text("VALUE_PLAIN"),
+    /** PLAINTEXT in D1.1 — see schema header comment. Migration to
+     *  encrypted-bytea + KEY_ID lands with OS8. */
+    valueSecret: text("VALUE_SECRET"),
+    description: text("DESCRIPTION"),
+    createdBy: uuid("CREATED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("ENV_BINDING_TENANT_KEY_IDX").on(t.tenantId, t.key)],
+);
+
+// ─── API_TOKENS (D1.0) ──────────────────────────────────────────────
+// Tenant-scoped bearer tokens for the CLI / CI/CD use case. Issued by
+// admins, presented as `Authorization: Bearer flowpro_<token>`.
+// Stored hashed (SHA-256, no salt — tokens are high-entropy random).
+// Scopes: 'process:read' | 'process:write' | 'process:publish' |
+// 'env:read' | 'env:write'. The split between write and publish is
+// the GAP-05.1 trust boundary applied to non-human auth.
+
+export const apiTokens = pgTable(
+  "API_TOKENS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    issuedBy: uuid("ISSUED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Human-readable name for the issue panel — "GitHub Actions —
+     *  staging push", etc. Not unique per tenant; admins can pick
+     *  whatever. */
+    name: varchar("NAME", { length: 128 }).notNull(),
+    /** SHA-256 hex of the raw token bytes. Lookups go: caller sends
+     *  raw token → server hashes → indexed lookup. Plaintext token
+     *  is shown to the issuer ONCE at creation; never recoverable. */
+    tokenHash: varchar("TOKEN_HASH", { length: 64 }).notNull(),
+    /** JSON array of scope strings. Stored as jsonb for query
+     *  flexibility ("WHERE scopes ? 'process:publish'"). */
+    scopes: jsonb("SCOPES").notNull(),
+    /** NULL = no expiry. Most CI tokens should set 90d expiry as
+     *  policy; v1 doesn't enforce. */
+    expiresAt: timestamp("EXPIRES_AT", { withTimezone: true }),
+    revokedAt: timestamp("REVOKED_AT", { withTimezone: true }),
+    lastUsedAt: timestamp("LAST_USED_AT", { withTimezone: true }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("API_TOKEN_HASH_IDX").on(t.tokenHash),
+    index("API_TOKEN_TENANT_IDX").on(t.tenantId),
   ],
 );
 
