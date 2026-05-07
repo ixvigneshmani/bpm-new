@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
-    "start": "node dist/main",
-    "start:prod": "NODE_ENV=production node dist/main",
+    "start": "node dist/src/main.js",
+    "start:prod": "NODE_ENV=production node dist/src/main.js",
     "db:push": "drizzle-kit push",
     "db:push:test": "NODE_ENV=test drizzle-kit push",
     "db:push:prod": "NODE_ENV=production drizzle-kit push",
