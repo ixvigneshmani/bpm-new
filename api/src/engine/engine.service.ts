@@ -38,10 +38,12 @@ import {
   instanceEvents,
   instanceTokens,
   outboxEvents,
+  processDocuments,
   processInstances,
   processVersions,
   processes,
   roles,
+  tenants,
   userRoles,
   users,
 } from "../database/schema";
@@ -91,6 +93,36 @@ export type EngineCanvas = {
    *  audit trail is sanitised. */
   engineConfig?: {
     redactedVariableKeys?: string[];
+  };
+};
+
+/** D1.0 — portable process bundle returned by exportProcess and
+ *  consumed by importProcess. The `format` field gates schema
+ *  evolution: future v2 imports will read this to drive a migration.
+ *  Keep this type identical between API and (eventual) CLI. */
+export type ProcessExportBundle = {
+  format: "flowpro/v1";
+  exportedAt: string;
+  exportedFrom: {
+    tenantId: string;
+    tenantName: string | null;
+  };
+  process: {
+    slug: string;
+    name: string;
+    description: string | null;
+    version: number;
+    hash: string;
+    canvas: Record<string, unknown>;
+    businessDoc: Record<string, unknown> | null;
+  };
+  envBindings: Record<
+    string,
+    { kind: "placeholder" | "role-key"; key?: string; value?: string }
+  >;
+  metadata: {
+    publishedBy: null;
+    publishedAt: null;
   };
 };
 
@@ -3201,6 +3233,126 @@ export class EngineService {
       versionId,
       versionNumber: versionRow?.version ?? 1,
       reused,
+    };
+  }
+
+  /** D1.0 — export a process as a portable .flowpro.json bundle.
+   *  Returns the latest published PROCESS_VERSIONS snapshot — NOT
+   *  the live canvas. Unpublished processes can't be exported; the
+   *  caller must publish first.
+   *
+   *  Format gate: `format: "flowpro/v1"`. Future v2 imports will
+   *  read this to drive a migration if the schema changes.
+   *
+   *  Permissions: any tenant member who can read the process.
+   *  Stricter scoping (export-only API tokens) lands with the
+   *  API_TOKENS auth path. */
+  async exportProcess(args: {
+    processId: string;
+    tenantId: string;
+  }): Promise<ProcessExportBundle> {
+    // 1. Process row (tenant-scoped).
+    const [proc] = await this.db
+      .select({
+        id: processes.id,
+        slug: processes.slug,
+        name: processes.name,
+        description: processes.description,
+        status: processes.status,
+      })
+      .from(processes)
+      .where(
+        and(
+          eq(processes.id, args.processId),
+          eq(processes.tenantId, args.tenantId),
+        ),
+      )
+      .limit(1);
+    if (!proc) throw new NotFoundException("Process not found.");
+
+    // Refuse export of unpublished processes. PROCESS_VERSIONS rows
+    // are auto-populated on every startInstance call (even test
+    // runs on drafts) for forensic/dedup reasons, so "has any
+    // version" is NOT a proxy for "has been published". The
+    // PROCESSES.status = ACTIVE flag is the only authoritative
+    // "this canvas was explicitly promoted to live" signal — gate
+    // on it so test-run snapshots can't accidentally be exported as
+    // production-grade bundles.
+    if (proc.status !== "ACTIVE") {
+      throw new BadRequestException(
+        "Process is not published. Publish it before exporting.",
+      );
+    }
+
+    // 2. Latest published version — the snapshot that the publish
+    //    flow attached to PROCESSES.status=ACTIVE.
+    const [latestVersion] = await this.db
+      .select({
+        id: processVersions.id,
+        hash: processVersions.hash,
+        canvasData: processVersions.canvasData,
+        version: processVersions.version,
+      })
+      .from(processVersions)
+      .where(eq(processVersions.processId, args.processId))
+      .orderBy(desc(processVersions.version))
+      .limit(1);
+    if (!latestVersion) {
+      // Defensive — status=ACTIVE without a PROCESS_VERSIONS row
+      // shouldn't be possible (publish always creates one), but
+      // refuse rather than emit an empty bundle if the invariant
+      // ever breaks.
+      throw new BadRequestException(
+        "Process is published but has no version snapshot — engine state inconsistent.",
+      );
+    }
+
+    // 3. Business document schema (optional — older processes may
+    //    not have one). schemaOverride holds the per-process schema;
+    //    re-export uses it directly so the destination doesn't need
+    //    to look up a shared template.
+    const [doc] = await this.db
+      .select({ schemaOverride: processDocuments.schemaOverride })
+      .from(processDocuments)
+      .where(eq(processDocuments.processId, args.processId))
+      .limit(1);
+
+    // 4. Source tenant identity. Future "tenantSlug" lives on
+    //    TENANTS as a separate D1.x feature; for now expose the id
+    //    so the operator can correlate.
+    const [tenant] = await this.db
+      .select({ id: tenants.id, name: tenants.name })
+      .from(tenants)
+      .where(eq(tenants.id, args.tenantId))
+      .limit(1);
+
+    return {
+      format: "flowpro/v1",
+      exportedAt: new Date().toISOString(),
+      exportedFrom: {
+        tenantId: tenant?.id ?? args.tenantId,
+        tenantName: tenant?.name ?? null,
+      },
+      process: {
+        slug: proc.slug,
+        name: proc.name,
+        description: proc.description,
+        version: latestVersion.version ?? 1,
+        hash: latestVersion.hash,
+        canvas: latestVersion.canvasData as Record<string, unknown>,
+        businessDoc:
+          (doc?.schemaOverride as Record<string, unknown> | undefined) ?? null,
+      },
+      // envBindings analysis — placeholder list inferred from canvas
+      // ${env.X} references. Static-empty for D1.0; D1.1 wires the
+      // canvas walker that surfaces required keys to operators.
+      envBindings: {},
+      metadata: {
+        // PII stripped from the export — publishedBy/publishedAt
+        // are env-local and would leak source-env user identity.
+        publishedBy: null,
+        publishedAt: null,
+      },
     };
   }
 

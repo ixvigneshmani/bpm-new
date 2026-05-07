@@ -114,6 +114,24 @@ export class ProcessesController {
    *  bumps to a new numbered version when the canvas has changed since
    *  the last publish. Running instances pin to their original
    *  PROCESS_VERSIONS row and are unaffected. */
+  // ─── D1 — Cross-environment deployment ────────────────────────────
+
+  /** GET /processes/:id/export
+   *  Returns the latest published version of the process as a
+   *  portable .flowpro.json bundle. Caller saves it to disk and
+   *  POSTs it to /processes/import on the destination environment.
+   *  Refuses if the process has never been published. */
+  @Get(":id/export")
+  export(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    return this.engineService.exportProcess({
+      processId: id,
+      tenantId: req.user.tenantId,
+    });
+  }
+
   @Post(":id/publish")
   publish(
     @Req() req: AuthenticatedRequest,
