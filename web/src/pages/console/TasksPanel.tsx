@@ -5,9 +5,10 @@
  * operator can drive the claim-first lifecycle from one screen.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiGet, apiPost } from "../../lib/api";
+import { useVisiblePoll } from "../../lib/use-visible-poll";
 import { Banner, Field, inputStyle, primaryBtn, secondaryBtn } from "./ProcessesPanel";
 
 type Task = {
@@ -40,11 +41,7 @@ export default function TasksPanel() {
     }
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const t = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(t);
-  }, [refresh]);
+  useVisiblePoll(refresh, 5000);
 
   return (
     <div>

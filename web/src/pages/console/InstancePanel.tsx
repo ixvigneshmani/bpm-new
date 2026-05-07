@@ -86,13 +86,31 @@ export default function InstancePanel() {
     }
   }, [id, processCanvas]);
 
+  // Initial fetch + visibility-gated poll while the instance is
+  // running. Terminal instances skip polling entirely (nothing to
+  // observe) so an idle operator tab stops hammering the API.
   useEffect(() => {
     refresh();
-    // Running instances: poll every 4s so the operator watches tokens
-    // advance live. Terminal instances: no polling (nothing changes).
     if (!detail || detail.status !== "running") return;
-    const t = window.setInterval(refresh, 4000);
-    return () => window.clearInterval(t);
+    let timer: number | null = null;
+    const start = () => {
+      if (timer === null) timer = window.setInterval(refresh, 4000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVis = () => {
+      document.visibilityState === "visible" ? start() : stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [refresh, detail?.status]);
 
   const cancel = () => {
