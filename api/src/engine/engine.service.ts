@@ -203,24 +203,20 @@ export class EngineService {
     const canvas = projectCanvas(proc.canvasData);
     const startNode = findStartEvent(canvas);
 
-    // Hash the canonicalised snapshot — used both as the
-    // PROCESS_VERSIONS dedupe key and stored on PROCESS_INSTANCES for
-    // forensic / future migration tooling.
+    // Hash on the canonicalised PROJECTED view — engine semantics
+    // are what dedup care about. Store the FULL raw canvas (incl.
+    // React Flow positions etc.) so re-loaded versions render in
+    // the designer and D1 exports preserve layout. BUG-D1-01.
     const snapshot = canonicalise(canvas);
     const definitionHash = sha256Hex(JSON.stringify(snapshot));
     const initialVariables = args.variables ?? {};
 
-    // Resolve (or create) the deduplicated PROCESS_VERSIONS row first.
-    // Outside the txn so the upsert race between two concurrent starts
-    // resolves at the unique-constraint boundary, not by holding a
-    // long advisory lock. If both inserters race, the loser falls
-    // through to the SELECT branch — same row id either way.
     const versionId = await this.getOrCreateProcessVersion({
       processId: args.processId,
       tenantId: args.tenantId,
       userId: args.userId,
       hash: definitionHash,
-      canvas: snapshot,
+      canvas: proc.canvasData as Record<string, unknown>,
     });
 
     return this.db.transaction(async (tx) => {
@@ -3121,7 +3117,12 @@ export class EngineService {
     tenantId: string;
     userId: string;
     hash: string;
-    canvas: EngineCanvas;
+    /** FULL raw canvas including UI fields (React Flow positions,
+     *  viewport, etc). The hash is computed by the caller from the
+     *  engine's PROJECTED view of this canvas; storage keeps the
+     *  full thing so the designer can render after re-load and the
+     *  D1 export pipeline doesn't lose layout. BUG-D1-01. */
+    canvas: Record<string, unknown>;
   }): Promise<string> {
     const existing = await this.db
       .select({ id: processVersions.id })
@@ -3231,7 +3232,11 @@ export class EngineService {
       tenantId: args.tenantId,
       userId: args.userId,
       hash: definitionHash,
-      canvas: snapshot,
+      // Store the FULL raw canvas including positions/UI fields so
+      // export/import round-trips preserve designer layout. The
+      // hash above was computed from the canonicalised PROJECTED
+      // view so engine-semantic dedup still works. BUG-D1-01.
+      canvas: proc.canvasData as Record<string, unknown>,
     });
     const [versionRow] = await this.db
       .select({ version: processVersions.version })
