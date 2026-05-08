@@ -3554,7 +3554,10 @@ export class EngineService {
 
     // 6. Update the PROCESSES row's live canvasData so the designer
     //    shows the imported snapshot. Updating an existing row also
-    //    refreshes name/description from the bundle.
+    //    refreshes name/description from the bundle. Also advance
+    //    the wizard step so an imported process opens directly on
+    //    the canvas rather than re-running the Details/Document
+    //    wizard. BUG-D1-02.
     if (!created) {
       await this.db
         .update(processes)
@@ -3562,9 +3565,38 @@ export class EngineService {
           name: bundle.process.name,
           description: bundle.process.description ?? null,
           canvasData: bundle.process.canvas,
+          step: "CANVAS",
           updatedAt: new Date(),
         })
         .where(eq(processes.id, processId));
+    }
+
+    // 7. Restore businessDoc into PROCESS_DOCUMENTS if the bundle
+    //    carries one. The schemaOverride column is the per-process
+    //    schema; we mark source=PASTE since it came from another env
+    //    rather than a local template. BUG-D1-03.
+    if (bundle.process.businessDoc) {
+      const [existingDoc] = await this.db
+        .select({ id: processDocuments.id })
+        .from(processDocuments)
+        .where(eq(processDocuments.processId, processId))
+        .limit(1);
+      if (existingDoc) {
+        await this.db
+          .update(processDocuments)
+          .set({
+            schemaOverride: bundle.process.businessDoc,
+            source: "PASTE",
+            updatedAt: new Date(),
+          })
+          .where(eq(processDocuments.id, existingDoc.id));
+      } else {
+        await this.db.insert(processDocuments).values({
+          processId,
+          schemaOverride: bundle.process.businessDoc,
+          source: "PASTE",
+        });
+      }
     }
 
     return {
