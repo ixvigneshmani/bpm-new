@@ -1,0 +1,47 @@
+# FlowPro local/test compose.
+#
+# Database is intentionally NOT part of this compose — point DATABASE_URL
+# at your existing Postgres (host machine, RDS, Cloud SQL, etc).
+#
+# On macOS / Windows, host-machine Postgres is reachable from a container
+# at host.docker.internal. Example:
+#   DATABASE_URL=postgresql://user:pass@host.docker.internal:5432/flowpro
+#
+# Required env (set in shell or a .env file next to this compose):
+#   DATABASE_URL
+#   JWT_SECRET          (≥32 chars, not the dev placeholder, for prod)
+#   CORS_ORIGIN         (e.g. http://localhost:8080 for local compose)
+#
+# Optional:
+#   NODE_ENV            (default: development)
+#   JWT_EXPIRES_IN      (default: 30d)
+#   BUILD_SHA, BUILD_TIME
+#   LLM_API_KEY, ANTHROPIC_API_KEY
+
+services:
+  api:
+    build:
+      context: ./api
+    environment:
+      NODE_ENV: "${NODE_ENV:-development}"
+      PORT: "3001"
+      DATABASE_URL: "${DATABASE_URL}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_EXPIRES_IN: "${JWT_EXPIRES_IN:-30d}"
+      CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:8080}"
+      BUILD_SHA: "${BUILD_SHA:-}"
+      BUILD_TIME: "${BUILD_TIME:-}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
