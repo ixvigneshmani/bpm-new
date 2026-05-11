@@ -131,17 +131,17 @@ export default function BpmnSequenceEdge({
   }
 
   function startDragExistingWaypoint(
-    e: ReactPointerEvent<SVGCircleElement>,
+    e: ReactPointerEvent<SVGElement>,
     index: number,
   ): void {
     e.stopPropagation();
     e.preventDefault();
-    (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId);
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
     draggingRef.current = { index, pointerId: e.pointerId };
   }
 
   function startDragNewWaypoint(
-    e: ReactPointerEvent<SVGCircleElement>,
+    e: ReactPointerEvent<SVGElement>,
     insertAtIndex: number,
   ): void {
     e.stopPropagation();
@@ -151,11 +151,11 @@ export default function BpmnSequenceEdge({
     const initial = pointerToFlow(e);
     const next = insertWaypoint(waypoints, insertAtIndex, initial);
     commitWaypoints(next);
-    (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId);
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
     draggingRef.current = { index: insertAtIndex, pointerId: e.pointerId };
   }
 
-  function onDragMove(e: ReactPointerEvent<SVGCircleElement>): void {
+  function onDragMove(e: ReactPointerEvent<SVGElement>): void {
     const drag = draggingRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     const next = updateWaypointAt(
@@ -166,11 +166,11 @@ export default function BpmnSequenceEdge({
     updateEdgeData(id, { waypoints: next.length > 0 ? next : undefined });
   }
 
-  function onDragEnd(e: ReactPointerEvent<SVGCircleElement>): void {
+  function onDragEnd(e: ReactPointerEvent<SVGElement>): void {
     const drag = draggingRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     try {
-      (e.currentTarget as SVGCircleElement).releasePointerCapture(e.pointerId);
+      (e.currentTarget as Element).releasePointerCapture(e.pointerId);
     } catch {
       // pointer may have been released by the browser already; ignore.
     }
@@ -245,13 +245,23 @@ export default function BpmnSequenceEdge({
   // Default-flow slash marker
   const slashOffset = computeSlashTransform(sourceX, sourceY, sourcePosition);
 
-  // Show waypoint handles + midpoint "+" handles only while the edge
-  // is selected. Reduces clutter on a busy diagram.
-  const showHandles = selected && !isAssociation;
-  const midpoints = useMemo(
-    () => (showHandles ? segmentMidpoints(source, waypoints, target) : []),
-    [showHandles, source.x, source.y, target.x, target.y, waypoints],
-  );
+  // Show waypoint handles + midpoint "+" handles when the edge is
+  // selected OR hovered. Selection alone is too discoverable — users
+  // drag, they don't always click first.
+  const [hovered, setHovered] = useState(false);
+  const showHandles = (selected || hovered) && !isAssociation;
+  // When the edge has 0 waypoints we render smoothstep — a curved
+  // path that does NOT go through the straight-line midpoint of
+  // source→target. So put the single "+ here" handle at React Flow's
+  // own labelX/labelY (the centre of the smoothstep path) — that's
+  // the only place where the handle sits ON the visible line.
+  // Once the user adds even one waypoint we switch to the polyline
+  // and the segment midpoints are then accurate.
+  const midpoints = useMemo(() => {
+    if (!showHandles) return [];
+    if (waypoints.length === 0) return [{ x: smoothLabelX, y: smoothLabelY }];
+    return segmentMidpoints(source, waypoints, target);
+  }, [showHandles, source.x, source.y, target.x, target.y, waypoints, smoothLabelX, smoothLabelY]);
 
   return (
     <>
@@ -261,6 +271,8 @@ export default function BpmnSequenceEdge({
         markerEnd={effectiveMarkerEnd}
         style={pathStyle}
         onContextMenu={openMenuForEdge}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
       />
 
       {isDefault && !isAssociation && (
@@ -278,43 +290,75 @@ export default function BpmnSequenceEdge({
       )}
 
       {/* Existing waypoint handles — draggable circles. Drawn last so
-          they're hit-test-first under the cursor. */}
+          they're hit-test-first under the cursor. White fill + indigo
+          stroke makes them readable against any background. */}
       {showHandles &&
         waypoints.map((w, i) => (
-          <circle
-            key={`wp-${i}`}
-            cx={w.x}
-            cy={w.y}
-            r={5}
-            fill={HANDLE_FILL}
-            stroke={SELECTED_COLOR}
-            strokeWidth={2}
-            style={{ cursor: "grab", pointerEvents: "all" }}
-            onPointerDown={(e) => startDragExistingWaypoint(e, i)}
-            onPointerMove={onDragMove}
-            onPointerUp={onDragEnd}
-            onPointerCancel={onDragEnd}
-            onContextMenu={(e) => openMenuForWaypoint(e, i)}
-          />
+          <g key={`wp-${i}`}>
+            <circle
+              cx={w.x}
+              cy={w.y}
+              r={6}
+              fill={HANDLE_FILL}
+              stroke={SELECTED_COLOR}
+              strokeWidth={2}
+              style={{ cursor: "grab", pointerEvents: "all" }}
+              onPointerDown={(e) => startDragExistingWaypoint(e, i)}
+              onPointerMove={onDragMove}
+              onPointerUp={onDragEnd}
+              onPointerCancel={onDragEnd}
+              onContextMenu={(e) => openMenuForWaypoint(e, i)}
+            />
+          </g>
         ))}
 
-      {/* "+ here" midpoint handles — drag from one to insert a new waypoint.
-          Smaller + translucent so they read as secondary. */}
+      {/* "+ here" midpoint handles — drag from one to insert a new
+          waypoint. Visually distinct from existing waypoints: white
+          fill + DASHED indigo stroke + tiny "+" sign so the affordance
+          ("add a point") reads at a glance. Slightly larger than the
+          old 4px so they don't disappear into the edge line. */}
       {showHandles &&
         midpoints.map((m, i) => (
-          <circle
+          <g
             key={`mid-${i}`}
-            cx={m.x}
-            cy={m.y}
-            r={4}
-            fill={SELECTED_COLOR}
-            opacity={0.45}
             style={{ cursor: "crosshair", pointerEvents: "all" }}
             onPointerDown={(e) => startDragNewWaypoint(e, i)}
             onPointerMove={onDragMove}
             onPointerUp={onDragEnd}
             onPointerCancel={onDragEnd}
-          />
+          >
+            <circle
+              cx={m.x}
+              cy={m.y}
+              r={7}
+              fill={SELECTED_COLOR}
+              stroke="#fff"
+              strokeWidth={2}
+            />
+            {/* White "+" glyph against the indigo fill — reads as a
+                button-style "add point here" affordance. Strokes
+                instead of a font glyph so it scales cleanly. */}
+            <line
+              x1={m.x - 3}
+              y1={m.y}
+              x2={m.x + 3}
+              y2={m.y}
+              stroke="#fff"
+              strokeWidth={1.6}
+              strokeLinecap="round"
+              pointerEvents="none"
+            />
+            <line
+              x1={m.x}
+              y1={m.y - 3}
+              x2={m.x}
+              y2={m.y + 3}
+              stroke="#fff"
+              strokeWidth={1.6}
+              strokeLinecap="round"
+              pointerEvents="none"
+            />
+          </g>
         ))}
 
       {/* Context menu — HTML rendered into EdgeLabelRenderer so it
