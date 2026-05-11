@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
 
 export default function LoginForm() {
   const { login, loading } = useAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -13,7 +15,10 @@ export default function LoginForm() {
     e.preventDefault();
     setError("");
     try {
-      await login(email, password);
+      const result = await login(email, password);
+      if (result.kind === "mfa") {
+        navigate("/login/mfa", { state: { challenge: result.challenge } });
+      }
     } catch (err: any) {
       setError(err.message || "Login failed");
     }

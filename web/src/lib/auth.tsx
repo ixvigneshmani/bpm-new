@@ -6,7 +6,6 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiPost } from "./api";
 
 type User = {
   id: string;
@@ -19,59 +18,128 @@ type User = {
   tenantId: string;
 };
 
+type LoginSuccess =
+  | { kind: "ok"; user: User }
+  | { kind: "mfa"; challenge: string };
+
 type AuthContextType = {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  login: (email: string, password: string) => Promise<LoginSuccess>;
+  completeMfaLogin: (challenge: string, code: string) => Promise<void>;
+  logout: () => Promise<void>;
+  /** Force the AuthProvider to re-read user from localStorage after
+   *  a security-sensitive change (e.g. enrolling MFA, changing password). */
+  reloadUser: () => void;
 };
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
+const TOKEN_KEY = "flowpro_token";
+const REFRESH_KEY = "flowpro_refresh";
+const USER_KEY = "flowpro_user";
+
+function persistTokens(accessToken: string, refreshToken: string, user: User) {
+  localStorage.setItem(TOKEN_KEY, accessToken);
+  localStorage.setItem(REFRESH_KEY, refreshToken);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+function clearTokens() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+async function rawPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: "Request failed" }));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(() => {
+  const [user, setUser] = useState<User | null>(() => readStoredUser());
+  const [loading, setLoading] = useState(false);
+
+  function readStoredUser(): User | null {
     try {
-      const stored = localStorage.getItem("flowpro_user");
+      const stored = localStorage.getItem(USER_KEY);
       if (!stored) return null;
       const parsed = JSON.parse(stored);
-      // Old payload shape (pre-R1) had `role` only. Force re-login so
-      // the new systemRole/roles fields are populated from /auth/login.
       if (!parsed?.systemRole || !Array.isArray(parsed.roles)) {
-        localStorage.removeItem("flowpro_user");
-        localStorage.removeItem("flowpro_token");
+        clearTokens();
         return null;
       }
       return parsed;
     } catch {
-      localStorage.removeItem("flowpro_user");
+      clearTokens();
       return null;
     }
-  });
-  const [loading, setLoading] = useState(false);
+  }
 
-  async function login(email: string, password: string) {
+  async function login(email: string, password: string): Promise<LoginSuccess> {
     setLoading(true);
     try {
-      const res = await apiPost<{ accessToken: string; user: User }>(
-        "/auth/login",
-        { email, password },
-      );
-      localStorage.setItem("flowpro_token", res.accessToken);
-      localStorage.setItem("flowpro_user", JSON.stringify(res.user));
+      const res = await rawPost<
+        | { accessToken: string; refreshToken: string; user: User }
+        | { mfaChallenge: string; expiresIn: number }
+      >("/auth/login", { email, password });
+      if ("mfaChallenge" in res) {
+        return { kind: "mfa", challenge: res.mfaChallenge };
+      }
+      persistTokens(res.accessToken, res.refreshToken, res.user);
+      setUser(res.user);
+      return { kind: "ok", user: res.user };
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function completeMfaLogin(challenge: string, code: string): Promise<void> {
+    setLoading(true);
+    try {
+      const res = await rawPost<{
+        accessToken: string;
+        refreshToken: string;
+        user: User;
+      }>("/auth/mfa/login", { mfaChallenge: challenge, code });
+      persistTokens(res.accessToken, res.refreshToken, res.user);
       setUser(res.user);
     } finally {
       setLoading(false);
     }
   }
 
-  function logout() {
-    localStorage.removeItem("flowpro_token");
-    localStorage.removeItem("flowpro_user");
+  async function logout(): Promise<void> {
+    const refreshToken = localStorage.getItem(REFRESH_KEY);
+    if (refreshToken) {
+      try {
+        await rawPost<void>("/auth/logout", { refreshToken });
+      } catch {
+        // Best-effort. Even if the server-side revoke fails (network
+        // down, token already revoked), still clear local state.
+      }
+    }
+    clearTokens();
     setUser(null);
   }
 
+  function reloadUser() {
+    setUser(readStoredUser());
+  }
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, completeMfaLogin, logout, reloadUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

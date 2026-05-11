@@ -21,6 +21,7 @@
     "html-to-image": "^1.11.13",
     "immer": "^11.1.4",
     "nanoid": "^5.1.7",
+    "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.6.1",
@@ -33,6 +34,7 @@
   },
   "devDependencies": {
     "@types/bpmn-moddle": "^10.0.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^4.5.2",

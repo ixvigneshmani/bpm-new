@@ -1,5 +1,9 @@
 const API_BASE = "/api";
 
+const TOKEN_KEY = "flowpro_token";
+const REFRESH_KEY = "flowpro_refresh";
+const USER_KEY = "flowpro_user";
+
 /** Extra fields every apiX method accepts. `headers` gets spread into
  *  the request headers AFTER the default auth/content-type, so callers
  *  can add Idempotency-Key, X-Request-Id, etc. without losing auth.
@@ -24,14 +28,13 @@ function getHeaders(
   extra?: Record<string, string>,
   actingForOverride?: string | null,
 ): Record<string, string> {
-  const token = localStorage.getItem("flowpro_token");
+  const token = localStorage.getItem(TOKEN_KEY);
   // Act-as impersonation (Feature D): every API call during an Act-as
   // session carries X-Acting-For. `actingForOverride` takes precedence
   // so form dialogs can freeze the target at open-time and avoid the
   // mid-submit switch bug.
   let actingFor: string | null = null;
   if (actingForOverride === null) {
-    // Explicitly disabled for this call.
     actingFor = null;
   } else if (typeof actingForOverride === "string") {
     actingFor = actingForOverride;
@@ -54,24 +57,90 @@ function getHeaders(
   };
 }
 
-async function handleResponse<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    if (res.status === 401) {
-      localStorage.removeItem("flowpro_token");
-      localStorage.removeItem("flowpro_user");
+/** Single-flight refresh: if two concurrent 401s race, both await the
+ *  same in-flight refresh call so we don't double-rotate and trip the
+ *  server's theft-detection. */
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  const refreshToken = localStorage.getItem(REFRESH_KEY);
+  if (!refreshToken) return false;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      });
+      if (!res.ok) return false;
+      const data = (await res.json()) as { accessToken: string; refreshToken: string };
+      localStorage.setItem(TOKEN_KEY, data.accessToken);
+      localStorage.setItem(REFRESH_KEY, data.refreshToken);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = null;
     }
+  })();
+  return refreshInFlight;
+}
+
+function clearAllAndRedirect() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+  localStorage.removeItem(USER_KEY);
+  // Force a hard navigation so React tree resets fully — softer routing
+  // can race with in-flight requests that still hold the old user.
+  if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+    window.location.assign("/login");
+  }
+}
+
+async function handleResponse<T>(
+  res: Response,
+  retry: () => Promise<Response>,
+  retried: boolean,
+): Promise<T> {
+  if (res.status === 401 && !retried) {
+    const ok = await tryRefresh();
+    if (ok) {
+      const retryRes = await retry();
+      return handleResponse<T>(retryRes, retry, true);
+    }
+    clearAllAndRedirect();
     const err = await res.json().catch(() => ({ message: "Request failed" }));
     throw new Error(err.message || `HTTP ${res.status}`);
   }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: "Request failed" }));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
+function makeFetch(
+  url: string,
+  method: string,
+  body: unknown,
+  opts: ApiRequestOptions | undefined,
+  withBody: boolean,
+): () => Promise<Response> {
+  return () =>
+    fetch(url, {
+      method,
+      headers: getHeaders(withBody, opts?.headers, opts?.actingForOverride),
+      body: withBody ? JSON.stringify(body) : undefined,
+      signal: opts?.signal,
+    });
+}
+
 export async function apiGet<T>(path: string, opts?: ApiRequestOptions): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: getHeaders(false, opts?.headers, opts?.actingForOverride),
-    signal: opts?.signal,
-  });
-  return handleResponse<T>(res);
+  const url = `${API_BASE}${path}`;
+  const exec = makeFetch(url, "GET", null, opts, false);
+  return handleResponse<T>(await exec(), exec, false);
 }
 
 export async function apiPost<T>(
@@ -79,13 +148,9 @@ export async function apiPost<T>(
   body: unknown,
   opts?: ApiRequestOptions,
 ): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: getHeaders(true, opts?.headers, opts?.actingForOverride),
-    body: JSON.stringify(body),
-    signal: opts?.signal,
-  });
-  return handleResponse<T>(res);
+  const url = `${API_BASE}${path}`;
+  const exec = makeFetch(url, "POST", body, opts, true);
+  return handleResponse<T>(await exec(), exec, false);
 }
 
 export async function apiPut<T>(
@@ -93,13 +158,9 @@ export async function apiPut<T>(
   body: unknown,
   opts?: ApiRequestOptions,
 ): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "PUT",
-    headers: getHeaders(true, opts?.headers, opts?.actingForOverride),
-    body: JSON.stringify(body),
-    signal: opts?.signal,
-  });
-  return handleResponse<T>(res);
+  const url = `${API_BASE}${path}`;
+  const exec = makeFetch(url, "PUT", body, opts, true);
+  return handleResponse<T>(await exec(), exec, false);
 }
 
 export async function apiPatch<T>(
@@ -107,20 +168,13 @@ export async function apiPatch<T>(
   body: unknown,
   opts?: ApiRequestOptions,
 ): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "PATCH",
-    headers: getHeaders(true, opts?.headers, opts?.actingForOverride),
-    body: JSON.stringify(body),
-    signal: opts?.signal,
-  });
-  return handleResponse<T>(res);
+  const url = `${API_BASE}${path}`;
+  const exec = makeFetch(url, "PATCH", body, opts, true);
+  return handleResponse<T>(await exec(), exec, false);
 }
 
 export async function apiDelete<T>(path: string, opts?: ApiRequestOptions): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "DELETE",
-    headers: getHeaders(false, opts?.headers, opts?.actingForOverride),
-    signal: opts?.signal,
-  });
-  return handleResponse<T>(res);
+  const url = `${API_BASE}${path}`;
+  const exec = makeFetch(url, "DELETE", null, opts, false);
+  return handleResponse<T>(await exec(), exec, false);
 }
