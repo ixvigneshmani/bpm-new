@@ -20,20 +20,20 @@ const ROUTE_LABELS: Record<string, string> = {
   "/settings": "Settings",
 };
 
-function buildBreadcrumbs(pathname: string) {
+function buildBreadcrumbs(pathname: string, tenantLabel: string) {
   const crumbs: { label: string; path: string }[] = [];
 
   // Handle dynamic /designer/:id routes
   const designerMatch = pathname.match(/^\/designer\/(.+)$/);
   if (designerMatch && designerMatch[1] !== "new") {
-    crumbs.push({ label: "Acme Corp", path: "/home" });
+    crumbs.push({ label: tenantLabel, path: "/home" });
     crumbs.push({ label: "Process Designer", path: "/designer" });
     crumbs.push({ label: "Edit Process", path: pathname });
     return crumbs;
   }
 
   // Always start with workspace
-  crumbs.push({ label: "Acme Corp", path: "/home" });
+  crumbs.push({ label: tenantLabel, path: "/home" });
 
   // Exact match first
   if (ROUTE_LABELS[pathname]) {
@@ -60,7 +60,8 @@ export default function Header() {
   const [actAsOpen, setActAsOpen] = useState(false);
   const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
 
-  const breadcrumbs = buildBreadcrumbs(location.pathname);
+  const tenantLabel = user?.tenantName ?? "Workspace";
+  const breadcrumbs = buildBreadcrumbs(location.pathname, tenantLabel);
 
   return (
     <header

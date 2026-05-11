@@ -14,7 +14,7 @@ import { and, eq } from "drizzle-orm";
 import { UsersService } from "../users/users.service";
 import { MfaService } from "./mfa.service";
 import { DATABASE, type Database } from "../database/database.module";
-import { sessions, mfaRecoveryCodes, users as usersTable } from "../database/schema";
+import { sessions, mfaRecoveryCodes, users as usersTable, tenants } from "../database/schema";
 
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
@@ -294,9 +294,17 @@ export class AuthService {
   ) {
     const roles = await this.usersService.getRoleKeys(user.id);
 
+    const [tenant] = await this.db
+      .select({ name: tenants.name })
+      .from(tenants)
+      .where(eq(tenants.id, user.tenantId))
+      .limit(1);
+    const tenantName = tenant?.name ?? null;
+
     const accessToken = await this.jwt.signAsync({
       sub: user.id,
       tenantId: user.tenantId,
+      tenantName,
       email: user.email,
       displayName: user.displayName,
       systemRole: user.role,
@@ -331,6 +339,7 @@ export class AuthService {
         systemRole: user.role,
         roles,
         tenantId: user.tenantId,
+        tenantName,
       },
     };
   }

@@ -16,6 +16,9 @@ type User = {
   /** Domain role keys, e.g. ["manager"]. */
   roles: string[];
   tenantId: string;
+  /** Human-readable tenant name from TENANTS.NAME, served by /auth/login.
+   *  Null if the row is unexpectedly missing. */
+  tenantName: string | null;
 };
 
 type LoginSuccess =
@@ -78,6 +81,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearTokens();
         return null;
       }
+      // tenantName was added 2026-05-11. Old localStorage entries
+      // predate it; default to null rather than forcing a re-login.
+      if (parsed.tenantName === undefined) parsed.tenantName = null;
       return parsed;
     } catch {
       clearTokens();

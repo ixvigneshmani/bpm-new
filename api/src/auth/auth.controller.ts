@@ -134,6 +134,7 @@ export class AuthController {
         systemRole: req.user.systemRole,
         roles: req.user.roles,
         tenantId: req.user.tenantId,
+        tenantName: (req.user as { tenantName?: string | null }).tenantName ?? null,
       },
     };
   }

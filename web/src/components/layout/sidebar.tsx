@@ -191,8 +191,12 @@ export default function Sidebar() {
       {/* Workspace selector */}
       {!collapsed && (
         <div style={{ margin: "0 12px 12px", padding: "8px 10px", background: "#F9FAFB", border: "1px solid #EAECF0", borderRadius: 8, display: "flex", alignItems: "center", gap: 8, cursor: "pointer", flexShrink: 0 }}>
-          <div style={{ width: 24, height: 24, borderRadius: 6, background: "#E0E7FF", color: "#4F46E5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>A</div>
-          <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#344054" }}>Acme Corp</span>
+          <div style={{ width: 24, height: 24, borderRadius: 6, background: "#E0E7FF", color: "#4F46E5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>
+            {(user?.tenantName ?? "W").slice(0, 1).toUpperCase()}
+          </div>
+          <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#344054", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {user?.tenantName ?? "Workspace"}
+          </span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#98A2B3" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
         </div>
       )}
