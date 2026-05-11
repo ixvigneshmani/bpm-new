@@ -173,6 +173,30 @@ export class AuthService {
     return this.issueTokens(user, ctx);
   }
 
+  async listSessions(userId: string) {
+    const rows = await this.db
+      .select({
+        id: sessions.id,
+        ipAddress: sessions.ipAddress,
+        userAgent: sessions.userAgent,
+        createdAt: sessions.createdAt,
+        expiresAt: sessions.expiresAt,
+      })
+      .from(sessions)
+      .where(and(eq(sessions.userId, userId), eq(sessions.status, "active")));
+    return rows;
+  }
+
+  async revokeSession(userId: string, sessionId: string): Promise<void> {
+    // Tenant-scoped by userId — a user can only revoke their own
+    // sessions. The WHERE clause covers both ownership and existence.
+    const result = await this.db
+      .update(sessions)
+      .set({ status: "revoked" })
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+    void result;
+  }
+
   async logout(refreshToken: string): Promise<void> {
     if (!refreshToken) return;
     const tokenHash = this.hashToken(refreshToken);

@@ -1,7 +1,15 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import QRCode from "qrcode";
-import { apiPost } from "../lib/api";
+import { apiDelete, apiGet, apiPost } from "../lib/api";
 import { useAuth } from "../lib/auth";
+
+type SessionRow = {
+  id: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  expiresAt: string;
+};
 
 type EnrollState =
   | { phase: "idle" }
@@ -311,8 +319,132 @@ export default function SecuritySettingsPage() {
           </div>
         )}
       </section>
+
+      <SessionsSection />
     </div>
   );
+}
+
+// ── Active sessions section ────────────────────────────────────────
+
+function SessionsSection() {
+  const [sessions, setSessions] = useState<SessionRow[] | null>(null);
+  const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const res = await apiGet<{ sessions: SessionRow[] }>("/auth/sessions");
+      setSessions(res.sessions);
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to load sessions");
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function revoke(id: string) {
+    setBusyId(id);
+    try {
+      await apiDelete<void>(`/auth/sessions/${id}`);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to revoke");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section style={sectionStyle}>
+      <h2 style={sectionTitle}>Active sessions</h2>
+      <p style={sectionDesc}>
+        Each device or browser you've signed in from. Revoke any session you
+        don't recognise — that device will be signed out the next time it
+        tries to use the API.
+      </p>
+
+      {error && <Banner kind="error">{error}</Banner>}
+
+      {sessions === null ? (
+        <p style={{ fontSize: 13, color: "#667085" }}>Loading…</p>
+      ) : sessions.length === 0 ? (
+        <p style={{ fontSize: 13, color: "#667085" }}>No active sessions.</p>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {sessions.map((s) => (
+            <div
+              key={s.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 16,
+                padding: 12,
+                background: "#F9FAFB",
+                border: "1px solid #EAECF0",
+                borderRadius: 8,
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#101828", marginBottom: 2 }}>
+                  {summariseUserAgent(s.userAgent)}
+                </div>
+                <div style={{ fontSize: 12, color: "#667085" }}>
+                  IP {s.ipAddress ?? "—"} • signed in {formatRelative(s.createdAt)} •
+                  {" "}expires {formatRelative(s.expiresAt)}
+                </div>
+              </div>
+              <button
+                onClick={() => revoke(s.id)}
+                disabled={busyId === s.id}
+                style={{
+                  padding: "6px 12px",
+                  background: "#fff",
+                  border: "1px solid #FECDCA",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: "#B42318",
+                  cursor: busyId === s.id ? "wait" : "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                {busyId === s.id ? "Revoking…" : "Revoke"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function summariseUserAgent(ua: string | null): string {
+  if (!ua) return "Unknown device";
+  // Tiny heuristic — enough to distinguish "the iPad in the kitchen"
+  // from "the Mac at work" without dragging in a UA parser.
+  const browser = ua.match(/Edg\/|Chrome\/|Firefox\/|Safari\//)?.[0]?.replace("/", "") ?? "Browser";
+  const os = ua.match(/Mac OS X|Windows NT|Android|iPhone|iPad|Linux/)?.[0] ?? "OS";
+  return `${browser} on ${os}`;
+}
+
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+  const diff = then - Date.now();
+  const abs = Math.abs(diff);
+  const future = diff > 0;
+  const minutes = Math.round(abs / 60000);
+  const hours = Math.round(abs / 3_600_000);
+  const days = Math.round(abs / 86_400_000);
+  if (minutes < 1) return future ? "in a moment" : "just now";
+  if (minutes < 60) return future ? `in ${minutes}m` : `${minutes}m ago`;
+  if (hours < 48) return future ? `in ${hours}h` : `${hours}h ago`;
+  return future ? `in ${days}d` : `${days}d ago`;
 }
 
 // ── Tiny UI helpers (inline so this page stays self-contained) ─────

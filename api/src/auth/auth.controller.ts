@@ -3,6 +3,8 @@ import {
   Post,
   Body,
   Get,
+  Delete,
+  Param,
   HttpCode,
   HttpStatus,
   UseGuards,
@@ -102,6 +104,23 @@ export class AuthController {
       req.user.tenantId,
       dto.userId,
     );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get("sessions")
+  async listSessions(@Req() req: AuthenticatedRequest) {
+    const sessions = await this.authService.listSessions(req.user.sub);
+    return { sessions };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete("sessions/:id")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async revokeSession(
+    @Param("id") id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.authService.revokeSession(req.user.sub, id);
   }
 
   @UseGuards(JwtAuthGuard)
