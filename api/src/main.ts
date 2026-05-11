@@ -20,9 +20,9 @@ function assertProductionConfig(config: ConfigService): void {
   }
 
   const corsOrigin = config.get<string>("CORS_ORIGIN");
-  if (!corsOrigin || corsOrigin.includes("localhost")) {
+  if (!corsOrigin || corsOrigin.split(",").some((o) => o.trim().includes("localhost"))) {
     throw new Error(
-      "Refusing to boot in production: CORS_ORIGIN must be set to a non-localhost value.",
+      "Refusing to boot in production: CORS_ORIGIN must not include any localhost entry.",
     );
   }
 }
@@ -39,7 +39,11 @@ async function bootstrap() {
   assertProductionConfig(config);
 
   const port = config.get<number>("PORT", 3001);
-  const corsOrigin = config.get<string>("CORS_ORIGIN", "http://localhost:5173");
+  const corsOriginRaw = config.get<string>("CORS_ORIGIN", "http://localhost:5173");
+  const allowedOrigins = corsOriginRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   await app.register(helmet, {
     contentSecurityPolicy: false,
@@ -52,7 +56,7 @@ async function bootstrap() {
   });
 
   app.enableCors({
-    origin: corsOrigin,
+    origin: allowedOrigins.length === 1 ? allowedOrigins[0] : allowedOrigins,
     credentials: true,
   });
 
