@@ -162,10 +162,48 @@ export function computeAutoWaypoints(
   ];
 }
 
+/** Snap a single waypoint coord to match the anchor (source/target),
+ *  so the segment between them is strictly orthogonal. For horizontal
+ *  handles we align Y; for vertical handles we align X. Used at
+ *  render time to keep the first/last segment orthogonal even after
+ *  the user has moved a node (stored waypoints can otherwise drift
+ *  out of alignment with the new source/target position). */
+export function alignBoundaryWaypoint(
+  wp: Waypoint,
+  anchor: Waypoint,
+  anchorPos: Position | string | undefined,
+): Waypoint {
+  if (isHorizontalHandle(anchorPos)) return { ...wp, y: anchor.y };
+  if (isVerticalHandle(anchorPos)) return { ...wp, x: anchor.x };
+  return wp;
+}
+
+/** Magnet-snap a perpendicular drag value to source or target's coord
+ *  when within `magnet` pixels. Lets the user "align" the dragged
+ *  segment with the source/target's anchor line without needing the
+ *  cursor to hit a sub-pixel exact position — without this, the
+ *  user can never drag a segment back to perfectly collapse the
+ *  auto-route because source positions aren't on the 16px grid. */
+export function magnetSnap(
+  perp: number,
+  axis: "x" | "y",
+  source: Waypoint,
+  target: Waypoint,
+  magnet = 8,
+): number {
+  const s = axis === "x" ? source.x : source.y;
+  const t = axis === "x" ? target.x : target.y;
+  if (Math.abs(perp - s) <= magnet) return s;
+  if (Math.abs(perp - t) <= magnet) return t;
+  return perp;
+}
+
 /** Full point list for rendering / drag math:
  *  [source, ...effectiveWaypoints, target]. If `waypoints` is empty,
  *  auto-corners are inserted; otherwise the user's waypoints are
- *  trusted to maintain the orthogonal invariant. */
+ *  trusted to maintain the orthogonal invariant — except for the
+ *  FIRST and LAST waypoints, which we snap to align with the current
+ *  source/target so node moves don't tilt the boundary segments. */
 export function effectivePoints(
   source: Waypoint,
   waypoints: Waypoint[],
@@ -173,11 +211,15 @@ export function effectivePoints(
   sourcePos: Position | string | undefined,
   targetPos: Position | string | undefined,
 ): Waypoint[] {
-  const intermediate =
-    waypoints.length > 0
-      ? waypoints
-      : computeAutoWaypoints(source, target, sourcePos, targetPos);
-  return [source, ...intermediate, target];
+  if (waypoints.length === 0) {
+    const intermediate = computeAutoWaypoints(source, target, sourcePos, targetPos);
+    return [source, ...intermediate, target];
+  }
+  const adjusted = waypoints.slice();
+  adjusted[0] = alignBoundaryWaypoint(adjusted[0], source, sourcePos);
+  const lastIdx = adjusted.length - 1;
+  adjusted[lastIdx] = alignBoundaryWaypoint(adjusted[lastIdx], target, targetPos);
+  return [source, ...adjusted, target];
 }
 
 /** Build the segment list (with direction + anchor flags + midpoint)

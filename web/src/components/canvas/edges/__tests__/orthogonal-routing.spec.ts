@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { Position } from "@xyflow/react";
 import {
+  alignBoundaryWaypoint,
   buildOrthogonalPath,
   canRouteOrthogonally,
   computeAutoWaypoints,
@@ -13,6 +14,7 @@ import {
   getEdgeWaypoints,
   getSegments,
   isAutoRoute,
+  magnetSnap,
   simplifyWaypoints,
   snapPoint,
   snapValue,
@@ -710,5 +712,144 @@ describe("dragSegment — auto-route collapse", () => {
     //   (130,100) and (250,100) on Y=100 with S(100,100) on Y=100 → S, (130,100), (250,100) are all collinear H → drop intermediates that are collinear
     //   Eventually: just [(250, 100), (250, 200)] which IS the auto-route → return []
     expect(after2).toEqual([]);
+  });
+});
+
+// ── Magnet snap (user's "drag-back-to-align" complaint) ──────────────
+
+describe("magnetSnap", () => {
+  const S: Waypoint = { x: 100, y: 100 };
+  const T: Waypoint = { x: 400, y: 200 };
+
+  it("snaps to source.x when perp is within magnet distance (x axis)", () => {
+    expect(magnetSnap(96, "x", S, T)).toBe(100); // 4px from source.x → snap
+    expect(magnetSnap(108, "x", S, T)).toBe(100); // 8px from source.x → snap (boundary)
+    expect(magnetSnap(112, "x", S, T)).toBe(112); // 12px → keep as is
+  });
+
+  it("snaps to target.x when perp is within magnet of target (x axis)", () => {
+    expect(magnetSnap(405, "x", S, T)).toBe(400);
+    expect(magnetSnap(408, "x", S, T)).toBe(400);
+    expect(magnetSnap(412, "x", S, T)).toBe(412);
+  });
+
+  it("snaps to source.y / target.y on y axis", () => {
+    expect(magnetSnap(96, "y", S, T)).toBe(100); // 4px from S.y → snap
+    expect(magnetSnap(195, "y", S, T)).toBe(200); // 5px from T.y → snap
+    expect(magnetSnap(150, "y", S, T)).toBe(150); // far from both → keep
+  });
+
+  it("real-world: source.y = 272.99 (off-grid), user drags to 272 — magnet snaps exactly", () => {
+    const S2: Waypoint = { x: 0, y: 272.99 };
+    const T2: Waypoint = { x: 500, y: 211.99 };
+    expect(magnetSnap(272, "y", S2, T2)).toBe(272.99);
+  });
+
+  it("custom magnet distance respected", () => {
+    expect(magnetSnap(120, "x", S, T, 25)).toBe(100); // 20px within 25 magnet
+    expect(magnetSnap(120, "x", S, T, 5)).toBe(120); // 20px outside 5 magnet
+  });
+});
+
+// ── Boundary-alignment for node moves ───────────────────────────────
+
+describe("alignBoundaryWaypoint", () => {
+  it("horizontal handle → aligns Y to anchor", () => {
+    expect(
+      alignBoundaryWaypoint({ x: 130, y: 100 }, { x: 50, y: 150 }, "right"),
+    ).toEqual({ x: 130, y: 150 });
+    expect(
+      alignBoundaryWaypoint({ x: 130, y: 100 }, { x: 50, y: 150 }, "left"),
+    ).toEqual({ x: 130, y: 150 });
+  });
+
+  it("vertical handle → aligns X to anchor", () => {
+    expect(
+      alignBoundaryWaypoint({ x: 100, y: 150 }, { x: 200, y: 50 }, "bottom"),
+    ).toEqual({ x: 200, y: 150 });
+    expect(
+      alignBoundaryWaypoint({ x: 100, y: 150 }, { x: 200, y: 50 }, "top"),
+    ).toEqual({ x: 200, y: 150 });
+  });
+
+  it("unknown handle → returns waypoint unchanged", () => {
+    const wp = { x: 130, y: 100 };
+    expect(alignBoundaryWaypoint(wp, { x: 50, y: 150 }, undefined)).toEqual(wp);
+  });
+});
+
+describe("effectivePoints — boundary alignment after node move", () => {
+  it("first waypoint snaps Y to current source.y when source moved", () => {
+    // User had previously placed waypoint[0] at (130, 100). Then the
+    // source node moved DOWN — its Y is now 150. The stored waypoint
+    // hasn't been updated. Render must still produce an orthogonal
+    // path → waypoint[0].y is snapped to current source.y=150.
+    const ws: Waypoint[] = [
+      { x: 130, y: 100 }, // stale Y from before the move
+      { x: 130, y: 200 },
+      { x: 250, y: 200 },
+    ];
+    const points = effectivePoints(
+      { x: 100, y: 150 }, // new source.y
+      ws,
+      { x: 400, y: 200 },
+      "right",
+      "left",
+    );
+    // Effective[0] = source, Effective[1] = first waypoint snapped:
+    expect(points[1]).toEqual({ x: 130, y: 150 });
+    // Effective[2..] = remaining waypoints + target preserved
+    expect(points[2]).toEqual({ x: 130, y: 200 });
+    expect(points[3]).toEqual({ x: 250, y: 200 });
+  });
+
+  it("last waypoint snaps Y to current target.y when target moved", () => {
+    const ws: Waypoint[] = [
+      { x: 130, y: 100 },
+      { x: 130, y: 200 },
+      { x: 250, y: 200 }, // stale Y for target which has now moved
+    ];
+    const points = effectivePoints(
+      { x: 100, y: 100 },
+      ws,
+      { x: 400, y: 250 }, // target moved to y=250
+      "right",
+      "left",
+    );
+    // last intermediate point snaps to new target.y=250
+    expect(points[points.length - 2]).toEqual({ x: 250, y: 250 });
+  });
+
+  it("vertical handles: first/last waypoint X snaps to source/target X", () => {
+    const ws: Waypoint[] = [
+      { x: 200, y: 150 },
+      { x: 200, y: 250 },
+      { x: 350, y: 250 },
+    ];
+    const points = effectivePoints(
+      { x: 220, y: 100 }, // source moved X
+      ws,
+      { x: 380, y: 300 }, // target moved X
+      "bottom",
+      "top",
+    );
+    expect(points[1].x).toBe(220);
+    expect(points[points.length - 2].x).toBe(380);
+  });
+
+  it("0 waypoints (auto-route): no adjustment needed", () => {
+    const points = effectivePoints(
+      { x: 100, y: 100 },
+      [],
+      { x: 400, y: 200 },
+      "right",
+      "left",
+    );
+    expect(points).toEqual([
+      { x: 100, y: 100 },
+      { x: 250, y: 100 },
+      { x: 250, y: 200 },
+      { x: 400, y: 200 },
+    ]);
   });
 });

@@ -42,6 +42,7 @@ import {
   effectivePoints,
   getEdgeWaypoints,
   getSegments,
+  magnetSnap,
   snapValue,
   type Segment,
 } from "./orthogonal-routing";
@@ -207,8 +208,18 @@ export default function BpmnSequenceEdge({
     // direction; if the user wiggles parallel we still only read the
     // perpendicular axis.
     const cursor = pointerToFlow(e);
-    const perp =
+    const rawPerp =
       drag.direction === "H" ? snapValue(cursor.y) : snapValue(cursor.x);
+    // Magnet-snap to source/target boundary coord when within 8px so
+    // the user can "align with the line" — without the magnet, source
+    // positions aren't on the 16px grid (e.g. y=272.99) and the user
+    // can never exactly hit alignment to collapse the path.
+    const perp = magnetSnap(
+      rawPerp,
+      drag.direction === "H" ? "y" : "x",
+      source,
+      target,
+    );
 
     const nextWaypoints = dragSegment({
       waypoints: liveWaypoints,
