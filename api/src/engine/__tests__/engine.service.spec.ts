@@ -313,7 +313,7 @@ function makeFakeTx(canvas: unknown) {
         orderBy: () => chain,
         limit: () => {
           if (lastDbSelectTable === "PROCESSES") {
-            return Promise.resolve([{ canvasData: canvas }]);
+            return Promise.resolve([{ canvasData: canvas, status: "ACTIVE" }]);
           }
           // PROCESS_VERSIONS lookups return empty so the engine takes
           // the create-version path.
@@ -749,10 +749,13 @@ describe("EngineService.startInstance", () => {
         orderBy: () => chain,
         limit: () => {
           if (routedTable === "PROCESSES") {
-            return Promise.resolve([{ canvasData: {
-              nodes: [{ id: "s", type: "startEvent" }, { id: "e", type: "endEvent" }],
-              edges: [{ id: "e1", source: "s", target: "e" }],
-            } }]);
+            return Promise.resolve([{
+              canvasData: {
+                nodes: [{ id: "s", type: "startEvent" }, { id: "e", type: "endEvent" }],
+                edges: [{ id: "e1", source: "s", target: "e" }],
+              },
+              status: "ACTIVE",
+            }]);
           }
           if (routedTable === "PROCESS_VERSIONS") {
             return Promise.resolve([{ id: "existing-ver" }]);
