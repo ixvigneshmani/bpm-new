@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  isPrivateIp,
   logHandler,
   noopHandler,
   restHandler,
@@ -131,12 +132,20 @@ const fakeErr = (status: number, body = ""): Response =>
 
 describe("restHandler (I2)", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  let prevAllow: string | undefined;
   beforeEach(() => {
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    // Bypass SSRF DNS resolution for the existing fixture URLs
+    // (api.example.com is reserved per RFC 2606 and may not resolve
+    // in CI). Dedicated SSRF tests below override this per-test.
+    prevAllow = process.env.REST_ALLOW_PRIVATE_HOSTS;
+    process.env.REST_ALLOW_PRIVATE_HOSTS = "1";
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    if (prevAllow === undefined) delete process.env.REST_ALLOW_PRIVATE_HOSTS;
+    else process.env.REST_ALLOW_PRIVATE_HOSTS = prevAllow;
   });
 
   it("rejects when implementation.type isn't rest", async () => {
@@ -316,5 +325,126 @@ describe("restHandler (I2)", () => {
     }));
     const [, init] = fetchMock.mock.calls[0];
     expect(init.headers["Content-Type"]).toBe("application/xml");
+  });
+});
+
+describe("restHandler SSRF guard (BUG-D2-01)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let prevAllow: string | undefined;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    // SSRF guard is ON for these tests.
+    prevAllow = process.env.REST_ALLOW_PRIVATE_HOSTS;
+    delete process.env.REST_ALLOW_PRIVATE_HOSTS;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (prevAllow === undefined) delete process.env.REST_ALLOW_PRIVATE_HOSTS;
+    else process.env.REST_ALLOW_PRIVATE_HOSTS = prevAllow;
+  });
+
+  function restInput(impl: { config: Record<string, unknown> }): ServiceTaskInput {
+    return baseInput({
+      nodeData: { implementation: { type: "rest", ...impl } },
+    });
+  }
+
+  it("isPrivateIp classifies common ranges", () => {
+    // Cloud metadata
+    expect(isPrivateIp("169.254.169.254")).toBe(true);
+    // RFC 1918
+    expect(isPrivateIp("10.0.0.1")).toBe(true);
+    expect(isPrivateIp("172.16.5.4")).toBe(true);
+    expect(isPrivateIp("172.31.255.254")).toBe(true);
+    expect(isPrivateIp("192.168.1.1")).toBe(true);
+    // Loopback
+    expect(isPrivateIp("127.0.0.1")).toBe(true);
+    // Unspecified
+    expect(isPrivateIp("0.0.0.0")).toBe(true);
+    // Multicast
+    expect(isPrivateIp("224.0.0.1")).toBe(true);
+    // IPv6 loopback / link-local / ULA
+    expect(isPrivateIp("::1")).toBe(true);
+    expect(isPrivateIp("fe80::1")).toBe(true);
+    expect(isPrivateIp("fc00::1")).toBe(true);
+    // IPv4-mapped IPv6 of a private v4
+    expect(isPrivateIp("::ffff:10.0.0.1")).toBe(true);
+    // Public — should NOT be classified private
+    expect(isPrivateIp("8.8.8.8")).toBe(false);
+    expect(isPrivateIp("1.1.1.1")).toBe(false);
+    // 172.32 is OUTSIDE the 172.16/12 RFC 1918 range
+    expect(isPrivateIp("172.32.0.1")).toBe(false);
+  });
+
+  it("rejects non-http schemes", async () => {
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "file:///etc/passwd" },
+      })),
+    ).rejects.toThrow(/scheme.*not allowed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects literal cloud-metadata IP in URL", async () => {
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "http://169.254.169.254/latest/meta-data/" },
+      })),
+    ).rejects.toThrow(/private \/ loopback \/ link-local \/ multicast/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects literal loopback IP in URL", async () => {
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "http://127.0.0.1:3001/api/admin" },
+      })),
+    ).rejects.toThrow(/private \/ loopback/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects literal RFC 1918 IP in URL", async () => {
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "http://10.0.0.5/" },
+      })),
+    ).rejects.toThrow(/private \/ loopback/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects literal IPv6 loopback", async () => {
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "http://[::1]/" },
+      })),
+    ).rejects.toThrow(/private \/ loopback/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects URL whose hostname resolves to a private IP (RFC 6761 .test TLD never resolves to public IP)", async () => {
+    // .test is reserved per RFC 6761; OS resolvers either return
+    // NXDOMAIN or a configured stub. Either way it'll never be public.
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "http://internal.test/" },
+      })),
+    ).rejects.toThrow(/DNS lookup|private \/ loopback/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("REST_ALLOW_PRIVATE_HOSTS=1 bypasses the guard", async () => {
+    process.env.REST_ALLOW_PRIVATE_HOSTS = "1";
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "{}",
+    } as Response);
+    await expect(
+      restHandler(restInput({
+        config: { method: "GET", url: "http://127.0.0.1:3001/health" },
+      })),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

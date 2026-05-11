@@ -20,6 +20,87 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import { Injectable, Logger } from "@nestjs/common";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
+/** Block-list of IP ranges a serviceTask MUST NOT reach. The single
+ *  most dangerous target is 169.254.169.254 (AWS/GCP/Azure metadata) —
+ *  it serves IAM credentials to anything that asks. Loopback + RFC1918
+ *  + CGNAT + multicast are also blocked because tenants shouldn't be
+ *  able to hit the API's own host or peers on the internal network. */
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split(".").map((p) => parseInt(p, 10));
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return true;
+  const [a, b] = parts;
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 10) return true; // RFC 1918
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local + metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; // RFC 1918
+  if (a === 192 && b === 168) return true; // RFC 1918
+  if (a >= 100 && a <= 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  if (a >= 224) return true; // multicast + reserved
+  return false;
+}
+
+function isPrivateIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === "::1" || lower === "::") return true;
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // ULA fc00::/7
+  if (lower.startsWith("fe80") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) return true; // link-local fe80::/10
+  if (lower.startsWith("ff")) return true; // multicast
+  // IPv4-mapped: ::ffff:a.b.c.d
+  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return isPrivateIPv4(mapped[1]);
+  return false;
+}
+
+export function isPrivateIp(ip: string): boolean {
+  if (isIP(ip) === 4) return isPrivateIPv4(ip);
+  if (isIP(ip) === 6) return isPrivateIPv6(ip);
+  return true; // unparseable → block
+}
+
+async function assertSsrfSafe(parsedUrl: URL): Promise<void> {
+  if (process.env.REST_ALLOW_PRIVATE_HOSTS === "1") return;
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error(
+      `rest handler: scheme "${parsedUrl.protocol.replace(":", "")}" is not allowed (http/https only).`,
+    );
+  }
+  // Node's URL keeps the brackets on IPv6 literal hostnames (e.g.
+  // "[::1]"); strip them so isIP() can recognise the address.
+  const host = parsedUrl.hostname.replace(/^\[(.+)\]$/, "$1");
+  // Literal IP in URL — check directly.
+  if (isIP(host)) {
+    if (isPrivateIp(host)) {
+      throw new Error(
+        `rest handler: target IP ${host} is in a private / loopback / link-local / multicast range and refused. Set REST_ALLOW_PRIVATE_HOSTS=1 to override.`,
+      );
+    }
+    return;
+  }
+  // Hostname — resolve and check every address. all:true returns every
+  // record so we don't miss a dual-stack metadata host. Single lookup
+  // here means a (rare) TOCTOU window vs an attacker-controlled DNS
+  // that flips records between this check and fetch(); accepted v0
+  // risk vs the engineering cost of socket-level address pinning.
+  let addrs: { address: string; family: number }[];
+  try {
+    addrs = await dnsLookup(host, { all: true });
+  } catch (e) {
+    throw new Error(
+      `rest handler: DNS lookup for "${host}" failed: ${(e as Error).message}`,
+    );
+  }
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) {
+      throw new Error(
+        `rest handler: hostname "${host}" resolves to ${a.address}, which is in a private / loopback / link-local / multicast range and refused. Set REST_ALLOW_PRIVATE_HOSTS=1 to override.`,
+      );
+    }
+  }
+}
 
 /** The single topic ENGINE_JOBS rows for serviceTasks use. The
  *  per-canvas user topic (`node.data.implementation.config.jobType`)
@@ -261,13 +342,22 @@ export const restHandler: ServiceTaskHandler = async (input) => {
   let url = interpolateRestTemplate(rawUrl, input.variables);
   // Validate URL parses before adding query params — clearer error
   // than letting `new URL` blow up halfway through the builder.
+  let parsedUrl: URL;
   try {
-    new URL(url);
+    parsedUrl = new URL(url);
   } catch (e) {
     throw new Error(
       `rest handler: invalid URL after variable interpolation ("${url}"): ${(e as Error).message}`,
     );
   }
+  // SSRF guard: only http/https; reject hostnames that resolve to
+  // private / loopback / link-local / multicast IPs. Cloud metadata
+  // endpoints (169.254.169.254 on AWS/GCP/Azure) are the canonical
+  // worry — a tenant author who points a serviceTask there could
+  // exfiltrate IAM credentials.
+  // Opt-out: REST_ALLOW_PRIVATE_HOSTS=1 (for dev/test / explicit
+  // internal-callback deployments).
+  await assertSsrfSafe(parsedUrl);
 
   // Build query string from queryParams (if any). Each value goes
   // through interpolation too so `${env}` etc. resolve.
