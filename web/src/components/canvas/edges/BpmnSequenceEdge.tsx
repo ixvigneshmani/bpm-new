@@ -152,9 +152,17 @@ export default function BpmnSequenceEdge({
   const effectiveMarkerEnd = isAssociation ? undefined : markerEnd;
 
   // ── Drag state ────────────────────────────────────────────────────
-  const draggingRef = useRef<{ segmentIndex: number; pointerId: number } | null>(
-    null,
-  );
+  // `materialised` flips true after the FIRST move of a drag that hit
+  // a source/target-anchored segment. The first move inserts the two
+  // offset corners; every subsequent move treats the now-interior
+  // segment as a normal interior drag (otherwise we'd insert two MORE
+  // corners on every pointermove → tangled mess).
+  const draggingRef = useRef<{
+    segmentIndex: number;
+    pointerId: number;
+    direction: "H" | "V";
+    materialised: boolean;
+  } | null>(null);
 
   function pointerToFlow(e: ReactPointerEvent<SVGElement>): { x: number; y: number } {
     return screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -162,24 +170,46 @@ export default function BpmnSequenceEdge({
 
   function onDragStart(e: ReactPointerEvent<SVGElement>, segmentIndex: number): void {
     if (!useOrthogonal) return;
+    if (segmentIndex < 0 || segmentIndex >= segments.length) return;
     e.stopPropagation();
     e.preventDefault();
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    draggingRef.current = { segmentIndex, pointerId: e.pointerId };
+    draggingRef.current = {
+      segmentIndex,
+      pointerId: e.pointerId,
+      direction: segments[segmentIndex].direction,
+      materialised: false,
+    };
   }
 
   function onDragMove(e: ReactPointerEvent<SVGElement>): void {
     const drag = draggingRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    if (!useOrthogonal || drag.segmentIndex >= segments.length) return;
-    const seg = segments[drag.segmentIndex];
-    const cursor = pointerToFlow(e);
-    // Perpendicular drag only — for H segments we read cursor Y; for
-    // V segments we read cursor X. Snap to the canvas grid.
-    const perp = seg.direction === "H" ? snapValue(cursor.y) : snapValue(cursor.x);
+    if (!drag || drag.pointerId !== e.pointerId || !useOrthogonal) return;
+
+    // Recompute live segments from the LATEST store state so we know
+    // the current anchoring of drag.segmentIndex.
     const liveWaypoints = getEdgeWaypoints(
       useCanvasStore.getState().edges.find((edge) => edge.id === id)?.data,
     );
+    const livePoints = effectivePoints(
+      source,
+      liveWaypoints,
+      target,
+      sourcePosition,
+      targetPosition,
+    );
+    const liveSegments = getSegments(livePoints);
+    if (drag.segmentIndex >= liveSegments.length) return;
+    const liveSeg = liveSegments[drag.segmentIndex];
+
+    // Perpendicular value — read the cursor's axis matching the
+    // segment's perpendicular. Stays locked to the original segment
+    // direction; if the user wiggles parallel we still only read the
+    // perpendicular axis.
+    const cursor = pointerToFlow(e);
+    const perp =
+      drag.direction === "H" ? snapValue(cursor.y) : snapValue(cursor.x);
+
     const nextWaypoints = dragSegment({
       waypoints: liveWaypoints,
       segmentIndex: drag.segmentIndex,
@@ -189,6 +219,32 @@ export default function BpmnSequenceEdge({
       sourcePos: sourcePosition,
       targetPos: targetPosition,
     });
+
+    // First-move bookkeeping: if the segment we just dragged was
+    // anchored to source or target, dragSegment INSERTED two new
+    // corners to materialise the offset. The segment user is now
+    // dragging has shifted INDEX in the new segment list:
+    //   - source-anchored insert → new index = old index + 2
+    //     (because two new segments are prepended before it)
+    //   - target-anchored insert → new index = old index
+    //     (insertion is at the END of waypoints, doesn't shift this
+    //     segment's position in the list)
+    // After this re-indexing, every subsequent pointermove treats
+    // the user's segment as INTERIOR — no more insertions, just slide.
+    if (!drag.materialised) {
+      if (liveSeg.isSourceAnchored && !liveSeg.isTargetAnchored) {
+        drag.segmentIndex += 2;
+        drag.materialised = true;
+      } else if (liveSeg.isTargetAnchored && !liveSeg.isSourceAnchored) {
+        // index unchanged but flag set so we don't re-enter the
+        // insertion branch on a future move.
+        drag.materialised = true;
+      } else {
+        // Interior — nothing to materialise.
+        drag.materialised = true;
+      }
+    }
+
     updateEdgeData(id, {
       waypoints: nextWaypoints.length > 0 ? nextWaypoints : undefined,
     });
