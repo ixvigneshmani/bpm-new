@@ -1,20 +1,22 @@
 /* ─── BpmnSequenceEdge ────────────────────────────────────────────────
  * Custom edge that renders:
- *  - The line (smoothstep path, OR a user-routed polyline when
- *    edge.data.waypoints is populated — GAP-04)
- *  - Draggable handles per waypoint + "+ here" handles per segment for
- *    inserting new waypoints
- *  - Right-click context menu: remove a waypoint, reset routing
- *  - An editable label (double-click to rename)
- *  - A default-flow slash marker near the source if data.isDefault
- *  - Highlight when selected
+ *  - An orthogonal H-V-H (or V-H-V) route. ONE draggable handle on
+ *    the middle segment, constrained to perpendicular drag — slides
+ *    that segment to wherever the user wants the bend (GAP-04 v2).
+ *  - Editable label (double-click to rename), offset above the line
+ *    so it doesn't sit on top of the handle.
+ *  - Default-flow slash marker near the source if data.isDefault.
+ *  - Highlight when selected.
+ *
+ * Falls back to React Flow's smoothstep when the source/target use
+ * mixed orientations (e.g. right→top) — those edges have no obvious
+ * single bend axis, so we don't show a drag handle for them.
  * ──────────────────────────────────────────────────────────────────── */
 
 import {
   useState,
   useRef,
   useEffect,
-  useMemo,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type MouseEvent as ReactMouseEvent,
@@ -28,28 +30,16 @@ import {
 } from "@xyflow/react";
 import useCanvasStore from "../../../store/canvas-store";
 import {
-  buildPolylinePath,
-  getEdgeWaypoints,
-  insertWaypoint,
-  mergeNearbyWaypoints,
-  polylineLabelPoint,
-  removeWaypoint,
-  segmentMidpoints,
-  snapWaypoint,
-  updateWaypointAt,
-  type Waypoint,
-} from "./waypoints";
+  buildOrthogonalPath,
+  getAutoBend,
+  getBendAxis,
+  getBendHandlePosition,
+  getEdgeBend,
+  snapBend,
+} from "./orthogonal-bend";
 
 const SELECTED_COLOR = "#6366F1";
 const DEFAULT_COLOR = "#94A3B8";
-const HANDLE_FILL = "#fff";
-
-type ContextMenuState = {
-  x: number;
-  y: number;
-  /** index into waypoints[]; -1 means "no waypoint under cursor (edge body)". */
-  waypointIndex: number;
-};
 
 export default function BpmnSequenceEdge({
   id,
@@ -69,14 +59,12 @@ export default function BpmnSequenceEdge({
   const updateEdgeData = useCanvasStore((s) => s.updateEdgeData);
   const { screenToFlowPosition } = useReactFlow();
 
-  const waypoints = useMemo(() => getEdgeWaypoints(data), [data]);
+  const axis = getBendAxis(sourcePosition, targetPosition);
+  const storedBend = getEdgeBend(data);
+  const autoBend = getAutoBend(sourceX, sourceY, targetX, targetY, axis);
+  const bendValue = storedBend ?? autoBend;
 
-  const source: Waypoint = { x: sourceX, y: sourceY };
-  const target: Waypoint = { x: targetX, y: targetY };
-
-  // Edge path: smoothstep when no waypoints (preserves the existing
-  // look for every existing edge in every existing process); polyline
-  // through user-set waypoints otherwise.
+  // Smoothstep fallback for mixed-orientation edges (no clear bend axis).
   const [smoothPath, smoothLabelX, smoothLabelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -86,11 +74,14 @@ export default function BpmnSequenceEdge({
     targetPosition,
     borderRadius: 12,
   });
-  const usePolyline = waypoints.length > 0;
-  const edgePath = usePolyline ? buildPolylinePath(source, waypoints, target) : smoothPath;
 
-  const labelPoint = usePolyline
-    ? polylineLabelPoint(source, waypoints, target)
+  const useOrthogonal = axis !== null;
+  const edgePath = useOrthogonal
+    ? buildOrthogonalPath(sourceX, sourceY, targetX, targetY, axis, bendValue)
+    : smoothPath;
+
+  const labelPoint = useOrthogonal
+    ? getBendHandlePosition(sourceX, sourceY, targetX, targetY, axis, bendValue)
     : { x: smoothLabelX, y: smoothLabelY };
 
   const isDefault = !!(data && (data as { isDefault?: boolean }).isDefault);
@@ -115,55 +106,30 @@ export default function BpmnSequenceEdge({
 
   const effectiveMarkerEnd = isAssociation ? undefined : markerEnd;
 
-  // ── Drag state ────────────────────────────────────────────────────
-  // A live-drag is reflected by setting `dragging` to {index, point}.
-  // The store is updated on every move tick (cheap — single Map.set).
-  const draggingRef = useRef<{ index: number; pointerId: number } | null>(null);
+  // ── Bend handle drag ────────────────────────────────────────────────
+  const draggingRef = useRef<{ pointerId: number } | null>(null);
 
-  function commitWaypoints(next: Waypoint[]): void {
-    const cleaned = mergeNearbyWaypoints(next);
-    updateEdgeData(id, { waypoints: cleaned.length > 0 ? cleaned : undefined });
-  }
-
-  function pointerToFlow(e: ReactPointerEvent<SVGElement>): Waypoint {
+  function pointerToFlow(e: ReactPointerEvent<SVGElement>): { x: number; y: number } {
     const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-    return snapWaypoint({ x: flow.x, y: flow.y });
+    return flow;
   }
 
-  function startDragExistingWaypoint(
-    e: ReactPointerEvent<SVGElement>,
-    index: number,
-  ): void {
+  function onDragStart(e: ReactPointerEvent<SVGElement>): void {
+    if (axis === null) return; // no draggable bend on smoothstep fallback
     e.stopPropagation();
     e.preventDefault();
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    draggingRef.current = { index, pointerId: e.pointerId };
-  }
-
-  function startDragNewWaypoint(
-    e: ReactPointerEvent<SVGElement>,
-    insertAtIndex: number,
-  ): void {
-    e.stopPropagation();
-    e.preventDefault();
-    // Insert immediately at the segment midpoint so the user "grabs" a
-    // real waypoint they can drag, then continue tracking it.
-    const initial = pointerToFlow(e);
-    const next = insertWaypoint(waypoints, insertAtIndex, initial);
-    commitWaypoints(next);
-    (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    draggingRef.current = { index: insertAtIndex, pointerId: e.pointerId };
+    draggingRef.current = { pointerId: e.pointerId };
   }
 
   function onDragMove(e: ReactPointerEvent<SVGElement>): void {
     const drag = draggingRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    const next = updateWaypointAt(
-      getEdgeWaypoints(useCanvasStore.getState().edges.find((edge) => edge.id === id)?.data),
-      drag.index,
-      pointerToFlow(e),
-    );
-    updateEdgeData(id, { waypoints: next.length > 0 ? next : undefined });
+    if (!drag || drag.pointerId !== e.pointerId || axis === null) return;
+    const flow = pointerToFlow(e);
+    // Perpendicular drag only — for axis "x" we read the cursor's flow X
+    // (the segment slides left-right). For axis "y" we read flow Y.
+    const newBend = snapBend(axis === "x" ? flow.x : flow.y);
+    updateEdgeData(id, { bend: newBend });
   }
 
   function onDragEnd(e: ReactPointerEvent<SVGElement>): void {
@@ -172,47 +138,26 @@ export default function BpmnSequenceEdge({
     try {
       (e.currentTarget as Element).releasePointerCapture(e.pointerId);
     } catch {
-      // pointer may have been released by the browser already; ignore.
+      // Pointer may already have been released by the browser; ignore.
     }
     draggingRef.current = null;
-    // Final merge-near-duplicates pass — covers the "user dragged
-    // waypoint onto its neighbour" gesture.
-    const current = getEdgeWaypoints(
-      useCanvasStore.getState().edges.find((edge) => edge.id === id)?.data,
-    );
-    commitWaypoints(current);
   }
 
   // ── Context menu (right-click) ────────────────────────────────────
-  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
-  function openMenuForEdge(e: ReactMouseEvent<SVGPathElement>): void {
-    if (!selected) return; // only when edge is the focus
+  function openMenu(e: ReactMouseEvent<SVGElement>): void {
+    if (axis === null) return; // no routing to reset on smoothstep fallback
     e.preventDefault();
     e.stopPropagation();
-    setMenu({ x: e.clientX, y: e.clientY, waypointIndex: -1 });
+    setMenu({ x: e.clientX, y: e.clientY });
   }
 
-  function openMenuForWaypoint(
-    e: ReactMouseEvent<SVGCircleElement>,
-    index: number,
-  ): void {
-    e.preventDefault();
-    e.stopPropagation();
-    setMenu({ x: e.clientX, y: e.clientY, waypointIndex: index });
-  }
-
-  function handleMenuAction(action: "remove" | "reset"): void {
-    if (action === "reset") {
-      updateEdgeData(id, { waypoints: undefined });
-    } else if (action === "remove" && menu && menu.waypointIndex >= 0) {
-      const next = removeWaypoint(waypoints, menu.waypointIndex);
-      updateEdgeData(id, { waypoints: next.length > 0 ? next : undefined });
-    }
+  function resetRouting(): void {
+    updateEdgeData(id, { bend: undefined });
     setMenu(null);
   }
 
-  // Close context menu on any outside click
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
@@ -242,26 +187,17 @@ export default function BpmnSequenceEdge({
     if (draft !== label) updateEdgeLabel(id, draft);
   };
 
-  // Default-flow slash marker
   const slashOffset = computeSlashTransform(sourceX, sourceY, sourcePosition);
 
-  // Show waypoint handles + midpoint "+" handles when the edge is
-  // selected OR hovered. Selection alone is too discoverable — users
-  // drag, they don't always click first.
+  // Drag handle shows when the edge is selected OR hovered. Hover-only
+  // discovery is the convention BPM tools use (Lucidchart/Camunda).
   const [hovered, setHovered] = useState(false);
-  const showHandles = (selected || hovered) && !isAssociation;
-  // When the edge has 0 waypoints we render smoothstep — a curved
-  // path that does NOT go through the straight-line midpoint of
-  // source→target. So put the single "+ here" handle at React Flow's
-  // own labelX/labelY (the centre of the smoothstep path) — that's
-  // the only place where the handle sits ON the visible line.
-  // Once the user adds even one waypoint we switch to the polyline
-  // and the segment midpoints are then accurate.
-  const midpoints = useMemo(() => {
-    if (!showHandles) return [];
-    if (waypoints.length === 0) return [{ x: smoothLabelX, y: smoothLabelY }];
-    return segmentMidpoints(source, waypoints, target);
-  }, [showHandles, source.x, source.y, target.x, target.y, waypoints, smoothLabelX, smoothLabelY]);
+  const showHandle = useOrthogonal && (selected || hovered) && !isAssociation;
+  const handlePos = useOrthogonal ? labelPoint : null;
+
+  // Cursor for the drag handle — horizontal-resize for axis x (slide
+  // sideways), vertical-resize for axis y. Reads "this slides".
+  const handleCursor = axis === "x" ? "ew-resize" : axis === "y" ? "ns-resize" : "grab";
 
   return (
     <>
@@ -270,7 +206,7 @@ export default function BpmnSequenceEdge({
         path={edgePath}
         markerEnd={effectiveMarkerEnd}
         style={pathStyle}
-        onContextMenu={openMenuForEdge}
+        onContextMenu={openMenu}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       />
@@ -289,80 +225,57 @@ export default function BpmnSequenceEdge({
         </g>
       )}
 
-      {/* Existing waypoint handles — draggable circles. Drawn last so
-          they're hit-test-first under the cursor. White fill + indigo
-          stroke makes them readable against any background. */}
-      {showHandles &&
-        waypoints.map((w, i) => (
-          <g key={`wp-${i}`}>
-            <circle
-              cx={w.x}
-              cy={w.y}
-              r={6}
-              fill={HANDLE_FILL}
-              stroke={SELECTED_COLOR}
-              strokeWidth={2}
-              style={{ cursor: "grab", pointerEvents: "all" }}
-              onPointerDown={(e) => startDragExistingWaypoint(e, i)}
-              onPointerMove={onDragMove}
-              onPointerUp={onDragEnd}
-              onPointerCancel={onDragEnd}
-              onContextMenu={(e) => openMenuForWaypoint(e, i)}
-            />
-          </g>
-        ))}
+      {/* The one bend-handle. Sits on the middle segment; drags it
+          perpendicular to its own direction. */}
+      {showHandle && handlePos && (
+        <g
+          style={{ cursor: handleCursor, pointerEvents: "all" }}
+          onPointerDown={onDragStart}
+          onPointerMove={onDragMove}
+          onPointerUp={onDragEnd}
+          onPointerCancel={onDragEnd}
+          onContextMenu={openMenu}
+        >
+          <circle
+            cx={handlePos.x}
+            cy={handlePos.y}
+            r={7}
+            fill={SELECTED_COLOR}
+            stroke="#fff"
+            strokeWidth={2}
+          />
+          {/* Two short white strokes indicating which way it slides:
+              "↔" for axis x, "↕" for axis y. */}
+          {axis === "x" ? (
+            <>
+              <line
+                x1={handlePos.x - 4}
+                y1={handlePos.y}
+                x2={handlePos.x + 4}
+                y2={handlePos.y}
+                stroke="#fff"
+                strokeWidth={1.5}
+                strokeLinecap="round"
+                pointerEvents="none"
+              />
+            </>
+          ) : (
+            <>
+              <line
+                x1={handlePos.x}
+                y1={handlePos.y - 4}
+                x2={handlePos.x}
+                y2={handlePos.y + 4}
+                stroke="#fff"
+                strokeWidth={1.5}
+                strokeLinecap="round"
+                pointerEvents="none"
+              />
+            </>
+          )}
+        </g>
+      )}
 
-      {/* "+ here" midpoint handles — drag from one to insert a new
-          waypoint. Visually distinct from existing waypoints: white
-          fill + DASHED indigo stroke + tiny "+" sign so the affordance
-          ("add a point") reads at a glance. Slightly larger than the
-          old 4px so they don't disappear into the edge line. */}
-      {showHandles &&
-        midpoints.map((m, i) => (
-          <g
-            key={`mid-${i}`}
-            style={{ cursor: "crosshair", pointerEvents: "all" }}
-            onPointerDown={(e) => startDragNewWaypoint(e, i)}
-            onPointerMove={onDragMove}
-            onPointerUp={onDragEnd}
-            onPointerCancel={onDragEnd}
-          >
-            <circle
-              cx={m.x}
-              cy={m.y}
-              r={7}
-              fill={SELECTED_COLOR}
-              stroke="#fff"
-              strokeWidth={2}
-            />
-            {/* White "+" glyph against the indigo fill — reads as a
-                button-style "add point here" affordance. Strokes
-                instead of a font glyph so it scales cleanly. */}
-            <line
-              x1={m.x - 3}
-              y1={m.y}
-              x2={m.x + 3}
-              y2={m.y}
-              stroke="#fff"
-              strokeWidth={1.6}
-              strokeLinecap="round"
-              pointerEvents="none"
-            />
-            <line
-              x1={m.x}
-              y1={m.y - 3}
-              x2={m.x}
-              y2={m.y + 3}
-              stroke="#fff"
-              strokeWidth={1.6}
-              strokeLinecap="round"
-              pointerEvents="none"
-            />
-          </g>
-        ))}
-
-      {/* Context menu — HTML rendered into EdgeLabelRenderer so it
-          escapes the SVG viewport transform. */}
       {menu && (
         <EdgeLabelRenderer>
           <div
@@ -383,18 +296,10 @@ export default function BpmnSequenceEdge({
             }}
             onMouseDown={(e) => e.stopPropagation()}
           >
-            {menu.waypointIndex >= 0 && (
-              <button
-                onClick={() => handleMenuAction("remove")}
-                style={menuItem}
-              >
-                Remove this waypoint
-              </button>
-            )}
             <button
-              onClick={() => handleMenuAction("reset")}
+              onClick={resetRouting}
               style={menuItem}
-              disabled={waypoints.length === 0}
+              disabled={storedBend === undefined}
             >
               Reset routing
             </button>
@@ -408,13 +313,9 @@ export default function BpmnSequenceEdge({
             className="nodrag nopan"
             style={{
               position: "absolute",
-              // Offset the label 18px ABOVE the edge so:
-              //   (1) it doesn't sit on top of the midpoint "+ here"
-              //       handle and steal clicks/drag-starts
-              //   (2) the user can read the condition/label without it
-              //       crossing the line itself (cleaner BPMN diagram).
-              // Use translate(-50%, -100%) to anchor the label's BOTTOM
-              // centre at (labelPoint.x, labelPoint.y - 12).
+              // Anchor the label's BOTTOM CENTRE 12px above the bend
+              // handle so it doesn't sit on the line or steal clicks
+              // from the handle below it.
               transform: `translate(-50%, -100%) translate(${labelPoint.x}px, ${labelPoint.y - 12}px)`,
               pointerEvents: "all",
               zIndex: 1000,
