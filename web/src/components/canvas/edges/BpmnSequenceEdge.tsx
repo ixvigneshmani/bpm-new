@@ -1,22 +1,28 @@
 /* ─── BpmnSequenceEdge ────────────────────────────────────────────────
- * Custom edge that renders:
- *  - An orthogonal H-V-H (or V-H-V) route. ONE draggable handle on
- *    the middle segment, constrained to perpendicular drag — slides
- *    that segment to wherever the user wants the bend (GAP-04 v2).
- *  - Editable label (double-click to rename), offset above the line
- *    so it doesn't sit on top of the handle.
- *  - Default-flow slash marker near the source if data.isDefault.
- *  - Highlight when selected.
+ * Orthogonal multi-segment routing (GAP-04 v3).
  *
- * Falls back to React Flow's smoothstep when the source/target use
- * mixed orientations (e.g. right→top) — those edges have no obvious
- * single bend axis, so we don't show a drag handle for them.
+ * - Path is always strictly orthogonal — right angles only, no
+ *   diagonals possible.
+ * - Every segment has a draggable midpoint handle. Drag is constrained
+ *   to perpendicular direction:
+ *     • horizontal segment → drag ↕ vertical
+ *     • vertical segment   → drag ↔ horizontal
+ * - Interior segments slide bodily; source/target-anchored segments
+ *   insert new waypoints to materialise the offset (same as Camunda
+ *   Modeler / bpmn.io).
+ * - Right-click → "Reset routing" clears all waypoints, reverts to
+ *   default auto-route.
+ *
+ * Falls back to React Flow's smoothstep for mixed source/target
+ * orientations (right→top etc.) — no obvious orthogonal route, so no
+ * drag handles for those edges.
  * ──────────────────────────────────────────────────────────────────── */
 
 import {
   useState,
   useRef,
   useEffect,
+  useMemo,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type MouseEvent as ReactMouseEvent,
@@ -31,12 +37,14 @@ import {
 import useCanvasStore from "../../../store/canvas-store";
 import {
   buildOrthogonalPath,
-  getAutoBend,
-  getBendAxis,
-  getBendHandlePosition,
-  getEdgeBend,
-  snapBend,
-} from "./orthogonal-bend";
+  canRouteOrthogonally,
+  dragSegment,
+  effectivePoints,
+  getEdgeWaypoints,
+  getSegments,
+  snapValue,
+  type Segment,
+} from "./orthogonal-routing";
 
 const SELECTED_COLOR = "#6366F1";
 const DEFAULT_COLOR = "#94A3B8";
@@ -59,12 +67,37 @@ export default function BpmnSequenceEdge({
   const updateEdgeData = useCanvasStore((s) => s.updateEdgeData);
   const { screenToFlowPosition } = useReactFlow();
 
-  const axis = getBendAxis(sourcePosition, targetPosition);
-  const storedBend = getEdgeBend(data);
-  const autoBend = getAutoBend(sourceX, sourceY, targetX, targetY, axis);
-  const bendValue = storedBend ?? autoBend;
+  const useOrthogonal = canRouteOrthogonally(sourcePosition, targetPosition);
 
-  // Smoothstep fallback for mixed-orientation edges (no clear bend axis).
+  const waypoints = useMemo(() => getEdgeWaypoints(data), [data]);
+  const source = { x: sourceX, y: sourceY };
+  const target = { x: targetX, y: targetY };
+
+  const points = useMemo(
+    () =>
+      useOrthogonal
+        ? effectivePoints(source, waypoints, target, sourcePosition, targetPosition)
+        : [],
+    [
+      useOrthogonal,
+      sourceX,
+      sourceY,
+      targetX,
+      targetY,
+      sourcePosition,
+      targetPosition,
+      waypoints,
+    ],
+  );
+
+  const segments: Segment[] = useMemo(
+    () => (useOrthogonal && points.length >= 2 ? getSegments(points) : []),
+    [useOrthogonal, points],
+  );
+
+  // Smoothstep fallback for mixed-orientation edges (no clean
+  // orthogonal route exists). React Flow still gives us a sensible
+  // path + label coord for the fallback.
   const [smoothPath, smoothLabelX, smoothLabelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -75,14 +108,26 @@ export default function BpmnSequenceEdge({
     borderRadius: 12,
   });
 
-  const useOrthogonal = axis !== null;
-  const edgePath = useOrthogonal
-    ? buildOrthogonalPath(sourceX, sourceY, targetX, targetY, axis, bendValue)
-    : smoothPath;
+  const edgePath = useOrthogonal ? buildOrthogonalPath(points) : smoothPath;
 
-  const labelPoint = useOrthogonal
-    ? getBendHandlePosition(sourceX, sourceY, targetX, targetY, axis, bendValue)
-    : { x: smoothLabelX, y: smoothLabelY };
+  // Label anchor: pick the longest segment's midpoint so the label
+  // sits in clear space, not on a corner. Fall back to smoothstep
+  // label coords for the mixed-orientation case.
+  const labelPoint = useMemo(() => {
+    if (!useOrthogonal || segments.length === 0) {
+      return { x: smoothLabelX, y: smoothLabelY };
+    }
+    let best = segments[0];
+    let bestLen = segLength(best);
+    for (let i = 1; i < segments.length; i++) {
+      const l = segLength(segments[i]);
+      if (l > bestLen) {
+        best = segments[i];
+        bestLen = l;
+      }
+    }
+    return best.midpoint;
+  }, [useOrthogonal, segments, smoothLabelX, smoothLabelY]);
 
   const isDefault = !!(data && (data as { isDefault?: boolean }).isDefault);
   const flowType =
@@ -106,30 +151,47 @@ export default function BpmnSequenceEdge({
 
   const effectiveMarkerEnd = isAssociation ? undefined : markerEnd;
 
-  // ── Bend handle drag ────────────────────────────────────────────────
-  const draggingRef = useRef<{ pointerId: number } | null>(null);
+  // ── Drag state ────────────────────────────────────────────────────
+  const draggingRef = useRef<{ segmentIndex: number; pointerId: number } | null>(
+    null,
+  );
 
   function pointerToFlow(e: ReactPointerEvent<SVGElement>): { x: number; y: number } {
-    const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-    return flow;
+    return screenToFlowPosition({ x: e.clientX, y: e.clientY });
   }
 
-  function onDragStart(e: ReactPointerEvent<SVGElement>): void {
-    if (axis === null) return; // no draggable bend on smoothstep fallback
+  function onDragStart(e: ReactPointerEvent<SVGElement>, segmentIndex: number): void {
+    if (!useOrthogonal) return;
     e.stopPropagation();
     e.preventDefault();
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    draggingRef.current = { pointerId: e.pointerId };
+    draggingRef.current = { segmentIndex, pointerId: e.pointerId };
   }
 
   function onDragMove(e: ReactPointerEvent<SVGElement>): void {
     const drag = draggingRef.current;
-    if (!drag || drag.pointerId !== e.pointerId || axis === null) return;
-    const flow = pointerToFlow(e);
-    // Perpendicular drag only — for axis "x" we read the cursor's flow X
-    // (the segment slides left-right). For axis "y" we read flow Y.
-    const newBend = snapBend(axis === "x" ? flow.x : flow.y);
-    updateEdgeData(id, { bend: newBend });
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    if (!useOrthogonal || drag.segmentIndex >= segments.length) return;
+    const seg = segments[drag.segmentIndex];
+    const cursor = pointerToFlow(e);
+    // Perpendicular drag only — for H segments we read cursor Y; for
+    // V segments we read cursor X. Snap to the canvas grid.
+    const perp = seg.direction === "H" ? snapValue(cursor.y) : snapValue(cursor.x);
+    const liveWaypoints = getEdgeWaypoints(
+      useCanvasStore.getState().edges.find((edge) => edge.id === id)?.data,
+    );
+    const nextWaypoints = dragSegment({
+      waypoints: liveWaypoints,
+      segmentIndex: drag.segmentIndex,
+      perpendicularValue: perp,
+      source,
+      target,
+      sourcePos: sourcePosition,
+      targetPos: targetPosition,
+    });
+    updateEdgeData(id, {
+      waypoints: nextWaypoints.length > 0 ? nextWaypoints : undefined,
+    });
   }
 
   function onDragEnd(e: ReactPointerEvent<SVGElement>): void {
@@ -138,7 +200,7 @@ export default function BpmnSequenceEdge({
     try {
       (e.currentTarget as Element).releasePointerCapture(e.pointerId);
     } catch {
-      // Pointer may already have been released by the browser; ignore.
+      // pointer already released by browser; ignore.
     }
     draggingRef.current = null;
   }
@@ -147,14 +209,14 @@ export default function BpmnSequenceEdge({
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   function openMenu(e: ReactMouseEvent<SVGElement>): void {
-    if (axis === null) return; // no routing to reset on smoothstep fallback
+    if (!useOrthogonal) return;
     e.preventDefault();
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY });
   }
 
   function resetRouting(): void {
-    updateEdgeData(id, { bend: undefined });
+    updateEdgeData(id, { waypoints: undefined });
     setMenu(null);
   }
 
@@ -189,15 +251,8 @@ export default function BpmnSequenceEdge({
 
   const slashOffset = computeSlashTransform(sourceX, sourceY, sourcePosition);
 
-  // Drag handle shows when the edge is selected OR hovered. Hover-only
-  // discovery is the convention BPM tools use (Lucidchart/Camunda).
   const [hovered, setHovered] = useState(false);
-  const showHandle = useOrthogonal && (selected || hovered) && !isAssociation;
-  const handlePos = useOrthogonal ? labelPoint : null;
-
-  // Cursor for the drag handle — horizontal-resize for axis x (slide
-  // sideways), vertical-resize for axis y. Reads "this slides".
-  const handleCursor = axis === "x" ? "ew-resize" : axis === "y" ? "ns-resize" : "grab";
+  const showHandles = useOrthogonal && (selected || hovered) && !isAssociation;
 
   return (
     <>
@@ -225,56 +280,58 @@ export default function BpmnSequenceEdge({
         </g>
       )}
 
-      {/* The one bend-handle. Sits on the middle segment; drags it
-          perpendicular to its own direction. */}
-      {showHandle && handlePos && (
-        <g
-          style={{ cursor: handleCursor, pointerEvents: "all" }}
-          onPointerDown={onDragStart}
-          onPointerMove={onDragMove}
-          onPointerUp={onDragEnd}
-          onPointerCancel={onDragEnd}
-          onContextMenu={openMenu}
-        >
-          <circle
-            cx={handlePos.x}
-            cy={handlePos.y}
-            r={7}
-            fill={SELECTED_COLOR}
-            stroke="#fff"
-            strokeWidth={2}
-          />
-          {/* Two short white strokes indicating which way it slides:
-              "↔" for axis x, "↕" for axis y. */}
-          {axis === "x" ? (
-            <>
-              <line
-                x1={handlePos.x - 4}
-                y1={handlePos.y}
-                x2={handlePos.x + 4}
-                y2={handlePos.y}
+      {/* One bend-handle per segment. Each slides perpendicular to
+          its own direction. */}
+      {showHandles &&
+        segments.map((seg, i) => {
+          const cursorClass =
+            seg.direction === "H" ? "ns-resize" : "ew-resize";
+          return (
+            <g
+              key={`seg-${i}`}
+              style={{ cursor: cursorClass, pointerEvents: "all" }}
+              onPointerDown={(e) => onDragStart(e, i)}
+              onPointerMove={onDragMove}
+              onPointerUp={onDragEnd}
+              onPointerCancel={onDragEnd}
+              onContextMenu={openMenu}
+            >
+              <circle
+                cx={seg.midpoint.x}
+                cy={seg.midpoint.y}
+                r={6}
+                fill={SELECTED_COLOR}
                 stroke="#fff"
-                strokeWidth={1.5}
-                strokeLinecap="round"
-                pointerEvents="none"
+                strokeWidth={2}
               />
-            </>
-          ) : (
-            <>
-              <line
-                x1={handlePos.x}
-                y1={handlePos.y - 4}
-                x2={handlePos.x}
-                y2={handlePos.y + 4}
-                stroke="#fff"
-                strokeWidth={1.5}
-                strokeLinecap="round"
-                pointerEvents="none"
-              />
-            </>
-          )}
-        </g>
-      )}
+              {/* Direction glyph: ↕ for H (drags vertically), ↔ for V
+                  (drags horizontally). Two short white strokes. */}
+              {seg.direction === "H" ? (
+                <line
+                  x1={seg.midpoint.x}
+                  y1={seg.midpoint.y - 3}
+                  x2={seg.midpoint.x}
+                  y2={seg.midpoint.y + 3}
+                  stroke="#fff"
+                  strokeWidth={1.5}
+                  strokeLinecap="round"
+                  pointerEvents="none"
+                />
+              ) : (
+                <line
+                  x1={seg.midpoint.x - 3}
+                  y1={seg.midpoint.y}
+                  x2={seg.midpoint.x + 3}
+                  y2={seg.midpoint.y}
+                  stroke="#fff"
+                  strokeWidth={1.5}
+                  strokeLinecap="round"
+                  pointerEvents="none"
+                />
+              )}
+            </g>
+          );
+        })}
 
       {menu && (
         <EdgeLabelRenderer>
@@ -299,7 +356,7 @@ export default function BpmnSequenceEdge({
             <button
               onClick={resetRouting}
               style={menuItem}
-              disabled={storedBend === undefined}
+              disabled={waypoints.length === 0}
             >
               Reset routing
             </button>
@@ -313,8 +370,8 @@ export default function BpmnSequenceEdge({
             className="nodrag nopan"
             style={{
               position: "absolute",
-              // Anchor the label's BOTTOM CENTRE 12px above the bend
-              // handle so it doesn't sit on the line or steal clicks
+              // Anchor the label's BOTTOM CENTRE 12px above the segment
+              // midpoint so it doesn't sit on the line or steal clicks
               // from the handle below it.
               transform: `translate(-50%, -100%) translate(${labelPoint.x}px, ${labelPoint.y - 12}px)`,
               pointerEvents: "all",
@@ -374,6 +431,12 @@ export default function BpmnSequenceEdge({
         </EdgeLabelRenderer>
       )}
     </>
+  );
+}
+
+function segLength(seg: Segment): number {
+  return Math.abs(
+    seg.direction === "H" ? seg.b.x - seg.a.x : seg.b.y - seg.a.y,
   );
 }
 
