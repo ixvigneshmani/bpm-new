@@ -10,11 +10,11 @@ import {
   Req,
   UseGuards,
   ParseUUIDPipe,
-  ForbiddenException,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { EngineService } from "../engine/engine.service";
 import { ProcessesService } from "./processes.service";
+import { ProcessPermissionsService } from "../permissions/process-permissions.service";
 import { CreateProcessDto } from "./dto/create-process.dto";
 import { UpdateProcessDto } from "./dto/update-process.dto";
 import { SaveDocumentDto } from "./dto/save-document.dto";
@@ -28,7 +28,17 @@ export class ProcessesController {
   constructor(
     private readonly processesService: ProcessesService,
     private readonly engineService: EngineService,
+    private readonly permissions: ProcessPermissionsService,
   ) {}
+
+  private callerCtx(req: AuthenticatedRequest) {
+    return {
+      userId: req.user.sub,
+      tenantId: req.user.tenantId,
+      systemRole: req.user.systemRole,
+      roles: req.user.roles ?? [],
+    };
+  }
 
   // ─── Business Document Templates (must be before :id routes) ─────
 
@@ -50,48 +60,64 @@ export class ProcessesController {
   }
 
   @Get()
-  findAll(@Req() req: AuthenticatedRequest) {
-    return this.processesService.findAll(req.user.tenantId);
+  async findAll(@Req() req: AuthenticatedRequest) {
+    const rows = await this.processesService.findAll(req.user.tenantId);
+    const visible = await this.permissions.filterVisible(
+      this.callerCtx(req),
+      rows.map((r) => r.id),
+    );
+    return rows.filter((r) => visible.has(r.id));
   }
 
   @Get(":id")
-  findOne(@Req() req: AuthenticatedRequest, @Param("id", ParseUUIDPipe) id: string) {
+  async findOne(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    await this.permissions.assert(this.callerCtx(req), id, "view");
     return this.processesService.findOneWithDocument(id, req.user.tenantId);
   }
 
   @Patch(":id")
-  update(
+  async update(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: UpdateProcessDto,
   ) {
+    await this.permissions.assert(this.callerCtx(req), id, "edit");
     return this.processesService.update(id, req.user.tenantId, dto);
   }
 
   @Delete(":id")
-  remove(@Req() req: AuthenticatedRequest, @Param("id", ParseUUIDPipe) id: string) {
+  async remove(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    await this.permissions.assert(this.callerCtx(req), id, "admin");
     return this.processesService.remove(id, req.user.tenantId);
   }
 
   // ─── Canvas Data ──────────────────────────────────────────────────
 
   @Put(":id/canvas")
-  saveCanvas(
+  async saveCanvas(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: SaveCanvasDto,
   ) {
+    await this.permissions.assert(this.callerCtx(req), id, "edit");
     return this.processesService.saveCanvas(id, req.user.tenantId, dto.canvasData);
   }
 
   // ─── Business Document for Process ────────────────────────────────
 
   @Put(":id/document")
-  saveDocument(
+  async saveDocument(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: SaveDocumentDto,
   ) {
+    await this.permissions.assert(this.callerCtx(req), id, "edit");
     return this.processesService.saveDocument(
       id,
       req.user.tenantId,
@@ -102,7 +128,11 @@ export class ProcessesController {
   }
 
   @Get(":id/document")
-  getDocument(@Req() req: AuthenticatedRequest, @Param("id", ParseUUIDPipe) id: string) {
+  async getDocument(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    await this.permissions.assert(this.callerCtx(req), id, "view");
     return this.processesService.getDocument(id, req.user.tenantId);
   }
 
@@ -143,10 +173,11 @@ export class ProcessesController {
    *  POSTs it to /processes/import on the destination environment.
    *  Refuses if the process has never been published. */
   @Get(":id/export")
-  export(
+  async export(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
   ) {
+    await this.permissions.assert(this.callerCtx(req), id, "view");
     return this.engineService.exportProcess({
       processId: id,
       tenantId: req.user.tenantId,
@@ -154,23 +185,17 @@ export class ProcessesController {
   }
 
   @Post(":id/publish")
-  publish(
+  async publish(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
   ) {
     // Publishing has external effect (other users can start instances
-    // against the published version). Until we have a per-process
-    // editor model, gate on the platform-level admin/owner roles.
-    // Drafts and canvas saves stay open to any tenant member —
-    // publishing is the trust boundary.
-    if (
-      req.user.systemRole !== "owner" &&
-      req.user.systemRole !== "admin"
-    ) {
-      throw new ForbiddenException(
-        "Only owner or admin may publish processes.",
-      );
-    }
+    // against the published version). Two-layer gate: process-level
+    // `publish` permission (OS1), with system owner/admin always
+    // passing via the resolver. A non-admin can be granted explicit
+    // publish authority on a specific process via PROCESS_PERMISSIONS;
+    // otherwise they get 403.
+    await this.permissions.assert(this.callerCtx(req), id, "publish");
     return this.engineService.publishProcess({
       processId: id,
       tenantId: req.user.tenantId,

@@ -9,6 +9,7 @@ import DashboardLayout from "./pages/DashboardLayout";
 import DashboardPage from "./pages/DashboardPage";
 import ProcessListPage from "./pages/ProcessListPage";
 import DesignCanvasPage from "./pages/DesignCanvasPage";
+import ProcessPermissionsPage from "./pages/ProcessPermissionsPage";
 import TasksInboxPage from "./pages/TasksInboxPage";
 import InstancesListPage from "./pages/InstancesListPage";
 import InstanceDetailPage from "./pages/InstanceDetailPage";
@@ -44,6 +45,7 @@ export function App() {
         <Route path="designer" element={guarded(<ProcessListPage />)} />
         <Route path="designer/new" element={guarded(<DesignCanvasPage />)} />
         <Route path="designer/:id" element={guarded(<DesignCanvasPage />)} />
+        <Route path="designer/:id/permissions" element={guarded(<ProcessPermissionsPage />)} />
         <Route path="tasks" element={guarded(<TasksInboxPage />)} />
         <Route path="running" element={guarded(<InstancesListPage />)} />
         <Route path="instances/:id" element={guarded(<InstanceDetailPage />)} />

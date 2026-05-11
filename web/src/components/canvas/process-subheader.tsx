@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import useCanvasStore from "../../store/canvas-store";
 import { apiPost } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
@@ -13,8 +14,10 @@ export default function ProcessSubheader({
   onSave?: () => void | Promise<void>;
 } = {}) {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const canPublish =
     user?.systemRole === "owner" || user?.systemRole === "admin";
+  const canManagePermissions = canPublish;
 
   const processId = useCanvasStore((s) => s.processId);
   const processMeta = useCanvasStore((s) => s.processMeta);
@@ -205,6 +208,38 @@ export default function ProcessSubheader({
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#EF4444" }} />
             Publish failed: {publishError}
           </span>
+        )}
+
+        {processId && canManagePermissions && (
+          <button
+            onClick={() => navigate(`/designer/${processId}/permissions`)}
+            title="Manage who can view, edit, publish, or start this process"
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "5px 12px", borderRadius: 6,
+              border: "1px solid #E5E7EB", background: "#fff",
+              color: "#374151", fontSize: 12, fontWeight: 500,
+              cursor: "pointer", fontFamily: "inherit",
+              transition: "all 0.15s ease",
+              whiteSpace: "nowrap",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = "#C7D2FE";
+              e.currentTarget.style.background = "#F5F3FF";
+              e.currentTarget.style.color = "#4F46E5";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = "#E5E7EB";
+              e.currentTarget.style.background = "#fff";
+              e.currentTarget.style.color = "#374151";
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 11c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4z"/>
+              <path d="M12 13c-3.314 0-6 2.686-6 6v2h12v-2c0-3.314-2.686-6-6-6z"/>
+            </svg>
+            Permissions
+          </button>
         )}
 
         <button

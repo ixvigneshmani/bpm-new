@@ -334,6 +334,67 @@ export const processes = pgTable(
   ],
 );
 
+// ─── PROCESS_PERMISSIONS (OS1) ──────────────────────────────────────
+// Per-process access grants. Layered on top of system roles
+// (owner/admin still get full access without an explicit grant).
+// Additive-only in v1 — absence of a grant means "fall back to the
+// default policy" (view + start open to all tenant members; edit /
+// publish / admin deny unless granted to owner/admin).
+//
+// Grantee can be a specific USER or a domain ROLE slug — matches the
+// way assignments and task routing already work elsewhere in the app.
+// PERMISSION is hierarchical: admin ⊃ publish ⊃ edit ⊃ view; `start`
+// is orthogonal (you can be allowed to start without being allowed
+// to edit).
+
+export const processPermissionEnum = pgEnum("PROCESS_PERMISSION", [
+  "view",
+  "start",
+  "edit",
+  "publish",
+  "admin",
+]);
+
+export const processGranteeTypeEnum = pgEnum("PROCESS_GRANTEE_TYPE", [
+  "user",
+  "role",
+]);
+
+export const processPermissions = pgTable(
+  "PROCESS_PERMISSIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    processId: uuid("PROCESS_ID")
+      .notNull()
+      .references(() => processes.id, { onDelete: "cascade" }),
+    granteeType: processGranteeTypeEnum("GRANTEE_TYPE").notNull(),
+    /** For `user` grants: the USERS.id (UUID stored as text).
+     *  For `role`  grants: the ROLES.key slug (e.g. "manager"). */
+    granteeId: varchar("GRANTEE_ID", { length: 128 }).notNull(),
+    permission: processPermissionEnum("PERMISSION").notNull(),
+    grantedBy: uuid("GRANTED_BY").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    grantedAt: timestamp("GRANTED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("PROC_PERM_UNIQUE_IDX").on(
+      t.tenantId,
+      t.processId,
+      t.granteeType,
+      t.granteeId,
+      t.permission,
+    ),
+    index("PROC_PERM_PROCESS_IDX").on(t.processId),
+    index("PROC_PERM_GRANTEE_IDX").on(t.granteeType, t.granteeId),
+  ],
+);
+
 // ─── PROCESS_VERSIONS ───────────────────────────────────────────────
 // Content-addressed snapshots of a process canvas. Replaces inlining
 // the full DEFINITION_SNAPSHOT into every PROCESS_INSTANCES row:

@@ -13,6 +13,7 @@ import {
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { resolveActingFor } from "../auth/acting-for";
 import { UsersService } from "../users/users.service";
+import { ProcessPermissionsService } from "../permissions/process-permissions.service";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { StartInstanceDto } from "./dto/start-instance.dto";
 import { EngineService } from "./engine.service";
@@ -25,7 +26,17 @@ export class EngineController {
     private readonly engine: EngineService,
     private readonly idempotency: IdempotencyService,
     private readonly users: UsersService,
+    private readonly permissions: ProcessPermissionsService,
   ) {}
+
+  private callerCtx(req: AuthenticatedRequest) {
+    return {
+      userId: req.user.sub,
+      tenantId: req.user.tenantId,
+      systemRole: req.user.systemRole,
+      roles: req.user.roles ?? [],
+    };
+  }
 
   /** POST /processes/:id/instances
    *  Start a new instance of the given process and run it forward
@@ -44,6 +55,7 @@ export class EngineController {
     @Query("testRun") testRunParam?: string,
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
+    await this.permissions.assert(this.callerCtx(req), id, "start");
     const effective = await resolveActingFor(req, this.users);
     const testRun = testRunParam === "true" || testRunParam === "1";
     return this.idempotency.wrap({
@@ -76,10 +88,11 @@ export class EngineController {
    *  List instances of a process for the tenant, newest first. Capped
    *  at 200 — pagination is an E7 perf concern. */
   @Get(":id/instances")
-  listInstancesForProcess(
+  async listInstancesForProcess(
     @Req() req: AuthenticatedRequest,
     @Param("id", ParseUUIDPipe) id: string,
   ) {
+    await this.permissions.assert(this.callerCtx(req), id, "view");
     return this.engine.listInstancesForProcess({
       processId: id,
       tenantId: req.user.tenantId,
