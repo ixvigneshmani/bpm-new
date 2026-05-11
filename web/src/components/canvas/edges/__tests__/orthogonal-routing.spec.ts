@@ -12,6 +12,8 @@ import {
   effectivePoints,
   getEdgeWaypoints,
   getSegments,
+  isAutoRoute,
+  simplifyWaypoints,
   snapPoint,
   snapValue,
   sourceUnitVector,
@@ -535,5 +537,178 @@ describe("integration — orthogonal invariant survives multi-drag scenarios", (
       targetPos: "left",
     });
     expect(isOrthogonal([S, ...ws, T])).toBe(true);
+  });
+});
+
+// ── Simplification + auto-route collapse ───────────────────────────
+
+describe("simplifyWaypoints", () => {
+  const S: Waypoint = { x: 100, y: 100 };
+  const T: Waypoint = { x: 400, y: 200 };
+
+  it("empty waypoints stays empty", () => {
+    expect(simplifyWaypoints(S, [], T)).toEqual([]);
+  });
+
+  it("drops a corner collinear with neighbours (horizontal)", () => {
+    // S(100,100) → (200,100) [redundant — same Y as neighbours] → (300,100) → T(400,200)
+    expect(
+      simplifyWaypoints(S, [{ x: 200, y: 100 }, { x: 300, y: 100 }], T),
+    ).toEqual([{ x: 300, y: 100 }]);
+  });
+
+  it("drops a corner collinear with neighbours (vertical)", () => {
+    // S(100,100) → (100,150) [redundant — same X as S] → (100,180) → T(400,200) is bad,
+    // try a real case: T at (100, 300) so the V chain is meaningful
+    const T2: Waypoint = { x: 100, y: 300 };
+    expect(
+      simplifyWaypoints(S, [{ x: 100, y: 150 }, { x: 100, y: 200 }], T2),
+    ).toEqual([]);
+  });
+
+  it("drops a duplicate corner", () => {
+    expect(
+      simplifyWaypoints(S, [{ x: 200, y: 200 }, { x: 200, y: 200 }, { x: 300, y: 300 }], T),
+    ).toEqual([{ x: 200, y: 200 }, { x: 300, y: 300 }]);
+  });
+
+  it("never drops source or target — only intermediate waypoints", () => {
+    // Even when source aligns with all waypoints, source stays.
+    const linear = [{ x: 200, y: 100 }, { x: 300, y: 100 }];
+    const simp = simplifyWaypoints({ x: 50, y: 100 }, linear, { x: 400, y: 100 });
+    // The chain S(50,100) → (200,100) → (300,100) → T(400,100) is all
+    // collinear H. Every intermediate corner is redundant — both
+    // get dropped, leaving 0 waypoints, but S and T are preserved
+    // (we just return waypoints, not source/target).
+    expect(simp).toEqual([]);
+  });
+
+  it("real-world: source-anchored insertion + user drags V back to source.x → collapses to 0 waypoints", () => {
+    // Scenario: user dragged V to perp=200 (creating offset corners at sy+30),
+    // then dragged the now-interior V back to source.x=100. Resulting
+    // waypoint chain has duplicates + collinear points.
+    const ws = [
+      { x: 100, y: 130 }, // offset_a (degenerate with source's column)
+      { x: 100, y: 130 }, // offset_b after drag back to x=100 (collapsed onto offset_a)
+      { x: 100, y: 200 }, // updatedFirstWp (now also at x=100)
+      { x: 250, y: 200 }, // second auto-corner preserved
+    ];
+    const simp = simplifyWaypoints(S, ws, T);
+    // Trace:
+    // [S, (100,130), (100,130), (100,200), (250,200), T(400,200)]
+    //   (100,130) and (100,130) are duplicates → drop one
+    // [S, (100,130), (100,200), (250,200), T]
+    //   (100,130) is collinear V with S(100,100) and (100,200) → drop
+    // [S(100,100), (100,200), (250,200), T(400,200)]
+    //   (250,200) is collinear H with (100,200) and T(400,200) → drop
+    // [S(100,100), (100,200), T(400,200)]
+    //   (100,200) — neighbours have different X AND Y; corner stays.
+    expect(simp).toEqual([{ x: 100, y: 200 }]);
+  });
+});
+
+describe("isAutoRoute", () => {
+  const S: Waypoint = { x: 100, y: 100 };
+  const T: Waypoint = { x: 400, y: 200 };
+
+  it("true when waypoints match auto-corners exactly", () => {
+    const auto = computeAutoWaypoints(S, T, "right", "left");
+    expect(isAutoRoute(S, auto, T, "right", "left")).toBe(true);
+  });
+
+  it("false when waypoints differ from auto-corners", () => {
+    expect(
+      isAutoRoute(
+        S,
+        [{ x: 300, y: 100 }, { x: 300, y: 200 }], // different midX
+        T,
+        "right",
+        "left",
+      ),
+    ).toBe(false);
+  });
+
+  it("false when waypoint count differs", () => {
+    expect(
+      isAutoRoute(
+        S,
+        [{ x: 250, y: 100 }, { x: 250, y: 200 }, { x: 300, y: 200 }],
+        T,
+        "right",
+        "left",
+      ),
+    ).toBe(false);
+  });
+
+  it("empty waypoints with auto returning [] (e.g. same-Y edge) returns true", () => {
+    // S(100,100) → T(400,100), same Y, auto-corners = [].
+    expect(
+      isAutoRoute({ x: 100, y: 100 }, [], { x: 400, y: 100 }, "right", "left"),
+    ).toBe(true);
+  });
+});
+
+describe("dragSegment — auto-route collapse", () => {
+  const S: Waypoint = { x: 100, y: 100 };
+  const T: Waypoint = { x: 400, y: 200 };
+
+  it("interior drag back to auto-midX clears waypoints (returns [])", () => {
+    // State: user has dragged middle V to X=320 (waypoints materialised).
+    const dragged = [
+      { x: 320, y: 100 },
+      { x: 320, y: 200 },
+    ];
+    // Now drag back to auto-midX = 250.
+    const next = dragSegment({
+      waypoints: dragged,
+      segmentIndex: 1,
+      perpendicularValue: 250,
+      source: S,
+      target: T,
+      sourcePos: "right",
+      targetPos: "left",
+    });
+    // Result: simplified back to auto-corners → returns [].
+    expect(next).toEqual([]);
+  });
+
+  it("source-anchored drag back to source.x cleans up the jog", () => {
+    // User dragged segment 0 to perp Y=150 (inserts jog at sy+30=130).
+    // First drag from auto-corners:
+    const after1 = dragSegment({
+      waypoints: [],
+      segmentIndex: 0,
+      perpendicularValue: 150,
+      source: S,
+      target: T,
+      sourcePos: "right",
+      targetPos: "left",
+    });
+    expect(after1).toEqual([
+      { x: 130, y: 100 },
+      { x: 130, y: 150 },
+      { x: 250, y: 150 },
+      { x: 250, y: 200 },
+    ]);
+
+    // Now drag the SAME segment (which is now at index 2 — interior H
+    // between two waypoints) back to Y=100 (source's Y).
+    const after2 = dragSegment({
+      waypoints: after1,
+      segmentIndex: 2,
+      perpendicularValue: 100,
+      source: S,
+      target: T,
+      sourcePos: "right",
+      targetPos: "left",
+    });
+    // Interior drag updates waypoints[1].y=100 and waypoints[2].y=100.
+    // Result before simplify:
+    //   [(130,100), (130,100), (250,100), (250,200)]
+    // Simplify:
+    //   (130,100) and (130,100) duplicates → drop one
+    //   (130,100) and (250,100) on Y=100 with S(100,100) on Y=100 → S, (130,100), (250,100) are all collinear H → drop intermediates that are collinear
+    //   Eventually: just [(250, 100), (250, 200)] which IS the auto-route → return []
+    expect(after2).toEqual([]);
   });
 });
