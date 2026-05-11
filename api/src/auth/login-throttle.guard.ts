@@ -6,7 +6,11 @@ import {
   Injectable,
 } from "@nestjs/common";
 
-const LOGIN_LIMIT_COUNT = 10;
+// 60/min/IP. The heavy lifting against credential stuffing is the
+// per-email lockout in AuthService (5 fails → 15-min lock). The IP
+// throttle is a coarse anti-flood that must NOT trip a shared-NAT
+// office of legitimate users.
+const LOGIN_LIMIT_COUNT = 60;
 const LOGIN_LIMIT_WINDOW_MS = 60 * 1000;
 
 @Injectable()

@@ -98,6 +98,8 @@ export const users = pgTable(
     role: userRoleEnum("ROLE").notNull().default("member"),
     locale: varchar("LOCALE", { length: 10 }).default("en"),
     isActive: boolean("IS_ACTIVE").notNull().default(true),
+    mfaEnabled: boolean("MFA_ENABLED").notNull().default(false),
+    mfaSecret: varchar("MFA_SECRET", { length: 64 }),
     emailVerifiedAt: timestamp("EMAIL_VERIFIED_AT", { withTimezone: true }),
     lastLoginAt: timestamp("LAST_LOGIN_AT", { withTimezone: true }),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
@@ -166,6 +168,25 @@ export const sessions = pgTable(
   (t) => [
     index("SESSION_USER_IDX").on(t.userId),
     index("SESSION_TOKEN_IDX").on(t.tokenHash),
+  ],
+);
+
+export const mfaRecoveryCodes = pgTable(
+  "MFA_RECOVERY_CODES",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    userId: uuid("USER_ID")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    codeHash: varchar("CODE_HASH", { length: 128 }).notNull(),
+    usedAt: timestamp("USED_AT", { withTimezone: true }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("MFA_RECOVERY_USER_IDX").on(t.userId),
+    uniqueIndex("MFA_RECOVERY_USER_HASH_IDX").on(t.userId, t.codeHash),
   ],
 );
 

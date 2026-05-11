@@ -12,8 +12,9 @@ import * as bcrypt from "bcryptjs";
 import { randomBytes, createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { UsersService } from "../users/users.service";
+import { MfaService } from "./mfa.service";
 import { DATABASE, type Database } from "../database/database.module";
-import { sessions } from "../database/schema";
+import { sessions, mfaRecoveryCodes, users as usersTable } from "../database/schema";
 
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
@@ -33,6 +34,7 @@ export class AuthService {
   constructor(
     private usersService: UsersService,
     private jwt: JwtService,
+    private mfaService: MfaService,
     @Inject(DATABASE) private db: Database,
   ) {}
 
@@ -68,6 +70,52 @@ export class AuthService {
 
     this.failedAttempts.delete(key);
 
+    if (user.mfaEnabled) {
+      const mfaChallenge = await this.jwt.signAsync(
+        { sub: user.id, mfaPending: true },
+        { expiresIn: "5m" },
+      );
+      return { mfaChallenge, expiresIn: 300 } as const;
+    }
+
+    return this.issueTokens(user, ctx);
+  }
+
+  async mfaLogin(
+    challenge: string,
+    code: string,
+    ctx: SessionContext = {},
+  ) {
+    let payload: { sub?: string; mfaPending?: boolean };
+    try {
+      payload = await this.jwt.verifyAsync(challenge);
+    } catch {
+      throw new UnauthorizedException("MFA challenge expired or invalid.");
+    }
+    if (!payload?.mfaPending || !payload.sub) {
+      throw new UnauthorizedException("Not an MFA challenge token.");
+    }
+    const user = await this.usersService.findById(payload.sub);
+    if (!user || !user.isActive || !user.mfaEnabled || !user.mfaSecret) {
+      throw new UnauthorizedException("Account not eligible for MFA login.");
+    }
+    const key = user.email.trim().toLowerCase();
+    if (this.isLocked(key)) {
+      this.logger.warn(`auth-mfa-locked: userId=${user.id}`);
+      throw new UnauthorizedException(
+        "Account temporarily locked due to repeated failed attempts. Try again later.",
+      );
+    }
+    const valid = await this.mfaService.consumeOtpOrRecovery(
+      user.id,
+      user.mfaSecret,
+      code,
+    );
+    if (!valid) {
+      this.recordFailure(key, "bad-mfa-code");
+      throw new UnauthorizedException("Invalid MFA code.");
+    }
+    this.failedAttempts.delete(key);
     return this.issueTokens(user, ctx);
   }
 
@@ -174,7 +222,18 @@ export class AuthService {
     const newHash = await bcrypt.hash(temporaryPassword, 10);
     await this.usersService.setPasswordHash(targetUserId, newHash);
     await this.revokeAllSessionsFor(targetUserId);
-    // Also clear any in-memory lockout so the user can sign in immediately
+    // Also clear MFA so an admin reset can rescue a user who lost both
+    // their authenticator device AND every recovery code (otherwise the
+    // password reset doesn't help — they still can't satisfy the MFA
+    // challenge). They'll re-enroll MFA after first login if they want.
+    await this.db
+      .update(usersTable)
+      .set({ mfaEnabled: false, mfaSecret: null })
+      .where(eq(usersTable.id, targetUserId));
+    await this.db
+      .delete(mfaRecoveryCodes)
+      .where(eq(mfaRecoveryCodes.userId, targetUserId));
+    // Clear any in-memory lockout so the user can sign in immediately
     // with the temporary password.
     this.failedAttempts.delete(target.email.trim().toLowerCase());
     this.logger.warn(
@@ -218,6 +277,10 @@ export class AuthService {
       displayName: user.displayName,
       systemRole: user.role,
       roles,
+      // jti makes the token unique even when two issuances land in the
+      // same second (otherwise the JWT signature is deterministic and a
+      // rapid refresh would mint an identical string).
+      jti: randomBytes(8).toString("hex"),
     });
 
     const refreshToken = randomBytes(REFRESH_TOKEN_BYTES).toString("hex");
