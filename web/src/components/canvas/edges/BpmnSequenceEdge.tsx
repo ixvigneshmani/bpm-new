@@ -408,7 +408,14 @@ export default function BpmnSequenceEdge({
             className="nodrag nopan"
             style={{
               position: "absolute",
-              transform: `translate(-50%, -50%) translate(${labelPoint.x}px, ${labelPoint.y}px)`,
+              // Offset the label 18px ABOVE the edge so:
+              //   (1) it doesn't sit on top of the midpoint "+ here"
+              //       handle and steal clicks/drag-starts
+              //   (2) the user can read the condition/label without it
+              //       crossing the line itself (cleaner BPMN diagram).
+              // Use translate(-50%, -100%) to anchor the label's BOTTOM
+              // centre at (labelPoint.x, labelPoint.y - 12).
+              transform: `translate(-50%, -100%) translate(${labelPoint.x}px, ${labelPoint.y - 12}px)`,
               pointerEvents: "all",
               zIndex: 1000,
             }}
