@@ -18,9 +18,11 @@
  * header so auditors can trace the exact HTTP call.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { BadRequestException, ForbiddenException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Logger } from "@nestjs/common";
 import { UsersService } from "../users/users.service";
 import type { AuthenticatedRequest } from "../common/types/authenticated-request";
+
+const logger = new Logger("ActingFor");
 
 export type EffectiveActor = {
   /** The user id to use for business logic. If no impersonation,
@@ -87,6 +89,16 @@ export async function resolveActingFor(
     displayName: target.displayName,
     roles,
   };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = req as any;
+  const method = r.method ?? r.raw?.method ?? "?";
+  const url = r.url ?? r.raw?.url ?? "?";
+  const ip = r.ip ?? "?";
+  logger.warn(
+    `acting-for: actor=${req.user.sub} target=${target.id} method=${method} url=${url} ip=${ip}`,
+  );
+
   return {
     userId: target.id,
     actingBy: req.user.sub,
