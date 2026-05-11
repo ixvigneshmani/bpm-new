@@ -73,6 +73,13 @@ export class UsersService {
     return us.map((u) => ({ ...u, roles: rolesByUser.get(u.id) ?? [] }));
   }
 
+  async setPasswordHash(userId: string, passwordHash: string): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ passwordHash })
+      .where(eq(users.id, userId));
+  }
+
   /** Domain role keys held by a user (e.g. ["manager", "finance"]). */
   async getRoleKeys(userId: string): Promise<string[]> {
     const rows = await this.db

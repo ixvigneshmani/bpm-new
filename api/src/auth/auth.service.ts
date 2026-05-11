@@ -1,6 +1,9 @@
 import {
   Injectable,
   UnauthorizedException,
+  ForbiddenException,
+  NotFoundException,
+  BadRequestException,
   Logger,
   Inject,
 } from "@nestjs/common";
@@ -129,6 +132,77 @@ export class AuthService {
       .update(sessions)
       .set({ status: "revoked" })
       .where(eq(sessions.tokenHash, tokenHash));
+  }
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const user = await this.usersService.findById(userId);
+    if (!user || !user.passwordHash) {
+      throw new UnauthorizedException("Account is not available.");
+    }
+    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!valid) {
+      this.logger.warn(`auth-password-change-failed: userId=${userId} reason=bad-current`);
+      throw new UnauthorizedException("Current password is incorrect.");
+    }
+    if (currentPassword === newPassword) {
+      throw new BadRequestException("New password must differ from current.");
+    }
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await this.usersService.setPasswordHash(userId, newHash);
+    await this.revokeAllSessionsFor(userId);
+    this.logger.warn(`auth-password-changed: userId=${userId}`);
+  }
+
+  async adminResetPassword(
+    actorId: string,
+    actorSystemRole: string,
+    actorTenantId: string,
+    targetUserId: string,
+  ): Promise<{ temporaryPassword: string }> {
+    if (actorSystemRole !== "owner" && actorSystemRole !== "admin") {
+      throw new ForbiddenException("Only owner / admin may reset passwords.");
+    }
+    const target = await this.usersService.findById(targetUserId);
+    if (!target || target.tenantId !== actorTenantId) {
+      throw new NotFoundException("User not found.");
+    }
+    const temporaryPassword = this.generateTemporaryPassword();
+    const newHash = await bcrypt.hash(temporaryPassword, 10);
+    await this.usersService.setPasswordHash(targetUserId, newHash);
+    await this.revokeAllSessionsFor(targetUserId);
+    // Also clear any in-memory lockout so the user can sign in immediately
+    // with the temporary password.
+    this.failedAttempts.delete(target.email.trim().toLowerCase());
+    this.logger.warn(
+      `auth-password-admin-reset: actor=${actorId} target=${targetUserId}`,
+    );
+    return { temporaryPassword };
+  }
+
+  private async revokeAllSessionsFor(userId: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ status: "revoked" })
+      .where(and(eq(sessions.userId, userId), eq(sessions.status, "active")));
+  }
+
+  /** 16-char temporary password drawn from an unambiguous alphabet
+   *  (no 0/O/1/l). Meets the same min-8 + letter + digit policy. */
+  private generateTemporaryPassword(): string {
+    const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+    const bytes = randomBytes(16);
+    let pw = "";
+    for (let i = 0; i < 16; i++) {
+      pw += alphabet[bytes[i] % alphabet.length];
+    }
+    // Force at least one letter + one digit so the policy holds on every draw.
+    if (!/[a-zA-Z]/.test(pw)) pw = "A" + pw.slice(1);
+    if (!/[0-9]/.test(pw)) pw = pw.slice(0, -1) + "2";
+    return pw;
   }
 
   private async issueTokens(

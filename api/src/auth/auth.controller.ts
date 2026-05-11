@@ -13,6 +13,8 @@ import { JwtAuthGuard } from "./jwt-auth.guard";
 import { LoginThrottleGuard } from "./login-throttle.guard";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
+import { ChangePasswordDto } from "./dto/change-password.dto";
+import { AdminResetPasswordDto } from "./dto/admin-reset-password.dto";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 
 @Controller("auth")
@@ -40,6 +42,34 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async logout(@Body() dto: RefreshTokenDto) {
     await this.authService.logout(dto.refreshToken);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post("password")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async changePassword(
+    @Body() dto: ChangePasswordDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.authService.changePassword(
+      req.user.sub,
+      dto.currentPassword,
+      dto.newPassword,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post("admin-reset")
+  async adminReset(
+    @Body() dto: AdminResetPasswordDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.authService.adminResetPassword(
+      req.user.sub,
+      req.user.systemRole,
+      req.user.tenantId,
+      dto.userId,
+    );
   }
 
   @UseGuards(JwtAuthGuard)
