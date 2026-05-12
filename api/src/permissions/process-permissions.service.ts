@@ -109,17 +109,56 @@ export class ProcessPermissionsService {
 
   /** Return the full set of permissions the caller effectively holds
    *  on this process — used by the UI to lock read-only canvases and
-   *  hide actions the user can't perform. Same precedence as `can`. */
+   *  hide actions the user can't perform. Same precedence as `can`.
+   *
+   *  M7 — single SQL round trip instead of 5 sequential `can()` calls.
+   *  Reads the grant rows once, expands the implication hierarchy in
+   *  JS, applies the default-open policy when no grant exists. */
   async effective(
     caller: CallerContext,
     processId: string,
   ): Promise<ProcessPermission[]> {
     const all: ProcessPermission[] = ["view", "start", "edit", "publish", "admin"];
-    const held: ProcessPermission[] = [];
-    for (const p of all) {
-      if (await this.can(caller, processId, p)) held.push(p);
+    if (caller.systemRole === "owner" || caller.systemRole === "admin") {
+      return [...all];
     }
-    return held;
+    const rows = await this.db
+      .select({
+        permission: schema.processPermissions.permission,
+        granteeType: schema.processPermissions.granteeType,
+        granteeId: schema.processPermissions.granteeId,
+      })
+      .from(schema.processPermissions)
+      .where(
+        and(
+          eq(schema.processPermissions.tenantId, caller.tenantId),
+          eq(schema.processPermissions.processId, processId),
+        ),
+      );
+
+    const held = new Set<ProcessPermission>();
+    let anyGrantExists = false;
+    for (const r of rows) {
+      anyGrantExists = true;
+      const isUserGrant =
+        r.granteeType === "user" && r.granteeId === caller.userId;
+      const isRoleGrant =
+        r.granteeType === "role" && caller.roles.includes(r.granteeId);
+      if (isUserGrant || isRoleGrant) {
+        for (const implied of IMPLIES[r.permission as ProcessPermission]) {
+          held.add(implied);
+        }
+      }
+    }
+
+    // Default-open policy when there are no grants on the process:
+    // view + start are available to all tenant members. Mirrors `can()`.
+    if (!anyGrantExists) {
+      held.add("view");
+      held.add("start");
+    }
+
+    return all.filter((p) => held.has(p));
   }
 
   /** Throwing variant used in controller bodies. */
