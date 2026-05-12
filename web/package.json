@@ -12,6 +12,7 @@
   "dependencies": {
     "@ant-design/icons": "^6.1.1",
     "@dnd-kit/react": "^0.4.0",
+    "@sentry/react": "^10.52.0",
     "@tailwindcss/vite": "^4.2.2",
     "@xyflow/react": "^12.10.2",
     "antd": "^6.3.5",
