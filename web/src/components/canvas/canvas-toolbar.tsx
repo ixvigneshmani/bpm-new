@@ -18,6 +18,16 @@ type Props = {
 };
 
 export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
+  const effectivePermissions = useCanvasStore(
+    (s) => s.processMeta.effectivePermissions,
+  );
+  // OS1 — hide mutating actions when the caller lacks `edit`; gate
+  // Start Instance on `start` (orthogonal to edit). Empty
+  // effectivePermissions array = perms haven't been fetched yet, fall
+  // back to "show everything" so the toolbar isn't blank on first paint.
+  const permsLoaded = effectivePermissions.length > 0;
+  const canEdit = !permsLoaded || effectivePermissions.includes("edit");
+  const canStart = !permsLoaded || effectivePermissions.includes("start");
   const navigate = useNavigate();
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const deleteSelected = useCanvasStore((s) => s.deleteSelected);
@@ -280,8 +290,9 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
 
       {divider}
 
-      {/* AI scaffold — natural-language → canvas */}
-      {onOpenAi && (
+      {/* AI scaffold — natural-language → canvas. Mutates the canvas,
+       *  so hide it for view-only users. */}
+      {onOpenAi && canEdit && (
         <button
           onClick={onOpenAi}
           style={{
@@ -371,8 +382,9 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
 
       {/* Start instance — only shown for saved processes (id in URL).
        *  Drafts (`/designer/new`) hide this since the process must
-       *  exist before an instance can be started. */}
-      {processId && (
+       *  exist before an instance can be started. OS1: also gated on
+       *  the caller's `start` permission. */}
+      {processId && canStart && (
         <>
           {divider}
           <button

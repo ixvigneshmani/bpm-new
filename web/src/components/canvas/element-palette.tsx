@@ -223,7 +223,7 @@ function ShapeIcon({ item }: { item: PaletteItem }) {
   );
 }
 
-export default function ElementPalette() {
+export default function ElementPalette({ disabled = false }: { disabled?: boolean } = {}) {
   const [groupCollapsed, setGroupCollapsed] = useState<Record<string, boolean>>({});
   const [panelOpen, setPanelOpen] = useState(true);
   const dragGhostRef = useRef<HTMLDivElement>(null);
@@ -335,7 +335,9 @@ export default function ElementPalette() {
       }}>
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#111827" }}>Elements</div>
-          <div style={{ fontSize: 9, color: "#9CA3AF", marginTop: 1 }}>Drag onto canvas</div>
+          <div style={{ fontSize: 9, color: disabled ? "#B45309" : "#9CA3AF", marginTop: 1 }}>
+            {disabled ? "View only" : "Drag onto canvas"}
+          </div>
         </div>
         <button
           onClick={() => setPanelOpen(false)}
@@ -382,24 +384,32 @@ export default function ElementPalette() {
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 1, padding: "2px 6px 4px" }}>
                   {group.items.map((item) => {
                     const registered = REGISTERED_TYPES.has(item.type);
+                    const draggable = registered && !disabled;
                     return (
                       <div
                         key={item.type}
-                        draggable={registered}
-                        onDragStart={registered ? (e) => onDragStart(e, item) : undefined}
-                        title={registered ? item.label : `${item.label} — coming soon`}
-                        aria-disabled={!registered}
+                        draggable={draggable}
+                        onDragStart={draggable ? (e) => onDragStart(e, item) : undefined}
+                        title={
+                          disabled
+                            ? "View only — you don't have edit permission"
+                            : registered
+                              ? item.label
+                              : `${item.label} — coming soon`
+                        }
+                        aria-disabled={!draggable}
                         style={{
                           display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
                           width: 54, padding: "5px 2px 3px",
-                          borderRadius: 6, cursor: registered ? "grab" : "not-allowed",
+                          borderRadius: 6,
+                          cursor: disabled ? "not-allowed" : registered ? "grab" : "not-allowed",
                           transition: "background 0.12s ease",
                           userSelect: "none",
-                          opacity: registered ? 1 : 0.45,
+                          opacity: disabled ? 0.4 : registered ? 1 : 0.45,
                           position: "relative",
                         }}
-                        onMouseEnter={registered ? (e) => { e.currentTarget.style.background = "rgba(99,102,241,0.06)"; } : undefined}
-                        onMouseLeave={registered ? (e) => { e.currentTarget.style.background = "transparent"; } : undefined}
+                        onMouseEnter={draggable ? (e) => { e.currentTarget.style.background = "rgba(99,102,241,0.06)"; } : undefined}
+                        onMouseLeave={draggable ? (e) => { e.currentTarget.style.background = "transparent"; } : undefined}
                       >
                         <ShapeIcon item={item} />
                         <span style={{

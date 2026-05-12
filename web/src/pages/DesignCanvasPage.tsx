@@ -78,6 +78,15 @@ function CanvasInner() {
   const copySelected = useCanvasStore((s) => s.copySelected);
   const pasteClipboard = useCanvasStore((s) => s.pasteClipboard);
   const duplicateSelected = useCanvasStore((s) => s.duplicateSelected);
+  const effectivePermsHook = useCanvasStore(
+    (s) => s.processMeta.effectivePermissions,
+  );
+  // OS1 — derived early so the keyboard-shortcut effect (defined
+  // below) can capture it without TDZ issues. The render-path block
+  // below references the same value via the local `effectivePermissions`
+  // selector for clarity.
+  const readOnly =
+    effectivePermsHook.length > 0 && !effectivePermsHook.includes("edit");
   const setSaveStatus = useCanvasStore((s) => s.setSaveStatus);
 
   // ─── Manual save ────────────────────────────────────────────────────
@@ -384,8 +393,13 @@ function CanvasInner() {
     const onKey = (e: KeyboardEvent) => {
       if (isInputFocused()) return;
 
+      // OS1 — view-only callers can still copy (read action) but not
+      // delete/paste/duplicate/undo/redo (write actions).
+      const writeBlocked = readOnly;
+
       // Delete / Backspace → remove selected
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (writeBlocked) return;
         e.preventDefault();
         deleteSelected();
         return;
@@ -393,6 +407,7 @@ function CanvasInner() {
 
       // Cmd/Ctrl + Z (undo) and Cmd/Ctrl + Shift + Z or Y (redo)
       if (modKey(e) && (e.key === "z" || e.key === "Z")) {
+        if (writeBlocked) return;
         e.preventDefault();
         const temporal = useCanvasStore.temporal.getState();
         if (e.shiftKey) temporal.redo();
@@ -400,6 +415,7 @@ function CanvasInner() {
         return;
       }
       if (modKey(e) && (e.key === "y" || e.key === "Y")) {
+        if (writeBlocked) return;
         e.preventDefault();
         useCanvasStore.temporal.getState().redo();
         return;
@@ -412,11 +428,13 @@ function CanvasInner() {
         return;
       }
       if (modKey(e) && (e.key === "v" || e.key === "V")) {
+        if (writeBlocked) return;
         e.preventDefault();
         pasteClipboard();
         return;
       }
       if (modKey(e) && (e.key === "d" || e.key === "D")) {
+        if (writeBlocked) return;
         e.preventDefault();
         duplicateSelected();
         return;
@@ -425,20 +443,14 @@ function CanvasInner() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, copySelected, pasteClipboard, duplicateSelected]);
+  }, [deleteSelected, copySelected, pasteClipboard, duplicateSelected, readOnly]);
 
   const showWizard = wizardStep !== "canvas";
-  const effectivePermissions = useCanvasStore(
-    (s) => s.processMeta.effectivePermissions,
-  );
-  // OS1 — lock canvas interaction when the caller lacks `edit`. The
-  // backend rejects unauthorised PUTs anyway; this stops the user from
-  // making changes that would silently lose on refresh, and surfaces
-  // the read-only state up-front.
-  const readOnly =
-    !!canvasProcessId &&
-    effectivePermissions.length > 0 &&
-    !effectivePermissions.includes("edit");
+  // `readOnly` is derived at the top of the component (see
+  // effectivePermsHook above) so it's available to the keyboard-shortcut
+  // effect. This block is just here as a no-op marker — keeping the
+  // comment context near the render where it matters most.
+  // readOnly: see early derivation above.
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
@@ -476,7 +488,7 @@ function CanvasInner() {
       {/* Center canvas */}
       <div ref={reactFlowWrapper} style={{ flex: 1, position: "relative" }}>
         {/* Floating palette */}
-        {!showWizard && <ElementPalette />}
+        {!showWizard && <ElementPalette disabled={readOnly} />}
         {!showWizard && <BreadcrumbBar />}
         <ReactFlow
           nodes={nodes}

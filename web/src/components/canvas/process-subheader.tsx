@@ -272,6 +272,7 @@ export default function ProcessSubheader({
           </button>
         )}
 
+        {!readOnly && (
         <button
           onClick={() => { setWizardOrigin("canvas"); setWizardStep("details"); }}
           style={{
@@ -300,6 +301,7 @@ export default function ProcessSubheader({
           </svg>
           Edit
         </button>
+        )}
       </div>
     </div>
   );

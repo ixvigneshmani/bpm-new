@@ -114,21 +114,31 @@ export default function PropertiesPanel() {
   const setEdgeFlowType = useCanvasStore((s) => s.setEdgeFlowType);
   const setGatewayDefaultFlow = useCanvasStore((s) => s.setGatewayDefaultFlow);
   const reorderOutgoingEdges = useCanvasStore((s) => s.reorderOutgoingEdges);
+  const effectivePermissions = useCanvasStore(
+    (s) => s.processMeta.effectivePermissions,
+  );
+  // OS1 — when the caller lacks `edit`, all inputs in this panel are
+  // wrapped in <fieldset disabled> so they don't react. Saves us from
+  // threading a readOnly prop through every section component.
+  const readOnly =
+    effectivePermissions.length > 0 && !effectivePermissions.includes("edit");
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedEdge = !selectedNode ? edges.find((e) => e.selected) : undefined;
 
   if (!selectedNode && selectedEdge) {
     return (
-      <EdgeProperties
-        edgeId={selectedEdge.id}
-        label={(selectedEdge.label as string) || ""}
-        flowType={(selectedEdge.data as { flowType?: string } | undefined)?.flowType === "message" ? "message" : "sequence"}
-        condition={(selectedEdge.data as { condition?: string } | undefined)?.condition ?? ""}
-        onLabelChange={(v) => updateEdgeLabel(selectedEdge.id, v)}
-        onFlowTypeChange={(v) => setEdgeFlowType(selectedEdge.id, v)}
-        onConditionChange={(v) => setEdgeCondition(selectedEdge.id, v)}
-      />
+      <ReadOnlyShell readOnly={readOnly}>
+        <EdgeProperties
+          edgeId={selectedEdge.id}
+          label={(selectedEdge.label as string) || ""}
+          flowType={(selectedEdge.data as { flowType?: string } | undefined)?.flowType === "message" ? "message" : "sequence"}
+          condition={(selectedEdge.data as { condition?: string } | undefined)?.condition ?? ""}
+          onLabelChange={(v) => updateEdgeLabel(selectedEdge.id, v)}
+          onFlowTypeChange={(v) => setEdgeFlowType(selectedEdge.id, v)}
+          onConditionChange={(v) => setEdgeCondition(selectedEdge.id, v)}
+        />
+      </ReadOnlyShell>
     );
   }
 
@@ -606,8 +616,36 @@ export default function PropertiesPanel() {
         </button>
       </div>
 
+      {/* Read-only banner — only shown when the caller lacks edit */}
+      {readOnly && (
+        <div style={{
+          padding: "8px 16px",
+          background: "#FFFBEB",
+          borderBottom: "1px solid #FDE68A",
+          color: "#92400E",
+          fontSize: 11,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          flexShrink: 0,
+        }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" />
+            <path d="M7 11V7a5 5 0 0110 0v4" />
+          </svg>
+          View only — properties are locked.
+        </div>
+      )}
+
       {/* Sections */}
-      <div className="props-panel" style={{ flex: 1, overflowY: "auto" }}>
+      <fieldset
+        disabled={readOnly}
+        className="props-panel"
+        style={{
+          flex: 1, overflowY: "auto",
+          border: 0, padding: 0, margin: 0, minWidth: 0,
+        }}
+      >
         {sections.map((section) => (
           <CollapsibleSection
             key={section.id}
@@ -618,7 +656,44 @@ export default function PropertiesPanel() {
             {section.content}
           </CollapsibleSection>
         ))}
+      </fieldset>
+    </div>
+  );
+}
+
+/* ReadOnlyShell — wraps the EdgeProperties early-return path with the
+ * same disabled-fieldset + banner so edge editing is also locked. */
+function ReadOnlyShell({
+  readOnly,
+  children,
+}: {
+  readOnly: boolean;
+  children: React.ReactNode;
+}) {
+  if (!readOnly) return <>{children}</>;
+  return (
+    <div style={{
+      position: "absolute", top: 0, right: 0, bottom: 0,
+      width: "50%", minWidth: 420, zIndex: 10,
+      background: "#fff", borderLeft: "1px solid #E5E7EB",
+      display: "flex", flexDirection: "column", overflow: "hidden",
+    }}>
+      <div style={{
+        padding: "8px 16px",
+        background: "#FFFBEB",
+        borderBottom: "1px solid #FDE68A",
+        color: "#92400E",
+        fontSize: 11,
+        flexShrink: 0,
+      }}>
+        View only — properties are locked.
       </div>
+      <fieldset
+        disabled
+        style={{ flex: 1, overflowY: "auto", border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
+        {children}
+      </fieldset>
     </div>
   );
 }
