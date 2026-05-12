@@ -27,6 +27,26 @@ const env = process.env.NODE_ENV || "development";
     LoggerModule.forRoot({
       pinoHttp: {
         level: process.env.LOG_LEVEL || (env === "production" ? "info" : "debug"),
+        // OS4 / H4 — never persist secrets to logs. pino replaces matched
+        // paths with "[Redacted]" in the serialized output. Covers
+        // login bodies, refresh tokens, password-change payloads,
+        // bearer Authorization headers, and Cookie headers. Add more
+        // paths here as new auth surfaces appear.
+        redact: {
+          paths: [
+            'req.headers.authorization',
+            'req.headers.cookie',
+            'req.headers["x-acting-for"]',
+            'req.body.password',
+            'req.body.currentPassword',
+            'req.body.newPassword',
+            'req.body.refreshToken',
+            'req.body.token',
+            'req.body.code',
+            'res.headers["set-cookie"]',
+          ],
+          censor: '[Redacted]',
+        },
         transport:
           env === "production"
             ? undefined
