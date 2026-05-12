@@ -1058,7 +1058,17 @@ export default function ProcessWizard() {
   const wizardStep = useCanvasStore((s) => s.wizardStep);
   const setWizardStep = useCanvasStore((s) => s.setWizardStep);
   const processId = useCanvasStore((s) => s.processId);
+  const effectivePermissions = useCanvasStore(
+    (s) => s.processMeta.effectivePermissions,
+  );
   const stepIndex = wizardStep === "details" ? 0 : wizardStep === "document" ? 1 : 2;
+  // L9 — defence-in-depth read-only mode for the wizard. The Edit
+  // button is hidden in the canvas subheader for view-only users, but
+  // a direct URL like `/designer/:id?step=details` could still land
+  // them here. The backend rejects PUTs either way; this just makes
+  // the UX match.
+  const readOnly =
+    effectivePermissions.length > 0 && !effectivePermissions.includes("edit");
 
   const handleStepClick = (i: number) => {
     const keys = ["details", "document", "canvas"] as const;
@@ -1074,10 +1084,35 @@ export default function ProcessWizard() {
 
       <StepperBar currentIndex={stepIndex} onStepClick={handleStepClick} isExisting={!!processId} />
 
-      <div style={{ flex: 1, overflow: "auto" }}>
+      {readOnly && (
+        <div style={{
+          padding: "8px 24px",
+          background: "#FFFBEB",
+          borderBottom: "1px solid #FDE68A",
+          color: "#92400E",
+          fontSize: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          position: "relative",
+          zIndex: 1,
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" />
+            <path d="M7 11V7a5 5 0 0110 0v4" />
+          </svg>
+          <strong>View only.</strong>
+          Changes here will not be saved — you have view permission on this process.
+        </div>
+      )}
+
+      <fieldset
+        disabled={readOnly}
+        style={{ flex: 1, overflow: "auto", border: 0, padding: 0, margin: 0, minWidth: 0 }}
+      >
         {wizardStep === "details" && <StepDetails />}
         {wizardStep === "document" && <StepDocument />}
-      </div>
+      </fieldset>
     </div>
   );
 }
