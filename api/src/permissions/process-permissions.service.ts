@@ -9,6 +9,7 @@ import {
 import { and, eq, inArray } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import * as schema from "../database/schema";
+import { CorrelationContext } from "../common/observability/correlation-context";
 
 export type ProcessPermission =
   | "view"
@@ -260,6 +261,22 @@ export class ProcessPermissionsService {
           grantedBy: params.grantedBy,
         })
         .returning();
+      // H1 — append-only audit row. Insert in the same try block so a
+      // failed grant doesn't leave a phantom audit entry, but we don't
+      // wrap in a Drizzle transaction since the grant insert is the
+      // unique-key check and if it succeeds the audit row is best-effort
+      // (a noisy log + retry is preferable to refusing the user's grant
+      // because the audit write hiccuped).
+      await this.db.insert(schema.permissionAuditEvents).values({
+        tenantId: params.tenantId,
+        processId: params.processId,
+        action: "granted",
+        granteeType: params.granteeType,
+        granteeId: params.granteeId,
+        permission: params.permission,
+        actorUserId: params.grantedBy,
+        correlationId: CorrelationContext.getCorrelationId() ?? null,
+      });
       return row;
     } catch (err: unknown) {
       if (
@@ -278,6 +295,7 @@ export class ProcessPermissionsService {
     tenantId: string;
     processId: string;
     grantId: string;
+    actorUserId: string;
   }) {
     const [deleted] = await this.db
       .delete(schema.processPermissions)
@@ -290,6 +308,51 @@ export class ProcessPermissionsService {
       )
       .returning();
     if (!deleted) throw new NotFoundException("Grant not found");
+    // H1 — record the revoke. Capture the same grantee/permission
+    // shape we just deleted so the audit row stands alone without
+    // needing to join back.
+    await this.db.insert(schema.permissionAuditEvents).values({
+      tenantId: params.tenantId,
+      processId: params.processId,
+      action: "revoked",
+      granteeType: deleted.granteeType,
+      granteeId: deleted.granteeId,
+      permission: deleted.permission,
+      actorUserId: params.actorUserId,
+      correlationId: CorrelationContext.getCorrelationId() ?? null,
+    });
     return { revoked: true };
+  }
+
+  /** H1 — read the audit trail for a process. Used by the Permissions
+   *  page's "History" tab (UX comes in a later sprint; the endpoint is
+   *  available now). Newest first, capped at 200 — pagination later
+   *  if it ever fills up. */
+  async listAudit(tenantId: string, processId: string) {
+    return this.db
+      .select({
+        id: schema.permissionAuditEvents.id,
+        action: schema.permissionAuditEvents.action,
+        granteeType: schema.permissionAuditEvents.granteeType,
+        granteeId: schema.permissionAuditEvents.granteeId,
+        permission: schema.permissionAuditEvents.permission,
+        actorUserId: schema.permissionAuditEvents.actorUserId,
+        actorName: schema.users.displayName,
+        correlationId: schema.permissionAuditEvents.correlationId,
+        createdAt: schema.permissionAuditEvents.createdAt,
+      })
+      .from(schema.permissionAuditEvents)
+      .leftJoin(
+        schema.users,
+        eq(schema.users.id, schema.permissionAuditEvents.actorUserId),
+      )
+      .where(
+        and(
+          eq(schema.permissionAuditEvents.tenantId, tenantId),
+          eq(schema.permissionAuditEvents.processId, processId),
+        ),
+      )
+      .orderBy(schema.permissionAuditEvents.createdAt)
+      .limit(200);
   }
 }

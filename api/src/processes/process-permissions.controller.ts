@@ -83,6 +83,27 @@ export class ProcessPermissionsController {
       tenantId: req.user.tenantId,
       processId: id,
       grantId,
+      actorUserId: req.user.sub,
     });
+  }
+
+  /** H1 — audit trail. Available to anyone with `admin` on the process
+   *  (same gate as the grant endpoints). Newest first. */
+  @Get("audit")
+  async audit(
+    @Req() req: AuthenticatedRequest,
+    @Param("id", ParseUUIDPipe) id: string,
+  ) {
+    await this.perms.assert(
+      {
+        userId: req.user.sub,
+        tenantId: req.user.tenantId,
+        systemRole: req.user.systemRole,
+        roles: req.user.roles ?? [],
+      },
+      id,
+      "admin",
+    );
+    return this.perms.listAudit(req.user.tenantId, id);
   }
 }

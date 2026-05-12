@@ -395,6 +395,54 @@ export const processPermissions = pgTable(
   ],
 );
 
+// ─── PERMISSION_AUDIT_EVENTS (H1) ───────────────────────────────────
+// Append-only history of every grant and revoke against
+// PROCESS_PERMISSIONS. Compliance use case: "who gave X this access
+// on date Y" — the answer must survive even after the grant has been
+// revoked, so this can't live as soft-delete on PROCESS_PERMISSIONS.
+//
+// One row per action. PROCESSES.id is FK with onDelete=cascade so
+// purging a process also purges its audit trail (acceptable: if the
+// process is gone the questions are moot).
+
+export const permissionAuditActionEnum = pgEnum("PERMISSION_AUDIT_ACTION", [
+  "granted",
+  "revoked",
+]);
+
+export const permissionAuditEvents = pgTable(
+  "PERMISSION_AUDIT_EVENTS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    processId: uuid("PROCESS_ID")
+      .notNull()
+      .references(() => processes.id, { onDelete: "cascade" }),
+    action: permissionAuditActionEnum("ACTION").notNull(),
+    granteeType: processGranteeTypeEnum("GRANTEE_TYPE").notNull(),
+    granteeId: varchar("GRANTEE_ID", { length: 128 }).notNull(),
+    permission: processPermissionEnum("PERMISSION").notNull(),
+    /** Who performed the action. Nullable + onDelete:set null so the
+     *  audit trail survives the actor's deletion. */
+    actorUserId: uuid("ACTOR_USER_ID").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** Correlation id of the HTTP request that produced the row.
+     *  Pairs with the structured log line for full forensics. */
+    correlationId: varchar("CORRELATION_ID", { length: 64 }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("PERM_AUDIT_PROCESS_CREATED_IDX").on(t.processId, t.createdAt.desc()),
+    index("PERM_AUDIT_TENANT_CREATED_IDX").on(t.tenantId, t.createdAt.desc()),
+    index("PERM_AUDIT_GRANTEE_IDX").on(t.granteeType, t.granteeId),
+  ],
+);
+
 // ─── PROCESS_VERSIONS ───────────────────────────────────────────────
 // Content-addressed snapshots of a process canvas. Replaces inlining
 // the full DEFINITION_SNAPSHOT into every PROCESS_INSTANCES row:
