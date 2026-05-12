@@ -9,15 +9,29 @@ import { formatRelativeTime } from "../../lib/utils";
 export default function ProcessSubheader({
   dirty = false,
   onSave,
+  readOnly = false,
 }: {
   dirty?: boolean;
   onSave?: () => void | Promise<void>;
+  readOnly?: boolean;
 } = {}) {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const canPublish =
+  const effectivePermissions = useCanvasStore(
+    (s) => s.processMeta.effectivePermissions,
+  );
+  const isSystemAdmin =
     user?.systemRole === "owner" || user?.systemRole === "admin";
-  const canManagePermissions = canPublish;
+  // OS1 — admins/owners always pass; non-admins gated on explicit grants.
+  // effectivePermissions is empty before the GET /processes/:id has
+  // resolved; default to "trust the systemRole" so we don't hide
+  // buttons during the brief load window.
+  const hasPerm = (p: string) =>
+    isSystemAdmin ||
+    effectivePermissions.length === 0 ||
+    effectivePermissions.includes(p);
+  const canPublish = hasPerm("publish");
+  const canManagePermissions = hasPerm("admin");
 
   const processId = useCanvasStore((s) => s.processId);
   const processMeta = useCanvasStore((s) => s.processMeta);
@@ -27,6 +41,7 @@ export default function ProcessSubheader({
   const setWizardOrigin = useCanvasStore((s) => s.setWizardOrigin);
   const saveStatus = useCanvasStore((s) => s.saveStatus);
   const lastSavedAt = useCanvasStore((s) => s.lastSavedAt);
+  const saveError = useCanvasStore((s) => s.saveError);
 
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
@@ -101,7 +116,20 @@ export default function ProcessSubheader({
 
       {/* Right: Save button + status + Creator + last updated + Edit button */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-        {dirty ? (
+        {saveStatus === "error" && saveError ? (
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "#B91C1C", fontWeight: 500,
+            maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }} title={saveError}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2.5" strokeLinecap="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            Save failed: {saveError}
+          </span>
+        ) : dirty ? (
           <span style={{
             display: "inline-flex", alignItems: "center", gap: 6,
             fontSize: 11, color: "#B45309", fontWeight: 500,
@@ -113,31 +141,33 @@ export default function ProcessSubheader({
           <SaveStatusPill status={saveStatus} lastSavedAt={lastSavedAt} />
         )}
 
-        <button
-          onClick={() => onSave?.()}
-          disabled={!dirty || saveStatus === "saving"}
-          title={dirty ? "Save canvas (⌘S)" : "No changes to save"}
-          style={{
-            display: "flex", alignItems: "center", gap: 5,
-            padding: "5px 12px", borderRadius: 6,
-            border: "1px solid " + (dirty ? "#4F46E5" : "#E5E7EB"),
-            background: dirty ? "#4F46E5" : "#F9FAFB",
-            color: dirty ? "#fff" : "#9CA3AF",
-            fontSize: 12, fontWeight: 600,
-            cursor: dirty && saveStatus !== "saving" ? "pointer" : "not-allowed",
-            fontFamily: "inherit",
-            transition: "all 0.15s ease",
-            whiteSpace: "nowrap",
-            opacity: saveStatus === "saving" ? 0.6 : 1,
-          }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-            <polyline points="17 21 17 13 7 13 7 21"/>
-            <polyline points="7 3 7 8 15 8"/>
-          </svg>
-          {saveStatus === "saving" ? "Saving…" : "Save"}
-        </button>
+        {!readOnly && (
+          <button
+            onClick={() => onSave?.()}
+            disabled={!dirty || saveStatus === "saving"}
+            title={dirty ? "Save canvas (⌘S)" : "No changes to save"}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "5px 12px", borderRadius: 6,
+              border: "1px solid " + (dirty ? "#4F46E5" : "#E5E7EB"),
+              background: dirty ? "#4F46E5" : "#F9FAFB",
+              color: dirty ? "#fff" : "#9CA3AF",
+              fontSize: 12, fontWeight: 600,
+              cursor: dirty && saveStatus !== "saving" ? "pointer" : "not-allowed",
+              fontFamily: "inherit",
+              transition: "all 0.15s ease",
+              whiteSpace: "nowrap",
+              opacity: saveStatus === "saving" ? 0.6 : 1,
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+              <polyline points="17 21 17 13 7 13 7 21"/>
+              <polyline points="7 3 7 8 15 8"/>
+            </svg>
+            {saveStatus === "saving" ? "Saving…" : "Save"}
+          </button>
+        )}
 
         {processMeta.creatorName && (
           <div style={{ display: "flex", alignItems: "center", gap: 5 }}>

@@ -6,7 +6,7 @@
       "runtimeExecutable": "bash",
       "runtimeArgs": ["-c", "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" && nvm use 20.19.6 && cd /Users/vigneshmani/Documents/innovatech/bpm/.claude/worktrees/stoic-ellis-809036/web && VITE_API_PROXY=${VITE_API_PROXY:-http://localhost:3001} npx vite --port $PORT --host 127.0.0.1"],
       "port": 5180,
-      "autoPort": true
+      "autoPort": false
     }
   ]
 }

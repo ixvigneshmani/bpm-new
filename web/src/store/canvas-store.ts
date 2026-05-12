@@ -27,9 +27,18 @@ export type ProcessMeta = {
   status: string;
   creatorName: string;
   updatedAt: string;
+  /** OS1 — permissions the current caller effectively holds on this
+   *  process. Populated by GET /processes/:id. Used to lock the canvas
+   *  to read-only when the user lacks `edit`, hide the Publish button
+   *  when they lack `publish`, etc. Empty array = nothing fetched yet. */
+  effectivePermissions: string[];
 };
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+/** Last save error message (HTTP message body) surfaced in the
+ *  subheader. Cleared on the next successful save. */
+export type SaveError = string | null;
 
 export type CanvasState = {
   processId: string | null;
@@ -50,6 +59,7 @@ export type CanvasState = {
   /* Save state surfaced in the subheader */
   saveStatus: SaveStatus;
   lastSavedAt: number | null;        // epoch ms
+  saveError: SaveError;
 
   /* In-memory clipboard (nodes + edges that were copied) */
   clipboard: { nodes: Node[]; edges: Edge[] } | null;
@@ -108,7 +118,7 @@ export type CanvasState = {
    *  to an edge-scoped validation issue. */
   selectEdge: (edgeId: string) => void;
 
-  setSaveStatus: (status: SaveStatus) => void;
+  setSaveStatus: (status: SaveStatus, error?: string | null) => void;
 
   setProcessId: (id: string | null) => void;
   setProcessMeta: (meta: Partial<ProcessMeta>) => void;
@@ -210,7 +220,7 @@ const useCanvasStore = create<CanvasState>()(
   temporal(
     (set, get) => ({
       processId: null as string | null,
-      processMeta: { name: "", description: "", businessDoc: null, businessDocName: "", businessDocSource: null, status: "DRAFT", creatorName: "", updatedAt: "" },
+      processMeta: { name: "", description: "", businessDoc: null, businessDocName: "", businessDocSource: null, status: "DRAFT", creatorName: "", updatedAt: "", effectivePermissions: [] },
       wizardStep: "details" as const,
       wizardOrigin: "list" as const,
       documentDirty: false,
@@ -220,6 +230,7 @@ const useCanvasStore = create<CanvasState>()(
       selectedNodeId: null,
       saveStatus: "idle" as SaveStatus,
       lastSavedAt: null as number | null,
+      saveError: null as SaveError,
       clipboard: null,
       connectMode: "sequence" as const,
 
@@ -639,10 +650,16 @@ const useCanvasStore = create<CanvasState>()(
         });
       },
 
-      setSaveStatus: (status) => {
+      setSaveStatus: (status, error) => {
         set({
           saveStatus: status,
           lastSavedAt: status === "saved" ? Date.now() : get().lastSavedAt,
+          saveError:
+            status === "error"
+              ? (error ?? "Save failed")
+              : status === "saved" || status === "saving"
+                ? null
+                : get().saveError,
         });
       },
 
@@ -779,7 +796,7 @@ const useCanvasStore = create<CanvasState>()(
 
       resetCanvas: () => set({
         processId: null,
-        processMeta: { name: "", description: "", businessDoc: null, businessDocName: "", businessDocSource: null, status: "DRAFT", creatorName: "", updatedAt: "" },
+        processMeta: { name: "", description: "", businessDoc: null, businessDocName: "", businessDocSource: null, status: "DRAFT", creatorName: "", updatedAt: "", effectivePermissions: [] },
         wizardStep: "details",
         wizardOrigin: "list",
         documentDirty: false,
@@ -788,6 +805,7 @@ const useCanvasStore = create<CanvasState>()(
         selectedNodeId: null,
         saveStatus: "idle",
         lastSavedAt: null,
+        saveError: null,
         clipboard: null,
       }),
     }),

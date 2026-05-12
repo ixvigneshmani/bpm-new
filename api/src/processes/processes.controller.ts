@@ -75,7 +75,15 @@ export class ProcessesController {
     @Param("id", ParseUUIDPipe) id: string,
   ) {
     await this.permissions.assert(this.callerCtx(req), id, "view");
-    return this.processesService.findOneWithDocument(id, req.user.tenantId);
+    const process = await this.processesService.findOneWithDocument(
+      id,
+      req.user.tenantId,
+    );
+    const effectivePermissions = await this.permissions.effective(
+      this.callerCtx(req),
+      id,
+    );
+    return { ...process, effectivePermissions };
   }
 
   @Patch(":id")

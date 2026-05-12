@@ -112,8 +112,13 @@ function CanvasInner() {
       // reset the baseline. Dirty drops to false next render.
       setCanvasBaselineSig(JSON.stringify(payload));
     } catch (e) {
-      console.warn("Save failed:", (e as Error).message);
-      setSaveStatus("error");
+      const raw = (e as Error).message || "Save failed";
+      // Friendlier message for the most common 403 case (OS1 RBAC).
+      const friendly = /forbidden|permission/i.test(raw)
+        ? "You don't have edit permission on this process."
+        : raw;
+      console.warn("Save failed:", raw);
+      setSaveStatus("error", friendly);
     }
   }, [canvasProcessId, rawNodes, edges, setSaveStatus, setCanvasBaselineSig]);
 
@@ -423,11 +428,45 @@ function CanvasInner() {
   }, [deleteSelected, copySelected, pasteClipboard, duplicateSelected]);
 
   const showWizard = wizardStep !== "canvas";
+  const effectivePermissions = useCanvasStore(
+    (s) => s.processMeta.effectivePermissions,
+  );
+  // OS1 — lock canvas interaction when the caller lacks `edit`. The
+  // backend rejects unauthorised PUTs anyway; this stops the user from
+  // making changes that would silently lose on refresh, and surfaces
+  // the read-only state up-front.
+  const readOnly =
+    !!canvasProcessId &&
+    effectivePermissions.length > 0 &&
+    !effectivePermissions.includes("edit");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
       {/* Subheader — visible only on canvas step */}
-      <ProcessSubheader dirty={dirty} onSave={handleSave} />
+      <ProcessSubheader dirty={dirty} onSave={handleSave} readOnly={readOnly} />
+
+      {/* Read-only banner */}
+      {readOnly && !showWizard && (
+        <div style={{
+          padding: "8px 20px",
+          background: "#FFFBEB",
+          borderBottom: "1px solid #FDE68A",
+          color: "#92400E",
+          fontSize: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" />
+            <path d="M7 11V7a5 5 0 0110 0v4" />
+          </svg>
+          <strong>View only.</strong>
+          You do not have edit permission on this process. Changes you make
+          on the canvas will not be saved. Ask an admin to grant you edit
+          access from the Permissions page.
+        </div>
+      )}
 
       {/* Wizard overlay */}
       {showWizard && <ProcessWizard />}
@@ -442,16 +481,19 @@ function CanvasInner() {
         <ReactFlow
           nodes={nodes}
           edges={visibleEdges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onReconnect={onReconnect}
+          onNodesChange={readOnly ? undefined : onNodesChange}
+          onEdgesChange={readOnly ? undefined : onEdgesChange}
+          onConnect={readOnly ? undefined : onConnect}
+          onReconnect={readOnly ? undefined : onReconnect}
           reconnectRadius={20}
-          edgesReconnectable
+          edgesReconnectable={!readOnly}
+          nodesDraggable={!readOnly}
+          nodesConnectable={!readOnly}
+          elementsSelectable
           onInit={(instance) => { reactFlowInstance.current = instance; }}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          onNodeDragStop={onNodeDragStop}
+          onDrop={readOnly ? undefined : onDrop}
+          onDragOver={readOnly ? undefined : onDragOver}
+          onNodeDragStop={readOnly ? undefined : onNodeDragStop}
           onNodeClick={onNodeClick}
           onEdgeClick={onEdgeClick}
           onPaneClick={onPaneClick}
@@ -574,6 +616,7 @@ export default function DesignCanvasPage() {
             creatorName: string | null;
             canvasData: { nodes: any[]; edges: any[] } | null;
             document: { schemaOverride: Record<string, unknown>; source: string; documentId: string | null } | null;
+            effectivePermissions?: string[];
           }>(`/processes/${id}`);
           setProcessId(proc.id);
           setProcessMeta({
@@ -585,6 +628,7 @@ export default function DesignCanvasPage() {
             status: proc.status || "DRAFT",
             creatorName: proc.creatorName || "",
             updatedAt: proc.updatedAt || "",
+            effectivePermissions: proc.effectivePermissions ?? [],
           });
           // Restore canvas data if available — run through schema migrations
           if (proc.canvasData) {

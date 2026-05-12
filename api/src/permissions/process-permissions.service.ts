@@ -106,6 +106,21 @@ export class ProcessPermissionsService {
     return false;
   }
 
+  /** Return the full set of permissions the caller effectively holds
+   *  on this process — used by the UI to lock read-only canvases and
+   *  hide actions the user can't perform. Same precedence as `can`. */
+  async effective(
+    caller: CallerContext,
+    processId: string,
+  ): Promise<ProcessPermission[]> {
+    const all: ProcessPermission[] = ["view", "start", "edit", "publish", "admin"];
+    const held: ProcessPermission[] = [];
+    for (const p of all) {
+      if (await this.can(caller, processId, p)) held.push(p);
+    }
+    return held;
+  }
+
   /** Throwing variant used in controller bodies. */
   async assert(
     caller: CallerContext,
