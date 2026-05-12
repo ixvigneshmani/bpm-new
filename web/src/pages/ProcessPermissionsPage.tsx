@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiDelete, apiGet, apiPost } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import ConfirmModal, { type ConfirmConfig } from "../components/ConfirmModal";
 
 type GranteeType = "user" | "role";
 type Permission = "view" | "start" | "edit" | "publish" | "admin";
@@ -12,6 +13,10 @@ interface Grant {
   granteeId: string;
   permission: Permission;
   grantedAt: string;
+  /** L10 — joined display name of the user who created this grant.
+   *  Falls back to grantedBy uuid if the user has since been removed. */
+  grantorName?: string | null;
+  grantedBy?: string | null;
 }
 
 interface TenantUser {
@@ -56,6 +61,7 @@ export default function ProcessPermissionsPage() {
   const [granteeType, setGranteeType] = useState<GranteeType>("user");
   const [granteeId, setGranteeId] = useState("");
   const [permission, setPermission] = useState<Permission>("view");
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -108,15 +114,31 @@ export default function ProcessPermissionsPage() {
     }
   };
 
-  const handleRevoke = async (grantId: string) => {
+  const handleRevoke = (grant: Grant) => {
     if (!id) return;
-    if (!window.confirm("Revoke this grant?")) return;
-    try {
-      await apiDelete(`/processes/${id}/permissions/${grantId}`);
-      setGrants((prev) => prev.filter((g) => g.id !== grantId));
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    const label = granteeLabel(grant);
+    setConfirm({
+      title: "Revoke permission?",
+      body: (
+        <>
+          Remove <strong>{grant.permission}</strong> permission from{" "}
+          <strong>{label}</strong> on this process? This is recorded in the
+          audit trail and can be re-granted later.
+        </>
+      ),
+      danger: true,
+      confirmLabel: "Revoke",
+      cancelLabel: "Keep",
+      onConfirm: async () => {
+        setConfirm(null);
+        try {
+          await apiDelete(`/processes/${id}/permissions/${grant.id}`);
+          setGrants((prev) => prev.filter((g) => g.id !== grant.id));
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      },
+    });
   };
 
   const granteeLabel = (g: Grant): string => {
@@ -295,6 +317,7 @@ export default function ProcessPermissionsPage() {
               <tr style={{ textAlign: "left", color: "#6B7280" }}>
                 <th style={thStyle}>Grantee</th>
                 <th style={thStyle}>Permission</th>
+                <th style={thStyle}>Granted by</th>
                 <th style={thStyle}>Granted</th>
                 <th style={{ ...thStyle, textAlign: "right" }}></th>
               </tr>
@@ -307,11 +330,14 @@ export default function ProcessPermissionsPage() {
                     <span style={permBadge}>{g.permission}</span>
                   </td>
                   <td style={{ ...tdStyle, color: "#6B7280" }}>
+                    {g.grantorName || "—"}
+                  </td>
+                  <td style={{ ...tdStyle, color: "#6B7280" }}>
                     {new Date(g.grantedAt).toLocaleDateString()}
                   </td>
                   <td style={{ ...tdStyle, textAlign: "right" }}>
                     <button
-                      onClick={() => handleRevoke(g.id)}
+                      onClick={() => handleRevoke(g)}
                       style={btnDanger}
                     >
                       Revoke
@@ -323,6 +349,10 @@ export default function ProcessPermissionsPage() {
           </table>
         )}
       </section>
+
+      {confirm && (
+        <ConfirmModal {...confirm} onClose={() => setConfirm(null)} />
+      )}
 
       <div
         style={{

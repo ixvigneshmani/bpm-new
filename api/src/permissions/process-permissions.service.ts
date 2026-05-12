@@ -226,12 +226,49 @@ export class ProcessPermissionsService {
     return visible;
   }
 
+  /** L8 — process ids in this batch that have at least one grant.
+   *  Used by GET /processes to mark "restricted" cards on the
+   *  designer list when the caller isn't a system admin. */
+  async restrictedProcessIds(
+    tenantId: string,
+    processIds: string[],
+  ): Promise<Set<string>> {
+    if (processIds.length === 0) return new Set();
+    const rows = await this.db
+      .select({ processId: schema.processPermissions.processId })
+      .from(schema.processPermissions)
+      .where(
+        and(
+          eq(schema.processPermissions.tenantId, tenantId),
+          inArray(schema.processPermissions.processId, processIds),
+        ),
+      );
+    return new Set(rows.map((r) => r.processId));
+  }
+
   // ─── CRUD ─────────────────────────────────────────────────────────
 
   async list(tenantId: string, processId: string) {
+    // L10 — join the grantor display name so the UI doesn't have to
+    // hop back to USERS for every row. leftJoin so an old grant with
+    // a since-deleted grantor still shows up (grantorName: null).
     return this.db
-      .select()
+      .select({
+        id: schema.processPermissions.id,
+        tenantId: schema.processPermissions.tenantId,
+        processId: schema.processPermissions.processId,
+        granteeType: schema.processPermissions.granteeType,
+        granteeId: schema.processPermissions.granteeId,
+        permission: schema.processPermissions.permission,
+        grantedBy: schema.processPermissions.grantedBy,
+        grantedAt: schema.processPermissions.grantedAt,
+        grantorName: schema.users.displayName,
+      })
       .from(schema.processPermissions)
+      .leftJoin(
+        schema.users,
+        eq(schema.users.id, schema.processPermissions.grantedBy),
+      )
       .where(
         and(
           eq(schema.processPermissions.tenantId, tenantId),

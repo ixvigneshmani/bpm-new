@@ -20,7 +20,7 @@ export default function ProcessListPage() {
   const [showSortDropdown, setShowSortDropdown] = useState(false);
 
   // Fetch real processes from API
-  type ApiProcess = { id: string; name: string; description: string | null; status: string; version: string; step: string; createdBy: string; createdAt: string; updatedAt: string };
+  type ApiProcess = { id: string; name: string; description: string | null; status: string; version: string; step: string; createdBy: string; createdAt: string; updatedAt: string; isRestrictedForCaller?: boolean };
   const [apiProcesses, setApiProcesses] = useState<ApiProcess[]>([]);
 
   useEffect(() => {
@@ -40,6 +40,7 @@ export default function ProcessListPage() {
         updated, updatedSort: new Date(p.updatedAt).getTime(),
         version: p.version || "v1.0", tasks: 0, runs: 0,
         step: p.step, isReal: true,
+        isRestricted: !!p.isRestrictedForCaller,
       };
     });
     return fromApi;
@@ -455,7 +456,20 @@ export default function ProcessListPage() {
                 <div style={{ flex: 1, padding: "18px 20px" }}>
                   {/* Header: title + status badge */}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, color: "#111827" }}>{proc.name}</div>
+                    <div style={{ fontSize: 15, fontWeight: 600, color: "#111827", display: "flex", alignItems: "center", gap: 6 }}>
+                      {(proc as any).isRestricted && (
+                        <span
+                          title="You have explicit access to this process. Contact an admin if you need broader access."
+                          style={{ display: "inline-flex", alignItems: "center", color: "#92400E" }}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" />
+                            <path d="M7 11V7a5 5 0 0110 0v4" />
+                          </svg>
+                        </span>
+                      )}
+                      {proc.name}
+                    </div>
                     <span style={{
                       display: "inline-flex", alignItems: "center", gap: 5,
                       padding: "3px 10px", borderRadius: 6,
