@@ -684,8 +684,11 @@ export const webhookSubscriptions = pgTable(
      *  dispatcher splits + matches at runtime. */
     eventTypes: text("EVENT_TYPES").notNull().default("*"),
     /** Shared secret used for the X-Engine-Signature HMAC. Stored
-     *  plaintext today; encrypt-at-rest is on the security backlog. */
-    secret: varchar("SECRET", { length: 128 }).notNull(),
+     *  encrypted at rest (OS8) in the `enc:v1:<iv>:<ciphertext>` format
+     *  produced by CryptoService. A 32-byte hex secret (64 ASCII chars)
+     *  encrypts to ~132 chars, so the column is sized to 512 with room
+     *  for future v2/v3 envelopes (KMS-wrapped DEK adds ~200 chars). */
+    secret: varchar("SECRET", { length: 512 }).notNull(),
     status: webhookSubscriptionStatusEnum("STATUS").notNull().default("active"),
     createdBy: uuid("CREATED_BY")
       .notNull()

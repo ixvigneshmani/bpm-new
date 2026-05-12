@@ -15,6 +15,13 @@
       "when": 1778568779984,
       "tag": "0001_ee2_smoke_role_sort_order",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778569753042,
+      "tag": "0002_os8_widen_webhook_secret",
+      "breakpoints": true
     }
   ]
 }

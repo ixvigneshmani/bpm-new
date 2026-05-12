@@ -13,10 +13,14 @@ import { randomBytes } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import { webhookSubscriptions } from "../database/schema";
+import { CryptoService } from "../common/crypto/crypto.service";
 
 @Injectable()
 export class WebhooksService {
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    private readonly crypto: CryptoService,
+  ) {}
 
   /** Create a new subscription. Secret is generated server-side
    *  (32 random bytes hex) and returned exactly once — callers must
@@ -38,6 +42,11 @@ export class WebhooksService {
     status: "active";
   }> {
     const secret = randomBytes(32).toString("hex");
+    // OS8 — encrypt at rest. The plaintext secret returns to the
+    // caller ONCE (so they can configure their receiver) but only
+    // the encrypted form lands in the DB. Decrypt-on-use happens
+    // in the outbox dispatcher.
+    const encryptedSecret = this.crypto.encrypt(secret);
     const [row] = await this.db
       .insert(webhookSubscriptions)
       .values({
@@ -47,7 +56,7 @@ export class WebhooksService {
         url: args.url,
         eventTypes: args.eventTypes ?? "*",
         processId: args.processId ?? null,
-        secret,
+        secret: encryptedSecret,
       })
       .returning();
     return {

@@ -34,6 +34,7 @@ import {
   webhookSubscriptions,
 } from "../database/schema";
 import { WorkerService, type ClaimedJob } from "./worker.service";
+import { CryptoService } from "../common/crypto/crypto.service";
 
 const DISPATCH_TICK_MS = 2_000;
 const BATCH_SIZE = 25;
@@ -56,6 +57,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly worker: WorkerService,
+    private readonly crypto: CryptoService,
   ) {}
 
   onModuleInit(): void {
@@ -169,6 +171,11 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           input: {
             subscriptionId: sub.id,
             url: sub.url,
+            // OS8 — keep the secret in encrypted form inside the job
+            // payload. ENGINE_JOBS.input is jsonb and not encrypted as
+            // a whole; stuffing plaintext here would re-expose what
+            // WebhookSubscriptions.secret was just protected from.
+            // Decryption happens in deliverWebhook right before HMAC.
             secret: sub.secret,
             event: {
               id: ev.id,
@@ -203,7 +210,11 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       event: Record<string, unknown>;
     };
     const body = JSON.stringify(input.event);
-    const signature = createHmac("sha256", input.secret)
+    // OS8 — decrypt right before signing. The plaintext lives in this
+    // function's stack only; the on-disk job payload + the source
+    // subscription row both stay encrypted.
+    const plaintextSecret = this.crypto.decrypt(input.secret);
+    const signature = createHmac("sha256", plaintextSecret)
       .update(body)
       .digest("hex");
 

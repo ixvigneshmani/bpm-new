@@ -29,6 +29,17 @@ function assertProductionConfig(config: ConfigService): void {
       "Refusing to boot in production: CORS_ORIGIN must not include any localhost entry.",
     );
   }
+
+  // OS8 — ENCRYPTION_KEY required in prod. Reasserted here in addition
+  // to the runtime check inside CryptoService.onModuleInit so we fail
+  // before listen() rather than during the first secret operation.
+  const encKey = config.get<string>("ENCRYPTION_KEY");
+  if (!encKey || encKey.length !== 64 || !/^[0-9a-f]+$/i.test(encKey)) {
+    throw new Error(
+      "Refusing to boot in production: ENCRYPTION_KEY must be a 64-char hex string. " +
+        "Generate via `openssl rand -hex 32`.",
+    );
+  }
 }
 
 async function bootstrap() {
