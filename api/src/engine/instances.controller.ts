@@ -21,6 +21,7 @@ import { SuspendInstanceDto } from "./dto/suspend-instance.dto";
 import { ReplayInstanceDto } from "./dto/replay-instance.dto";
 import { EngineService } from "./engine.service";
 import { IdempotencyService } from "./idempotency.service";
+import { ProcessPermissionsService } from "../permissions/process-permissions.service";
 import { ForbiddenException } from "@nestjs/common";
 
 /** Admin-only guard for mutating ops (edit vars, suspend, resume).
@@ -39,7 +40,17 @@ export class InstancesController {
     private readonly engine: EngineService,
     private readonly idempotency: IdempotencyService,
     private readonly users: UsersService,
+    private readonly permissions: ProcessPermissionsService,
   ) {}
+
+  private callerCtx(req: AuthenticatedRequest) {
+    return {
+      userId: req.user.sub,
+      tenantId: req.user.tenantId,
+      systemRole: req.user.systemRole,
+      roles: req.user.roles ?? [],
+    };
+  }
 
   /** GET /instances?status=<status>
    *  Tenant-wide list of instances (newest first, capped at 200).
@@ -47,7 +58,7 @@ export class InstancesController {
    *  failed/cancelled. Used by the "Running" page to show what's in
    *  flight without picking a process first. */
   @Get()
-  list(
+  async list(
     @Req() req: AuthenticatedRequest,
     @Query("status") status?: string,
     @Query("businessKey") businessKey?: string,
@@ -58,25 +69,37 @@ export class InstancesController {
         `status must be one of: ${allowed.join(", ")}`,
       );
     }
-    return this.engine.listInstancesForTenant({
+    const rows = await this.engine.listInstancesForTenant({
       tenantId: req.user.tenantId,
       status: status as (typeof allowed)[number] | undefined,
       businessKey: businessKey?.trim() || undefined,
     });
+    // OS1 / H3 — restrict to instances of processes the caller can
+    // view. Admins pass through unchanged via the resolver's escape
+    // hatch.
+    const visible = await this.permissions.filterVisible(
+      this.callerCtx(req),
+      rows.map((r) => r.processId),
+    );
+    return rows.filter((r) => visible.has(r.processId));
   }
 
   /** GET /instances/:id
    *  Single-instance detail: state, variables, live tokens, last 50
    *  audit events. The debug + operability view. */
   @Get(":id")
-  getInstance(
+  async getInstance(
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
-    return this.engine.getInstance({
+    const inst = await this.engine.getInstance({
       instanceId: id,
       tenantId: req.user.tenantId,
     });
+    // OS1 / H3 — block direct fetch of an instance whose process the
+    // caller has no view on.
+    await this.permissions.assert(this.callerCtx(req), inst.processId, "view");
+    return inst;
   }
 
   /** POST /instances/:id/cancel

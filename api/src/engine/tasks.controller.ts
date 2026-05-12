@@ -21,6 +21,7 @@ import { ReassignTaskDto } from "./dto/reassign-task.dto";
 import { SkipTaskDto } from "./dto/skip-task.dto";
 import { EngineService } from "./engine.service";
 import { IdempotencyService } from "./idempotency.service";
+import { ProcessPermissionsService } from "../permissions/process-permissions.service";
 
 function assertAdmin(req: AuthenticatedRequest) {
   if (req.user.systemRole !== "owner" && req.user.systemRole !== "admin") {
@@ -35,7 +36,17 @@ export class TasksController {
     private readonly engine: EngineService,
     private readonly idempotency: IdempotencyService,
     private readonly users: UsersService,
+    private readonly permissions: ProcessPermissionsService,
   ) {}
+
+  private callerCtx(req: AuthenticatedRequest) {
+    return {
+      userId: req.user.sub,
+      tenantId: req.user.tenantId,
+      systemRole: req.user.systemRole,
+      roles: req.user.roles ?? [],
+    };
+  }
 
   @Get()
   async list(
@@ -45,12 +56,30 @@ export class TasksController {
     // Act-as: an admin can pass X-Acting-For to view a target user's
     // inbox. listTasks is read-only so the roles shown are the target's.
     const effective = await resolveActingFor(req, this.users);
-    return this.engine.listTasks({
+    const rows = await this.engine.listTasks({
       tenantId: req.user.tenantId,
       assignedTo: query.assignedTo,
       userIdForMine: query.assignedTo ? undefined : effective.userId,
       userRoles: effective.roles,
     });
+    // OS1 / H3 — hide tasks belonging to processes the caller can't
+    // view. Act-as scenarios: filter against the IMPERSONATED user's
+    // permissions, since the inbox is supposed to mirror what that
+    // user would see when they log in themselves.
+    const filterCtx = {
+      userId: effective.userId,
+      tenantId: req.user.tenantId,
+      // X-Acting-For impersonates a tenant member, so use that user's
+      // role keys + member-level systemRole when filtering. If the
+      // caller is acting as themselves, fall back to the real systemRole.
+      systemRole: effective.actingBy ? "member" : req.user.systemRole,
+      roles: effective.roles ?? [],
+    };
+    const visible = await this.permissions.filterVisible(
+      filterCtx,
+      rows.map((r) => r.processId),
+    );
+    return rows.filter((r) => visible.has(r.processId));
   }
 
   @Post(":id/claim")
