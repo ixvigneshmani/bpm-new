@@ -92,14 +92,24 @@ export class InstancesController {
     @Req() req: AuthenticatedRequest,
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
-    const inst = await this.engine.getInstance({
+    // HR-1 — resolve the process id with a lightweight lookup and
+    // gate BEFORE we hand the full instance to the engine. Doing it
+    // the other way around (fetch then assert) leaks instance-id
+    // existence to unauthorised callers via the 404-vs-403 distinction.
+    const processId = await this.engine.getInstanceProcessId({
       instanceId: id,
       tenantId: req.user.tenantId,
     });
-    // OS1 / H3 — block direct fetch of an instance whose process the
-    // caller has no view on.
-    await this.permissions.assert(this.callerCtx(req), inst.processId, "view");
-    return inst;
+    if (!processId) {
+      // Collapse to ForbiddenException — refuses to confirm whether
+      // the id exists at all for users without view permission.
+      throw new ForbiddenException("Instance not found or access denied.");
+    }
+    await this.permissions.assert(this.callerCtx(req), processId, "view");
+    return this.engine.getInstance({
+      instanceId: id,
+      tenantId: req.user.tenantId,
+    });
   }
 
   /** POST /instances/:id/cancel

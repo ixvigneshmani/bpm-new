@@ -6,7 +6,7 @@ import {
   BadRequestException,
   ConflictException,
 } from "@nestjs/common";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import * as schema from "../database/schema";
 import { CorrelationContext } from "../common/observability/correlation-context";
@@ -175,17 +175,22 @@ export class ProcessPermissionsService {
     }
   }
 
-  /** Filter a list of process ids down to those the caller may view.
-   *  Used by GET /processes so admins see everything, members see
-   *  unrestricted + explicitly-granted. */
-  async filterVisible(
+  /** HR-3 — single scan of PROCESS_PERMISSIONS that yields both
+   *  filterVisible's visible-set AND L8's restricted-set in one pass.
+   *  Replaces two separate queries that scanned the same row range. */
+  async filterVisibleWithRestricted(
     caller: CallerContext,
     processIds: string[],
-  ): Promise<Set<string>> {
+  ): Promise<{ visible: Set<string>; restricted: Set<string> }> {
     if (caller.systemRole === "owner" || caller.systemRole === "admin") {
-      return new Set(processIds);
+      // Admins see everything; restricted-from-caller's-POV is always
+      // empty for them (the lock icon is for non-admins who've been
+      // explicitly granted access).
+      return { visible: new Set(processIds), restricted: new Set() };
     }
-    if (processIds.length === 0) return new Set();
+    if (processIds.length === 0) {
+      return { visible: new Set(), restricted: new Set() };
+    }
 
     const rows = await this.db
       .select({
@@ -211,8 +216,6 @@ export class ProcessPermissionsService {
       const isRoleGrant =
         r.granteeType === "role" && caller.roles.includes(r.granteeId);
       if (isUserGrant || isRoleGrant) {
-        // Any grant implies at least `view` (start implies start only,
-        // but start callers should still see the process in their list).
         grantedToCaller.add(r.processId);
       }
     }
@@ -223,27 +226,22 @@ export class ProcessPermissionsService {
         visible.add(id);
       }
     }
-    return visible;
+    return { visible, restricted };
   }
 
-  /** L8 — process ids in this batch that have at least one grant.
-   *  Used by GET /processes to mark "restricted" cards on the
-   *  designer list when the caller isn't a system admin. */
-  async restrictedProcessIds(
-    tenantId: string,
+  /** Filter a list of process ids down to those the caller may view.
+   *  Used by GET /processes so admins see everything, members see
+   *  unrestricted + explicitly-granted. Thin wrapper around the
+   *  combined scan for callers that don't need the restricted-set. */
+  async filterVisible(
+    caller: CallerContext,
     processIds: string[],
   ): Promise<Set<string>> {
-    if (processIds.length === 0) return new Set();
-    const rows = await this.db
-      .select({ processId: schema.processPermissions.processId })
-      .from(schema.processPermissions)
-      .where(
-        and(
-          eq(schema.processPermissions.tenantId, tenantId),
-          inArray(schema.processPermissions.processId, processIds),
-        ),
-      );
-    return new Set(rows.map((r) => r.processId));
+    const { visible } = await this.filterVisibleWithRestricted(
+      caller,
+      processIds,
+    );
+    return visible;
   }
 
   // ─── CRUD ─────────────────────────────────────────────────────────
@@ -326,32 +324,34 @@ export class ProcessPermissionsService {
     }
 
     try {
-      const [row] = await this.db
-        .insert(schema.processPermissions)
-        .values({
+      // C2 — grant + audit must be atomic. A separate audit write
+      // could leave the grant present with no record of who did it
+      // (or, for revoke below, drop the permission with no audit
+      // trail — a compliance hole). Wrap both writes in a single
+      // transaction so either both commit or neither does.
+      const row = await this.db.transaction(async (tx) => {
+        const [inserted] = await tx
+          .insert(schema.processPermissions)
+          .values({
+            tenantId: params.tenantId,
+            processId: params.processId,
+            granteeType: params.granteeType,
+            granteeId: params.granteeId,
+            permission: params.permission,
+            grantedBy: params.grantedBy,
+          })
+          .returning();
+        await tx.insert(schema.permissionAuditEvents).values({
           tenantId: params.tenantId,
           processId: params.processId,
+          action: "granted",
           granteeType: params.granteeType,
           granteeId: params.granteeId,
           permission: params.permission,
-          grantedBy: params.grantedBy,
-        })
-        .returning();
-      // H1 — append-only audit row. Insert in the same try block so a
-      // failed grant doesn't leave a phantom audit entry, but we don't
-      // wrap in a Drizzle transaction since the grant insert is the
-      // unique-key check and if it succeeds the audit row is best-effort
-      // (a noisy log + retry is preferable to refusing the user's grant
-      // because the audit write hiccuped).
-      await this.db.insert(schema.permissionAuditEvents).values({
-        tenantId: params.tenantId,
-        processId: params.processId,
-        action: "granted",
-        granteeType: params.granteeType,
-        granteeId: params.granteeId,
-        permission: params.permission,
-        actorUserId: params.grantedBy,
-        correlationId: CorrelationContext.getCorrelationId() ?? null,
+          actorUserId: params.grantedBy,
+          correlationId: CorrelationContext.getCorrelationId() ?? null,
+        });
+        return inserted;
       });
       return row;
     } catch (err: unknown) {
@@ -373,31 +373,34 @@ export class ProcessPermissionsService {
     grantId: string;
     actorUserId: string;
   }) {
-    const [deleted] = await this.db
-      .delete(schema.processPermissions)
-      .where(
-        and(
-          eq(schema.processPermissions.id, params.grantId),
-          eq(schema.processPermissions.tenantId, params.tenantId),
-          eq(schema.processPermissions.processId, params.processId),
-        ),
-      )
-      .returning();
-    if (!deleted) throw new NotFoundException("Grant not found");
-    // H1 — record the revoke. Capture the same grantee/permission
-    // shape we just deleted so the audit row stands alone without
-    // needing to join back.
-    await this.db.insert(schema.permissionAuditEvents).values({
-      tenantId: params.tenantId,
-      processId: params.processId,
-      action: "revoked",
-      granteeType: deleted.granteeType,
-      granteeId: deleted.granteeId,
-      permission: deleted.permission,
-      actorUserId: params.actorUserId,
-      correlationId: CorrelationContext.getCorrelationId() ?? null,
+    // C2 — revoke + audit atomic. If the audit insert failed AFTER
+    // the delete (the previous code path), we'd lose the permission
+    // with zero record of who removed it. Transaction guarantees
+    // either both happen or neither does.
+    return this.db.transaction(async (tx) => {
+      const [deleted] = await tx
+        .delete(schema.processPermissions)
+        .where(
+          and(
+            eq(schema.processPermissions.id, params.grantId),
+            eq(schema.processPermissions.tenantId, params.tenantId),
+            eq(schema.processPermissions.processId, params.processId),
+          ),
+        )
+        .returning();
+      if (!deleted) throw new NotFoundException("Grant not found");
+      await tx.insert(schema.permissionAuditEvents).values({
+        tenantId: params.tenantId,
+        processId: params.processId,
+        action: "revoked",
+        granteeType: deleted.granteeType,
+        granteeId: deleted.granteeId,
+        permission: deleted.permission,
+        actorUserId: params.actorUserId,
+        correlationId: CorrelationContext.getCorrelationId() ?? null,
+      });
+      return { revoked: true };
     });
-    return { revoked: true };
   }
 
   /** H1 — read the audit trail for a process. Used by the Permissions
@@ -428,7 +431,7 @@ export class ProcessPermissionsService {
           eq(schema.permissionAuditEvents.processId, processId),
         ),
       )
-      .orderBy(schema.permissionAuditEvents.createdAt)
+      .orderBy(desc(schema.permissionAuditEvents.createdAt))
       .limit(200);
   }
 }

@@ -62,28 +62,19 @@ export class ProcessesController {
   @Get()
   async findAll(@Req() req: AuthenticatedRequest) {
     const rows = await this.processesService.findAll(req.user.tenantId);
-    const ctx = this.callerCtx(req);
-    const visible = await this.permissions.filterVisible(
-      ctx,
-      rows.map((r) => r.id),
-    );
-    // L8 — flag processes the caller sees only because of an explicit
-    // grant (vs. the default-open policy). System admins always see
-    // everything; for them every process is "unrestricted from their
-    // POV". For members, isRestrictedForCaller = there's at least one
-    // grant on this process (someone deliberately constrained access).
-    const restrictedIds =
-      ctx.systemRole === "owner" || ctx.systemRole === "admin"
-        ? new Set<string>()
-        : await this.permissions.restrictedProcessIds(
-            ctx.tenantId,
-            rows.map((r) => r.id),
-          );
+    // HR-3 — one PROCESS_PERMISSIONS scan yields both visibility AND
+    // the restricted-from-caller's-POV set. Previously two separate
+    // queries scanned the same row range; this folds them.
+    const { visible, restricted } =
+      await this.permissions.filterVisibleWithRestricted(
+        this.callerCtx(req),
+        rows.map((r) => r.id),
+      );
     return rows
       .filter((r) => visible.has(r.id))
       .map((r) => ({
         ...r,
-        isRestrictedForCaller: restrictedIds.has(r.id),
+        isRestrictedForCaller: restricted.has(r.id),
       }));
   }
 

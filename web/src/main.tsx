@@ -30,13 +30,39 @@ if (sentryDsn) {
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <Sentry.ErrorBoundary
-      fallback={({ error }) => (
-        <AppErrorBoundary>
-          {/* If we hit this, Sentry already captured the error;
-              AppErrorBoundary renders its existing friendly fallback. */}
-          <div data-sentry-thrown>{(error as Error)?.message}</div>
-        </AppErrorBoundary>
-      )}
+      // Outer Sentry boundary captures + reports anything that
+      // escapes AppErrorBoundary (which has its own friendly UI).
+      // Fallback here only runs if AppErrorBoundary itself crashed —
+      // a minimal recovery card with no app dependencies.
+      fallback={
+        <div style={{
+          minHeight: "100vh", display: "flex", alignItems: "center",
+          justifyContent: "center", background: "#F9FAFB",
+          fontFamily: "system-ui, sans-serif", padding: 24,
+        }}>
+          <div style={{
+            maxWidth: 420, background: "#fff", padding: 24, borderRadius: 12,
+            border: "1px solid #FECACA", textAlign: "center",
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#B42318", marginBottom: 8 }}>
+              Something went wrong
+            </div>
+            <div style={{ fontSize: 13, color: "#475467", marginBottom: 16 }}>
+              The page can't render. Reload to try again.
+            </div>
+            <button
+              onClick={() => window.location.assign("/")}
+              style={{
+                padding: "9px 16px", borderRadius: 8, border: "none",
+                background: "linear-gradient(135deg,#4F46E5,#6366F1)",
+                color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              Reload app
+            </button>
+          </div>
+        </div>
+      }
     >
       <AppErrorBoundary>
         <BrowserRouter>

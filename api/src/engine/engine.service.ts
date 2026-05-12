@@ -2200,6 +2200,29 @@ export class EngineService {
    *  most recent 50 audit events. The debug view: when E4 lands and
    *  someone asks "why did the gateway choose the wrong branch?", this
    *  is what they look at. */
+  /** HR-1 — lightweight lookup used by the InstancesController to
+   *  gate `view` permission BEFORE running the full instance fetch.
+   *  Returns the processId of the instance, or null if the id doesn't
+   *  exist in the caller's tenant. The caller collapses "not found"
+   *  and "not authorised" into the same 403 to avoid leaking instance
+   *  ids to unauthorised users. */
+  async getInstanceProcessId(args: {
+    instanceId: string;
+    tenantId: string;
+  }): Promise<string | null> {
+    const [row] = await this.db
+      .select({ processId: processInstances.processId })
+      .from(processInstances)
+      .where(
+        and(
+          eq(processInstances.id, args.instanceId),
+          eq(processInstances.tenantId, args.tenantId),
+        ),
+      )
+      .limit(1);
+    return row?.processId ?? null;
+  }
+
   async getInstance(args: {
     instanceId: string;
     tenantId: string;
