@@ -29,6 +29,20 @@ const MIGRATIONS: Record<number, Migration> = {
   1: (payload) => ({ ...payload, schemaVersion: 2 }),
 };
 
+/** React Flow attaches transient UI state to nodes/edges (`selected`,
+ *  `dragging`). These are NOT data — they're per-session UI — but the
+ *  store has historically saved them as-is, causing processes to open
+ *  with a stale selection from whoever saved last. Strip on both load
+ *  and save paths so the persisted shape stays clean. */
+function stripUiState<T extends { selected?: boolean; dragging?: boolean }>(
+  item: T,
+): T {
+  if (!item || typeof item !== "object") return item;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { selected: _s, dragging: _d, ...rest } = item;
+  return rest as T;
+}
+
 /** Accept either a bare `{ nodes, edges }` (legacy) or a versioned payload,
  *  apply migrations, and return the latest shape. Unknown future versions
  *  pass through unchanged with a console warning. */
@@ -57,9 +71,15 @@ export function normalizeCanvasPayload(raw: unknown): CanvasPayload {
     );
   }
 
+  payload.nodes = payload.nodes.map(stripUiState);
+  payload.edges = payload.edges.map(stripUiState);
   return payload;
 }
 
 export function toCanvasPayload(nodes: Node[], edges: Edge[]): CanvasPayload {
-  return { schemaVersion: CANVAS_SCHEMA_VERSION, nodes, edges };
+  return {
+    schemaVersion: CANVAS_SCHEMA_VERSION,
+    nodes: nodes.map(stripUiState),
+    edges: edges.map(stripUiState),
+  };
 }
