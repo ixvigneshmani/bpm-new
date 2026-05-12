@@ -50,6 +50,36 @@ import {
 import { inArray } from "drizzle-orm";
 import { REST_SERVICE_TASK_TOPIC, SERVICE_TASK_TOPIC } from "./service-task-registry";
 import { WorkerService } from "./worker.service";
+import { CorrelationContext } from "../common/observability/correlation-context";
+
+/** OS4.1 / M5 — every INSTANCE_EVENTS row written by the engine flows
+ *  through this helper. It auto-injects the current HTTP request's
+ *  correlationId into the payload so an audit row can be matched back
+ *  to the exact API call that produced it. Falls back gracefully when
+ *  the engine runs outside an HTTP context (worker jobs, scheduler
+ *  ticks) by stamping `null` rather than crashing. */
+function withCorrelation<T extends Record<string, unknown> | null | undefined>(
+  payload: T,
+): T extends null | undefined
+  ? { correlationId: string | null }
+  : T & { correlationId: string | null } {
+  const correlationId = CorrelationContext.getCorrelationId() ?? null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { ...(payload ?? {}), correlationId } as any;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function recordEvent(tx: any, row: Record<string, unknown>) {
+  // Uses the RAW drizzle insert below (NOT the recordEvent wrapper)
+  // to avoid infinite recursion — the bulk sed that introduced this
+  // helper accidentally rewrote the inner call too.
+  return tx
+    .insert(instanceEvents)
+    .values({
+      ...row,
+      payload: withCorrelation(row.payload as Record<string, unknown> | null | undefined),
+    });
+}
 
 /** RFC4122-ish UUID matcher; we use it to defensively validate the
  *  `data.assignment.value` of a directUser before writing it into
@@ -239,7 +269,7 @@ export class EngineService {
 
       // 2. Audit + outbox: instance-started. Outbox row goes in the
       //    same txn so subscriber delivery is at-least-once-on-commit.
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: inst.id,
         userId: args.userId,
@@ -275,7 +305,7 @@ export class EngineService {
         })
         .returning({ id: instanceTokens.id, version: instanceTokens.version });
 
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: inst.id,
         tokenId: token.id,
@@ -314,7 +344,7 @@ export class EngineService {
             completedAt: new Date(),
           })
           .where(eq(processInstances.id, inst.id));
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: inst.id,
           eventType: "instance-completed",
@@ -338,7 +368,7 @@ export class EngineService {
             completedAt: new Date(),
           })
           .where(eq(processInstances.id, inst.id));
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: inst.id,
           eventType: "instance-failed",
@@ -464,7 +494,7 @@ export class EngineService {
       }
 
       if (!isResuming) {
-        await args.tx.insert(instanceEvents).values({
+        await recordEvent(args.tx, {
           tenantId: args.tenantId,
           instanceId: args.instanceId,
           tokenId: args.tokenId,
@@ -474,7 +504,7 @@ export class EngineService {
 
         // Terminal: end event drains the token.
         if (node.type === "endEvent") {
-          await args.tx.insert(instanceEvents).values({
+          await recordEvent(args.tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
             tokenId: args.tokenId,
@@ -487,7 +517,7 @@ export class EngineService {
             version,
             { status: "completed", currentNodeId: nodeId },
           );
-          await args.tx.insert(instanceEvents).values({
+          await recordEvent(args.tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
             tokenId: args.tokenId,
@@ -512,7 +542,7 @@ export class EngineService {
           // through to Queue — but the failure is now visible in the
           // audit trail instead of silent. BUG-17.
           if (assignDiag && assignDiag.reason === "unresolved-expression") {
-            await args.tx.insert(instanceEvents).values({
+            await recordEvent(args.tx, {
               tenantId: args.tenantId,
               instanceId: args.instanceId,
               tokenId: args.tokenId,
@@ -537,7 +567,7 @@ export class EngineService {
               currentNodeId: nodeId,
             },
           );
-          await args.tx.insert(instanceEvents).values({
+          await recordEvent(args.tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
             tokenId: args.tokenId,
@@ -555,7 +585,7 @@ export class EngineService {
           // and emit task-claimed only when a role-member calls the
           // /tasks/:id/claim endpoint (R1.6).
           if (assignedTo) {
-            await args.tx.insert(instanceEvents).values({
+            await recordEvent(args.tx, {
               tenantId: args.tenantId,
               instanceId: args.instanceId,
               tokenId: args.tokenId,
@@ -586,7 +616,7 @@ export class EngineService {
               currentNodeId: nodeId,
             },
           );
-          await args.tx.insert(instanceEvents).values({
+          await recordEvent(args.tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
             tokenId: args.tokenId,
@@ -636,7 +666,7 @@ export class EngineService {
       // Pass-through node-exited. Gateways still emit a single
       // node-exited; the difference is in *which* outgoing edge gets
       // picked below.
-      await args.tx.insert(instanceEvents).values({
+      await recordEvent(args.tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         tokenId: args.tokenId,
@@ -697,7 +727,7 @@ export class EngineService {
         return { tokenStatus: "failed", hops, errorMessage: message };
       }
 
-      await args.tx.insert(instanceEvents).values({
+      await recordEvent(args.tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         tokenId: args.tokenId,
@@ -776,7 +806,7 @@ export class EngineService {
       // Concurrent mutator already moved the token; the audit-event
       // insert below still records the failure for diagnosability.
     }
-    await tx.insert(instanceEvents).values({
+    await recordEvent(tx, {
       tenantId,
       instanceId,
       tokenId,
@@ -834,7 +864,7 @@ export class EngineService {
       //    follow are the attribution detail. Reordering this is a
       //    behavioural contract; downstream consumers may rely on the
       //    "what did Alice just do" event coming before its details.
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -881,7 +911,7 @@ export class EngineService {
         // someone reading the audit can't reconstruct sensitive data.
         const redactedKeys = new Set(canvas.engineConfig?.redactedVariableKeys ?? []);
         for (const key of Object.keys(args.formData)) {
-          await tx.insert(instanceEvents).values({
+          await recordEvent(tx, {
             tenantId: args.tenantId,
             instanceId: tokenRow.instanceId,
             tokenId: args.tokenId,
@@ -906,7 +936,7 @@ export class EngineService {
         },
       );
 
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -944,7 +974,7 @@ export class EngineService {
             completedAt: new Date(),
           },
         );
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: tokenRow.instanceId,
           eventType: "instance-completed",
@@ -962,7 +992,7 @@ export class EngineService {
             completedAt: new Date(),
           },
         );
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: tokenRow.instanceId,
           eventType: "instance-failed",
@@ -1022,7 +1052,7 @@ export class EngineService {
 
       // Audit anchor first, then per-key variable rows (mirrors the
       // E3-polish completeTask ordering).
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -1058,7 +1088,7 @@ export class EngineService {
           canvas.engineConfig?.redactedVariableKeys ?? [],
         );
         for (const key of Object.keys(projectedResult)) {
-          await tx.insert(instanceEvents).values({
+          await recordEvent(tx, {
             tenantId: args.tenantId,
             instanceId: tokenRow.instanceId,
             tokenId: args.tokenId,
@@ -1077,7 +1107,7 @@ export class EngineService {
         tokenRow.version,
         { status: "active", waitingFor: null },
       );
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -1105,7 +1135,7 @@ export class EngineService {
           instanceVersion,
           { status: "completed", completedAt: new Date() },
         );
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: tokenRow.instanceId,
           eventType: "instance-completed",
@@ -1130,7 +1160,7 @@ export class EngineService {
             completedAt: new Date(),
           },
         );
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: tokenRow.instanceId,
           eventType: "instance-failed",
@@ -1182,7 +1212,7 @@ export class EngineService {
         // Concurrent mutation already moved it; nothing to do.
         return;
       }
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -1212,7 +1242,7 @@ export class EngineService {
       } catch {
         return;
       }
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         eventType: "instance-failed",
@@ -1550,7 +1580,7 @@ export class EngineService {
         }
         throw err;
       }
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: row.instanceId,
         tokenId: args.tokenId,
@@ -1625,7 +1655,7 @@ export class EngineService {
         }
         throw err;
       }
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: row.instanceId,
         tokenId: args.tokenId,
@@ -1728,7 +1758,7 @@ export class EngineService {
         }
         throw err;
       }
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: row.instanceId,
         tokenId: args.tokenId,
@@ -1797,7 +1827,7 @@ export class EngineService {
       );
       const canvas = await this.loadCanvasForInstance(tx, instRow);
 
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -1831,7 +1861,7 @@ export class EngineService {
           waitingFor: null,
         },
       );
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: tokenRow.instanceId,
         tokenId: args.tokenId,
@@ -1860,7 +1890,7 @@ export class EngineService {
           instRow.version,
           { status: "completed", completedAt: new Date() },
         );
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: tokenRow.instanceId,
           eventType: "instance-completed",
@@ -1878,7 +1908,7 @@ export class EngineService {
             completedAt: new Date(),
           },
         );
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: tokenRow.instanceId,
           eventType: "instance-failed",
@@ -2395,7 +2425,7 @@ export class EngineService {
               ? `Cancelled: ${args.reason}`
               : "Cancelled by user.",
           });
-          await tx.insert(instanceEvents).values({
+          await recordEvent(tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
             tokenId: tok.id,
@@ -2447,7 +2477,7 @@ export class EngineService {
         )
         .returning({ id: engineJobs.id });
 
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         userId: args.userId,
@@ -2557,7 +2587,7 @@ export class EngineService {
       for (const k of keys) {
         const hadKey = Object.prototype.hasOwnProperty.call(current, k);
         const isDelete = args.patch[k] === null;
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: args.instanceId,
           userId: args.userId,
@@ -2637,7 +2667,7 @@ export class EngineService {
       await this.updateInstanceWithLock(tx, inst.id, inst.version, {
         status: "suspended",
       });
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         userId: args.userId,
@@ -2702,7 +2732,7 @@ export class EngineService {
       await this.updateInstanceWithLock(tx, inst.id, inst.version, {
         status: "running",
       });
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         userId: args.userId,
@@ -2864,7 +2894,7 @@ export class EngineService {
           status: "failed",
           errorMessage: "Superseded by replay-from-step.",
         });
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: args.instanceId,
           tokenId: tok.id,
@@ -2913,7 +2943,7 @@ export class EngineService {
 
       // Instance-modified audit row BEFORE the new token is placed so
       // the trail reads: "modified → token-created at Y → advancing".
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         userId: args.userId,
@@ -2952,7 +2982,7 @@ export class EngineService {
           status: "active",
         })
         .returning({ id: instanceTokens.id, version: instanceTokens.version });
-      await tx.insert(instanceEvents).values({
+      await recordEvent(tx, {
         tenantId: args.tenantId,
         instanceId: args.instanceId,
         tokenId: token.id,
@@ -2983,7 +3013,7 @@ export class EngineService {
           .update(processInstances)
           .set({ status: "completed", completedAt: new Date() })
           .where(eq(processInstances.id, args.instanceId));
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: args.instanceId,
           eventType: "instance-completed",
@@ -3002,7 +3032,7 @@ export class EngineService {
           .update(processInstances)
           .set({ status: "failed", errorMessage: advance.errorMessage ?? null, completedAt: new Date() })
           .where(eq(processInstances.id, args.instanceId));
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: args.instanceId,
           eventType: "instance-failed",
@@ -3018,7 +3048,7 @@ export class EngineService {
       } else if (inst.status === "suspended") {
         // Replay flipped a suspended instance to running — emit the
         // resumed lifecycle event so subscribers don't stay stale.
-        await tx.insert(instanceEvents).values({
+        await recordEvent(tx, {
           tenantId: args.tenantId,
           instanceId: args.instanceId,
           userId: args.userId,
