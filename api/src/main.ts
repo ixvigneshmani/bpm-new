@@ -1,11 +1,15 @@
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, NestFastifyApplication } from "@nestjs/platform-fastify";
-import { ValidationPipe, Logger } from "@nestjs/common";
+import { randomUUID } from "node:crypto";
+import { ValidationPipe } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { Logger, PinoLogger } from "nestjs-pino";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import { AppModule } from "./app.module";
 import { GlobalExceptionFilter } from "./common/filters/http-exception.filter";
+import { CorrelationContext } from "./common/observability/correlation-context";
+import { initSentry } from "./common/observability/sentry";
 
 const DEV_JWT_SECRET = "flowpro-dev-secret-key-change-in-production-min32";
 
@@ -32,11 +36,51 @@ async function bootstrap() {
     AppModule,
     new FastifyAdapter({
       bodyLimit: 5 * 1024 * 1024,
+      // OS4 — accept upstream X-Request-Id for end-to-end tracing or
+      // generate a UUIDv4 per request. Fastify owns req.id so this is
+      // the canonical place to set it; pino-http and our ALS read it
+      // downstream.
+      genReqId: (req: { headers: Record<string, unknown> }) => {
+        const header =
+          (req.headers["x-request-id"] as string | undefined) ||
+          (req.headers["x-correlation-id"] as string | undefined);
+        return header ?? randomUUID();
+      },
     }),
+    { bufferLogs: true },
   );
+
+  // Use pino as the application logger — replaces NestJS's default
+  // console logger. Existing `Logger.log/.warn/.error` calls still
+  // work; output now flows through pino with correlation metadata.
+  app.useLogger(app.get(Logger));
 
   const config = app.get(ConfigService);
   assertProductionConfig(config);
+
+  // OS4 — Sentry init (no-op when SENTRY_DSN unset).
+  initSentry({
+    dsn: config.get<string>("SENTRY_DSN"),
+    environment: config.get<string>("NODE_ENV") ?? "development",
+    release: config.get<string>("APP_VERSION"),
+  });
+
+  // OS4 — bind a per-request correlation id to AsyncLocalStorage so
+  // any service can read it via CorrelationContext.get() without
+  // request-scoping the entire DI tree. The id is generated (or taken
+  // from X-Request-Id) by nestjs-pino's genReqId hook.
+  const fastify = app.getHttpAdapter().getInstance();
+  fastify.addHook("onRequest", (req, reply, done) => {
+    const id = (req as { id?: string }).id ?? "unknown";
+    CorrelationContext.enterWith({
+      correlationId: id,
+      route: `${req.method} ${req.url}`,
+    });
+    // Echo the correlation id on every response so a user with a
+    // problem can paste it back to support and ops can grep logs.
+    reply.header("X-Request-Id", id);
+    done();
+  });
 
   const port = config.get<number>("PORT", 3001);
   const corsOriginRaw = config.get<string>("CORS_ORIGIN", "http://localhost:5173");
@@ -58,6 +102,7 @@ async function bootstrap() {
   app.enableCors({
     origin: allowedOrigins.length === 1 ? allowedOrigins[0] : allowedOrigins,
     credentials: true,
+    exposedHeaders: ["X-Request-Id"],
   });
 
   app.setGlobalPrefix("api");
@@ -70,12 +115,12 @@ async function bootstrap() {
     }),
   );
 
-  app.useGlobalFilters(new GlobalExceptionFilter());
+  app.useGlobalFilters(new GlobalExceptionFilter(await app.resolve(PinoLogger)));
 
   app.enableShutdownHooks();
 
   await app.listen(port, "0.0.0.0");
-  Logger.log(`FlowPro API running on http://localhost:${port}/api`, "Bootstrap");
+  app.get(Logger).log(`FlowPro API running on http://localhost:${port}/api`, "Bootstrap");
 }
 
 bootstrap();

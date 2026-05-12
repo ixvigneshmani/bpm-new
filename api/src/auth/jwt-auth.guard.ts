@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
+import { CorrelationContext } from "../common/observability/correlation-context";
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   constructor(private jwt: JwtService) {}
@@ -29,6 +30,12 @@ export class JwtAuthGuard implements CanActivate {
         throw new UnauthorizedException("Token is an MFA challenge, not an access token");
       }
       (request as any).user = payload;
+      // OS4 — enrich the request's correlation context with auth
+      // identity so downstream log lines and Sentry events carry it.
+      CorrelationContext.enrich({
+        tenantId: payload?.tenantId,
+        userId: payload?.sub,
+      });
       return true;
     } catch (e) {
       if (e instanceof UnauthorizedException) throw e;
