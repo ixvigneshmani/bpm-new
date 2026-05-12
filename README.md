@@ -28,7 +28,7 @@ cd api
 cp .env.example .env.development
 # edit DATABASE_URL + JWT_SECRET
 pnpm install
-pnpm db:push        # apply schema
+pnpm db:migrate     # apply versioned migrations
 pnpm db:seed        # initial tenant + admin user
 pnpm dev            # http://localhost:3001/api
 
@@ -39,6 +39,27 @@ pnpm dev            # http://localhost:5173
 ```
 
 Default seeded login: `vignesh.mani@innovatechs.com` / `password123` (change in `api/src/database/seed.ts`).
+
+## Database migrations
+
+Drizzle versioned migrations live in `api/drizzle/`. Schema changes flow:
+
+```bash
+# 1. Edit api/src/database/schema.ts
+# 2. Generate a migration file
+pnpm db:generate --name=add_my_column
+# 3. Apply pending migrations to the current DB
+pnpm db:migrate
+# 4. Commit the generated drizzle/NNNN_*.sql and meta/_journal.json
+```
+
+**Existing dev DB?** If your local Postgres was built via `drizzle-kit push` before this workflow landed, stamp the baseline as already-applied **once** before running `db:migrate`:
+
+```bash
+pnpm db:stamp-baseline   # idempotent; refuses to run if migrations table already has rows
+```
+
+`db:push` is kept for emergency overrides only. Don't use it in normal development.
 
 ## Key endpoints
 

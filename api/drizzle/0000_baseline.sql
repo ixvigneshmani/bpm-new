@@ -1,0 +1,433 @@
+CREATE TYPE "public"."AI_INTERACTION_STATUS" AS ENUM('success', 'error');--> statement-breakpoint
+CREATE TYPE "public"."AUTH_PROVIDER" AS ENUM('credentials', 'google', 'microsoft', 'saml');--> statement-breakpoint
+CREATE TYPE "public"."DOC_SOURCE" AS ENUM('TEMPLATE', 'PASTE', 'EMPTY');--> statement-breakpoint
+CREATE TYPE "public"."ENGINE_JOB_STATUS" AS ENUM('queued', 'running', 'completed', 'failed', 'dead');--> statement-breakpoint
+CREATE TYPE "public"."INSTANCE_EVENT_TYPE" AS ENUM('instance-started', 'instance-completed', 'instance-failed', 'instance-cancelled', 'node-entered', 'node-exited', 'edge-taken', 'token-created', 'token-completed', 'token-waiting', 'token-resumed', 'task-claimed', 'task-unclaimed', 'task-completed', 'task-reassigned', 'task-skipped', 'service-task-attempt-failed', 'variable-set', 'variable-edited', 'variable-unresolved', 'instance-suspended', 'instance-resumed', 'instance-modified', 'error');--> statement-breakpoint
+CREATE TYPE "public"."INSTANCE_TOKEN_STATUS" AS ENUM('active', 'waiting', 'completed', 'failed');--> statement-breakpoint
+CREATE TYPE "public"."OUTBOX_EVENT_STATUS" AS ENUM('pending', 'dispatched', 'failed');--> statement-breakpoint
+CREATE TYPE "public"."PERMISSION_AUDIT_ACTION" AS ENUM('granted', 'revoked');--> statement-breakpoint
+CREATE TYPE "public"."PROCESS_GRANTEE_TYPE" AS ENUM('user', 'role');--> statement-breakpoint
+CREATE TYPE "public"."PROCESS_INSTANCE_STATUS" AS ENUM('running', 'completed', 'failed', 'cancelled', 'suspended');--> statement-breakpoint
+CREATE TYPE "public"."PROCESS_PERMISSION" AS ENUM('view', 'start', 'edit', 'publish', 'admin');--> statement-breakpoint
+CREATE TYPE "public"."PROCESS_STATUS" AS ENUM('DRAFT', 'ACTIVE', 'PENDING', 'REVIEW');--> statement-breakpoint
+CREATE TYPE "public"."SESSION_STATUS" AS ENUM('active', 'expired', 'revoked');--> statement-breakpoint
+CREATE TYPE "public"."TENANT_PLAN" AS ENUM('free', 'pro', 'enterprise');--> statement-breakpoint
+CREATE TYPE "public"."USER_ROLE" AS ENUM('owner', 'admin', 'member', 'viewer');--> statement-breakpoint
+CREATE TYPE "public"."WEBHOOK_SUB_STATUS" AS ENUM('active', 'paused', 'disabled');--> statement-breakpoint
+CREATE TYPE "public"."WIZARD_STEP" AS ENUM('DETAILS', 'DOCUMENT', 'CANVAS');--> statement-breakpoint
+CREATE TABLE "AI_INTERACTIONS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"USER_ID" uuid NOT NULL,
+	"KIND" varchar(64) NOT NULL,
+	"DESCRIPTION" text NOT NULL,
+	"MODEL" varchar(128) NOT NULL,
+	"STATUS" "AI_INTERACTION_STATUS" NOT NULL,
+	"RESPONSE_JSON" jsonb,
+	"ERROR_MESSAGE" text,
+	"TOKENS_IN" integer,
+	"TOKENS_OUT" integer,
+	"DURATION_MS" integer NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "API_TOKENS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"ISSUED_BY" uuid NOT NULL,
+	"NAME" varchar(128) NOT NULL,
+	"TOKEN_HASH" varchar(64) NOT NULL,
+	"SCOPES" jsonb NOT NULL,
+	"EXPIRES_AT" timestamp with time zone,
+	"REVOKED_AT" timestamp with time zone,
+	"LAST_USED_AT" timestamp with time zone,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "AUTH_ACCOUNTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"USER_ID" uuid NOT NULL,
+	"PROVIDER" "AUTH_PROVIDER" NOT NULL,
+	"PROVIDER_ACCOUNT_ID" varchar(255) NOT NULL,
+	"ACCESS_TOKEN" text,
+	"REFRESH_TOKEN" text,
+	"TOKEN_EXPIRES_AT" timestamp with time zone,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "BUSINESS_DOCUMENTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"CREATED_BY" uuid NOT NULL,
+	"NAME" varchar(255) NOT NULL,
+	"SCHEMA" jsonb NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "ENGINE_JOBS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"INSTANCE_ID" uuid,
+	"TOKEN_ID" uuid,
+	"JOB_TYPE" varchar(64) NOT NULL,
+	"TOPIC" varchar(255) NOT NULL,
+	"INPUT" jsonb,
+	"RESULT" jsonb,
+	"STATUS" "ENGINE_JOB_STATUS" DEFAULT 'queued' NOT NULL,
+	"ATTEMPTS" integer DEFAULT 0 NOT NULL,
+	"MAX_ATTEMPTS" integer DEFAULT 3 NOT NULL,
+	"LAST_ERROR" text,
+	"SCHEDULED_FOR" timestamp with time zone DEFAULT now() NOT NULL,
+	"LOCKED_AT" timestamp with time zone,
+	"LOCKED_BY" varchar(64),
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "ENVIRONMENT_BINDINGS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"KEY" varchar(128) NOT NULL,
+	"VALUE_KIND" varchar(32) NOT NULL,
+	"VALUE_PLAIN" text,
+	"VALUE_SECRET" text,
+	"DESCRIPTION" text,
+	"CREATED_BY" uuid NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "IDEMPOTENCY_KEYS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"ENDPOINT" varchar(64) NOT NULL,
+	"KEY" varchar(255) NOT NULL,
+	"REQUEST_HASH" varchar(64) NOT NULL,
+	"RESPONSE_STATUS" integer NOT NULL,
+	"RESPONSE_JSON" jsonb,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"EXPIRES_AT" timestamp with time zone NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "INSTANCE_EVENTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"INSTANCE_ID" uuid NOT NULL,
+	"TOKEN_ID" uuid,
+	"USER_ID" uuid,
+	"NODE_ID" varchar(255),
+	"EVENT_TYPE" "INSTANCE_EVENT_TYPE" NOT NULL,
+	"PAYLOAD" jsonb,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "INSTANCE_TOKENS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"INSTANCE_ID" uuid NOT NULL,
+	"CURRENT_NODE_ID" varchar(255) NOT NULL,
+	"STATUS" "INSTANCE_TOKEN_STATUS" DEFAULT 'active' NOT NULL,
+	"WAITING_FOR" varchar(64),
+	"ASSIGNED_TO" uuid,
+	"CANDIDATE_ROLE" varchar(64),
+	"ERROR_MESSAGE" text,
+	"VERSION" integer DEFAULT 0 NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "MFA_RECOVERY_CODES" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"USER_ID" uuid NOT NULL,
+	"CODE_HASH" varchar(128) NOT NULL,
+	"USED_AT" timestamp with time zone,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "OUTBOX_EVENTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"PROCESS_ID" uuid,
+	"INSTANCE_ID" uuid,
+	"EVENT_TYPE" varchar(64) NOT NULL,
+	"PAYLOAD" jsonb NOT NULL,
+	"STATUS" "OUTBOX_EVENT_STATUS" DEFAULT 'pending' NOT NULL,
+	"DISPATCHED_AT" timestamp with time zone,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "PERMISSION_AUDIT_EVENTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"PROCESS_ID" uuid NOT NULL,
+	"ACTION" "PERMISSION_AUDIT_ACTION" NOT NULL,
+	"GRANTEE_TYPE" "PROCESS_GRANTEE_TYPE" NOT NULL,
+	"GRANTEE_ID" varchar(128) NOT NULL,
+	"PERMISSION" "PROCESS_PERMISSION" NOT NULL,
+	"ACTOR_USER_ID" uuid,
+	"CORRELATION_ID" varchar(64),
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "PROCESS_DOCUMENTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"PROCESS_ID" uuid NOT NULL,
+	"DOCUMENT_ID" uuid,
+	"SCHEMA_OVERRIDE" jsonb NOT NULL,
+	"SOURCE" "DOC_SOURCE" NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "PROCESS_INSTANCES" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"PROCESS_ID" uuid NOT NULL,
+	"STARTED_BY" uuid NOT NULL,
+	"DEFINITION_SNAPSHOT" jsonb,
+	"PROCESS_VERSION_ID" uuid,
+	"DEFINITION_HASH" varchar(64) NOT NULL,
+	"BUSINESS_KEY" varchar(255),
+	"STATUS" "PROCESS_INSTANCE_STATUS" DEFAULT 'running' NOT NULL,
+	"VARIABLES" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"ERROR_MESSAGE" text,
+	"STARTED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"COMPLETED_AT" timestamp with time zone,
+	"VERSION" integer DEFAULT 0 NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "PROCESS_PERMISSIONS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"PROCESS_ID" uuid NOT NULL,
+	"GRANTEE_TYPE" "PROCESS_GRANTEE_TYPE" NOT NULL,
+	"GRANTEE_ID" varchar(128) NOT NULL,
+	"PERMISSION" "PROCESS_PERMISSION" NOT NULL,
+	"GRANTED_BY" uuid,
+	"GRANTED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "PROCESS_VERSIONS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"PROCESS_ID" uuid NOT NULL,
+	"HASH" varchar(64) NOT NULL,
+	"CANVAS_DATA" jsonb NOT NULL,
+	"VERSION" integer,
+	"PUBLISHED_BY" uuid NOT NULL,
+	"PUBLISHED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"IMPORTED_FROM" jsonb,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "PROCESSES" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"CREATED_BY" uuid NOT NULL,
+	"NAME" varchar(255) NOT NULL,
+	"DESCRIPTION" text,
+	"CANVAS_DATA" jsonb,
+	"STATUS" "PROCESS_STATUS" DEFAULT 'DRAFT' NOT NULL,
+	"VERSION" varchar(20) DEFAULT 'v1.0',
+	"STEP" "WIZARD_STEP" DEFAULT 'DETAILS' NOT NULL,
+	"SLUG" varchar(64) NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "ROLES" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"KEY" varchar(64) NOT NULL,
+	"LABEL" varchar(255) NOT NULL,
+	"DESCRIPTION" text,
+	"SYSTEM" boolean DEFAULT false NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "SESSIONS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"USER_ID" uuid NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"TOKEN_HASH" varchar(128) NOT NULL,
+	"STATUS" "SESSION_STATUS" DEFAULT 'active' NOT NULL,
+	"IP_ADDRESS" varchar(45),
+	"USER_AGENT" text,
+	"EXPIRES_AT" timestamp with time zone NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "SESSIONS_TOKEN_HASH_unique" UNIQUE("TOKEN_HASH")
+);
+--> statement-breakpoint
+CREATE TABLE "TENANTS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"NAME" varchar(255) NOT NULL,
+	"SLUG" varchar(100) NOT NULL,
+	"PLAN" "TENANT_PLAN" DEFAULT 'free' NOT NULL,
+	"LOGO_URL" text,
+	"DOMAIN" varchar(255),
+	"SETTINGS" jsonb,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "TENANTS_SLUG_unique" UNIQUE("SLUG")
+);
+--> statement-breakpoint
+CREATE TABLE "USER_ROLES" (
+	"USER_ID" uuid NOT NULL,
+	"ROLE_ID" uuid NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"ASSIGNED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"ASSIGNED_BY" uuid,
+	CONSTRAINT "USER_ROLES_USER_ID_ROLE_ID_pk" PRIMARY KEY("USER_ID","ROLE_ID")
+);
+--> statement-breakpoint
+CREATE TABLE "USERS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"EMAIL" varchar(320) NOT NULL,
+	"DISPLAY_NAME" varchar(255) NOT NULL,
+	"AVATAR_URL" text,
+	"PASSWORD_HASH" text,
+	"ROLE" "USER_ROLE" DEFAULT 'member' NOT NULL,
+	"LOCALE" varchar(10) DEFAULT 'en',
+	"IS_ACTIVE" boolean DEFAULT true NOT NULL,
+	"MFA_ENABLED" boolean DEFAULT false NOT NULL,
+	"MFA_SECRET" varchar(64),
+	"EMAIL_VERIFIED_AT" timestamp with time zone,
+	"LAST_LOGIN_AT" timestamp with time zone,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "WEBHOOK_SUBSCRIPTIONS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"PROCESS_ID" uuid,
+	"NAME" varchar(255) NOT NULL,
+	"URL" varchar(2048) NOT NULL,
+	"EVENT_TYPES" text DEFAULT '*' NOT NULL,
+	"SECRET" varchar(128) NOT NULL,
+	"STATUS" "WEBHOOK_SUB_STATUS" DEFAULT 'active' NOT NULL,
+	"CREATED_BY" uuid NOT NULL,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "WORKSPACE_MEMBERS" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"WORKSPACE_ID" uuid NOT NULL,
+	"USER_ID" uuid NOT NULL,
+	"ROLE" "USER_ROLE" DEFAULT 'member' NOT NULL,
+	"JOINED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "WORKSPACES" (
+	"ID" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"TENANT_ID" uuid NOT NULL,
+	"NAME" varchar(255) NOT NULL,
+	"SLUG" varchar(100) NOT NULL,
+	"DESCRIPTION" text,
+	"CREATED_AT" timestamp with time zone DEFAULT now() NOT NULL,
+	"UPDATED_AT" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "AI_INTERACTIONS" ADD CONSTRAINT "AI_INTERACTIONS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "AI_INTERACTIONS" ADD CONSTRAINT "AI_INTERACTIONS_USER_ID_USERS_ID_fk" FOREIGN KEY ("USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "API_TOKENS" ADD CONSTRAINT "API_TOKENS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "API_TOKENS" ADD CONSTRAINT "API_TOKENS_ISSUED_BY_USERS_ID_fk" FOREIGN KEY ("ISSUED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "AUTH_ACCOUNTS" ADD CONSTRAINT "AUTH_ACCOUNTS_USER_ID_USERS_ID_fk" FOREIGN KEY ("USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "BUSINESS_DOCUMENTS" ADD CONSTRAINT "BUSINESS_DOCUMENTS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "BUSINESS_DOCUMENTS" ADD CONSTRAINT "BUSINESS_DOCUMENTS_CREATED_BY_USERS_ID_fk" FOREIGN KEY ("CREATED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "ENGINE_JOBS" ADD CONSTRAINT "ENGINE_JOBS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "ENVIRONMENT_BINDINGS" ADD CONSTRAINT "ENVIRONMENT_BINDINGS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "ENVIRONMENT_BINDINGS" ADD CONSTRAINT "ENVIRONMENT_BINDINGS_CREATED_BY_USERS_ID_fk" FOREIGN KEY ("CREATED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "IDEMPOTENCY_KEYS" ADD CONSTRAINT "IDEMPOTENCY_KEYS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "INSTANCE_EVENTS" ADD CONSTRAINT "INSTANCE_EVENTS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "INSTANCE_EVENTS" ADD CONSTRAINT "INSTANCE_EVENTS_INSTANCE_ID_PROCESS_INSTANCES_ID_fk" FOREIGN KEY ("INSTANCE_ID") REFERENCES "public"."PROCESS_INSTANCES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "INSTANCE_TOKENS" ADD CONSTRAINT "INSTANCE_TOKENS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "INSTANCE_TOKENS" ADD CONSTRAINT "INSTANCE_TOKENS_INSTANCE_ID_PROCESS_INSTANCES_ID_fk" FOREIGN KEY ("INSTANCE_ID") REFERENCES "public"."PROCESS_INSTANCES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "INSTANCE_TOKENS" ADD CONSTRAINT "INSTANCE_TOKENS_ASSIGNED_TO_USERS_ID_fk" FOREIGN KEY ("ASSIGNED_TO") REFERENCES "public"."USERS"("ID") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "MFA_RECOVERY_CODES" ADD CONSTRAINT "MFA_RECOVERY_CODES_USER_ID_USERS_ID_fk" FOREIGN KEY ("USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "OUTBOX_EVENTS" ADD CONSTRAINT "OUTBOX_EVENTS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PERMISSION_AUDIT_EVENTS" ADD CONSTRAINT "PERMISSION_AUDIT_EVENTS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PERMISSION_AUDIT_EVENTS" ADD CONSTRAINT "PERMISSION_AUDIT_EVENTS_PROCESS_ID_PROCESSES_ID_fk" FOREIGN KEY ("PROCESS_ID") REFERENCES "public"."PROCESSES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PERMISSION_AUDIT_EVENTS" ADD CONSTRAINT "PERMISSION_AUDIT_EVENTS_ACTOR_USER_ID_USERS_ID_fk" FOREIGN KEY ("ACTOR_USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_DOCUMENTS" ADD CONSTRAINT "PROCESS_DOCUMENTS_PROCESS_ID_PROCESSES_ID_fk" FOREIGN KEY ("PROCESS_ID") REFERENCES "public"."PROCESSES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_DOCUMENTS" ADD CONSTRAINT "PROCESS_DOCUMENTS_DOCUMENT_ID_BUSINESS_DOCUMENTS_ID_fk" FOREIGN KEY ("DOCUMENT_ID") REFERENCES "public"."BUSINESS_DOCUMENTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_INSTANCES" ADD CONSTRAINT "PROCESS_INSTANCES_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_INSTANCES" ADD CONSTRAINT "PROCESS_INSTANCES_PROCESS_ID_PROCESSES_ID_fk" FOREIGN KEY ("PROCESS_ID") REFERENCES "public"."PROCESSES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_INSTANCES" ADD CONSTRAINT "PROCESS_INSTANCES_STARTED_BY_USERS_ID_fk" FOREIGN KEY ("STARTED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_INSTANCES" ADD CONSTRAINT "PROCESS_INSTANCES_PROCESS_VERSION_ID_PROCESS_VERSIONS_ID_fk" FOREIGN KEY ("PROCESS_VERSION_ID") REFERENCES "public"."PROCESS_VERSIONS"("ID") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_PERMISSIONS" ADD CONSTRAINT "PROCESS_PERMISSIONS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_PERMISSIONS" ADD CONSTRAINT "PROCESS_PERMISSIONS_PROCESS_ID_PROCESSES_ID_fk" FOREIGN KEY ("PROCESS_ID") REFERENCES "public"."PROCESSES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_PERMISSIONS" ADD CONSTRAINT "PROCESS_PERMISSIONS_GRANTED_BY_USERS_ID_fk" FOREIGN KEY ("GRANTED_BY") REFERENCES "public"."USERS"("ID") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_VERSIONS" ADD CONSTRAINT "PROCESS_VERSIONS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_VERSIONS" ADD CONSTRAINT "PROCESS_VERSIONS_PROCESS_ID_PROCESSES_ID_fk" FOREIGN KEY ("PROCESS_ID") REFERENCES "public"."PROCESSES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESS_VERSIONS" ADD CONSTRAINT "PROCESS_VERSIONS_PUBLISHED_BY_USERS_ID_fk" FOREIGN KEY ("PUBLISHED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESSES" ADD CONSTRAINT "PROCESSES_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "PROCESSES" ADD CONSTRAINT "PROCESSES_CREATED_BY_USERS_ID_fk" FOREIGN KEY ("CREATED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "ROLES" ADD CONSTRAINT "ROLES_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "SESSIONS" ADD CONSTRAINT "SESSIONS_USER_ID_USERS_ID_fk" FOREIGN KEY ("USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "SESSIONS" ADD CONSTRAINT "SESSIONS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "USER_ROLES" ADD CONSTRAINT "USER_ROLES_USER_ID_USERS_ID_fk" FOREIGN KEY ("USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "USER_ROLES" ADD CONSTRAINT "USER_ROLES_ROLE_ID_ROLES_ID_fk" FOREIGN KEY ("ROLE_ID") REFERENCES "public"."ROLES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "USER_ROLES" ADD CONSTRAINT "USER_ROLES_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "USER_ROLES" ADD CONSTRAINT "USER_ROLES_ASSIGNED_BY_USERS_ID_fk" FOREIGN KEY ("ASSIGNED_BY") REFERENCES "public"."USERS"("ID") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "USERS" ADD CONSTRAINT "USERS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "WEBHOOK_SUBSCRIPTIONS" ADD CONSTRAINT "WEBHOOK_SUBSCRIPTIONS_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "WEBHOOK_SUBSCRIPTIONS" ADD CONSTRAINT "WEBHOOK_SUBSCRIPTIONS_PROCESS_ID_PROCESSES_ID_fk" FOREIGN KEY ("PROCESS_ID") REFERENCES "public"."PROCESSES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "WEBHOOK_SUBSCRIPTIONS" ADD CONSTRAINT "WEBHOOK_SUBSCRIPTIONS_CREATED_BY_USERS_ID_fk" FOREIGN KEY ("CREATED_BY") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "WORKSPACE_MEMBERS" ADD CONSTRAINT "WORKSPACE_MEMBERS_WORKSPACE_ID_WORKSPACES_ID_fk" FOREIGN KEY ("WORKSPACE_ID") REFERENCES "public"."WORKSPACES"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "WORKSPACE_MEMBERS" ADD CONSTRAINT "WORKSPACE_MEMBERS_USER_ID_USERS_ID_fk" FOREIGN KEY ("USER_ID") REFERENCES "public"."USERS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "WORKSPACES" ADD CONSTRAINT "WORKSPACES_TENANT_ID_TENANTS_ID_fk" FOREIGN KEY ("TENANT_ID") REFERENCES "public"."TENANTS"("ID") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "AI_INTERACTIONS_TENANT_CREATED_IDX" ON "AI_INTERACTIONS" USING btree ("TENANT_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE UNIQUE INDEX "API_TOKEN_HASH_IDX" ON "API_TOKENS" USING btree ("TOKEN_HASH");--> statement-breakpoint
+CREATE INDEX "API_TOKEN_TENANT_IDX" ON "API_TOKENS" USING btree ("TENANT_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "AUTH_PROVIDER_ACCOUNT_IDX" ON "AUTH_ACCOUNTS" USING btree ("PROVIDER","PROVIDER_ACCOUNT_ID");--> statement-breakpoint
+CREATE INDEX "AUTH_USER_IDX" ON "AUTH_ACCOUNTS" USING btree ("USER_ID");--> statement-breakpoint
+CREATE INDEX "BIZ_DOC_TENANT_IDX" ON "BUSINESS_DOCUMENTS" USING btree ("TENANT_ID");--> statement-breakpoint
+CREATE INDEX "ENGINE_JOB_QUEUE_IDX" ON "ENGINE_JOBS" USING btree ("STATUS","SCHEDULED_FOR");--> statement-breakpoint
+CREATE INDEX "ENGINE_JOB_INSTANCE_IDX" ON "ENGINE_JOBS" USING btree ("INSTANCE_ID");--> statement-breakpoint
+CREATE INDEX "ENGINE_JOB_TENANT_CREATED_IDX" ON "ENGINE_JOBS" USING btree ("TENANT_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE UNIQUE INDEX "ENV_BINDING_TENANT_KEY_IDX" ON "ENVIRONMENT_BINDINGS" USING btree ("TENANT_ID","KEY");--> statement-breakpoint
+CREATE UNIQUE INDEX "IDEMP_TENANT_ENDPOINT_KEY_IDX" ON "IDEMPOTENCY_KEYS" USING btree ("TENANT_ID","ENDPOINT","KEY");--> statement-breakpoint
+CREATE INDEX "IDEMP_EXPIRES_IDX" ON "IDEMPOTENCY_KEYS" USING btree ("EXPIRES_AT");--> statement-breakpoint
+CREATE INDEX "EVENT_INSTANCE_CREATED_IDX" ON "INSTANCE_EVENTS" USING btree ("INSTANCE_ID","CREATED_AT");--> statement-breakpoint
+CREATE INDEX "EVENT_TENANT_CREATED_IDX" ON "INSTANCE_EVENTS" USING btree ("TENANT_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "TOKEN_INSTANCE_IDX" ON "INSTANCE_TOKENS" USING btree ("INSTANCE_ID");--> statement-breakpoint
+CREATE INDEX "TOKEN_TENANT_STATUS_IDX" ON "INSTANCE_TOKENS" USING btree ("TENANT_ID","STATUS");--> statement-breakpoint
+CREATE INDEX "TOKEN_ASSIGNED_IDX" ON "INSTANCE_TOKENS" USING btree ("ASSIGNED_TO","STATUS");--> statement-breakpoint
+CREATE INDEX "MFA_RECOVERY_USER_IDX" ON "MFA_RECOVERY_CODES" USING btree ("USER_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "MFA_RECOVERY_USER_HASH_IDX" ON "MFA_RECOVERY_CODES" USING btree ("USER_ID","CODE_HASH");--> statement-breakpoint
+CREATE INDEX "OUTBOX_STATUS_CREATED_IDX" ON "OUTBOX_EVENTS" USING btree ("STATUS","CREATED_AT");--> statement-breakpoint
+CREATE INDEX "OUTBOX_TENANT_CREATED_IDX" ON "OUTBOX_EVENTS" USING btree ("TENANT_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "PERM_AUDIT_PROCESS_CREATED_IDX" ON "PERMISSION_AUDIT_EVENTS" USING btree ("PROCESS_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "PERM_AUDIT_TENANT_CREATED_IDX" ON "PERMISSION_AUDIT_EVENTS" USING btree ("TENANT_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "PERM_AUDIT_GRANTEE_IDX" ON "PERMISSION_AUDIT_EVENTS" USING btree ("GRANTEE_TYPE","GRANTEE_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "PROC_DOC_PROCESS_IDX" ON "PROCESS_DOCUMENTS" USING btree ("PROCESS_ID");--> statement-breakpoint
+CREATE INDEX "PROC_INST_TENANT_CREATED_IDX" ON "PROCESS_INSTANCES" USING btree ("TENANT_ID","CREATED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "PROC_INST_PROCESS_IDX" ON "PROCESS_INSTANCES" USING btree ("PROCESS_ID");--> statement-breakpoint
+CREATE INDEX "PROC_INST_TENANT_STATUS_IDX" ON "PROCESS_INSTANCES" USING btree ("TENANT_ID","STATUS");--> statement-breakpoint
+CREATE INDEX "PROC_INST_TENANT_BUSINESSKEY_IDX" ON "PROCESS_INSTANCES" USING btree ("TENANT_ID","BUSINESS_KEY");--> statement-breakpoint
+CREATE UNIQUE INDEX "PROC_PERM_UNIQUE_IDX" ON "PROCESS_PERMISSIONS" USING btree ("TENANT_ID","PROCESS_ID","GRANTEE_TYPE","GRANTEE_ID","PERMISSION");--> statement-breakpoint
+CREATE INDEX "PROC_PERM_PROCESS_IDX" ON "PROCESS_PERMISSIONS" USING btree ("PROCESS_ID");--> statement-breakpoint
+CREATE INDEX "PROC_PERM_GRANTEE_IDX" ON "PROCESS_PERMISSIONS" USING btree ("GRANTEE_TYPE","GRANTEE_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "PROC_VER_PROCESS_HASH_IDX" ON "PROCESS_VERSIONS" USING btree ("PROCESS_ID","HASH");--> statement-breakpoint
+CREATE INDEX "PROC_VER_TENANT_PUBLISHED_IDX" ON "PROCESS_VERSIONS" USING btree ("TENANT_ID","PUBLISHED_AT" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "PROC_VER_PROCESS_VERSION_IDX" ON "PROCESS_VERSIONS" USING btree ("PROCESS_ID","VERSION");--> statement-breakpoint
+CREATE INDEX "PROCESS_TENANT_IDX" ON "PROCESSES" USING btree ("TENANT_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "PROCESS_TENANT_SLUG_IDX" ON "PROCESSES" USING btree ("TENANT_ID","SLUG");--> statement-breakpoint
+CREATE UNIQUE INDEX "ROLE_TENANT_KEY_IDX" ON "ROLES" USING btree ("TENANT_ID","KEY");--> statement-breakpoint
+CREATE INDEX "ROLE_TENANT_IDX" ON "ROLES" USING btree ("TENANT_ID");--> statement-breakpoint
+CREATE INDEX "SESSION_USER_IDX" ON "SESSIONS" USING btree ("USER_ID");--> statement-breakpoint
+CREATE INDEX "SESSION_TOKEN_IDX" ON "SESSIONS" USING btree ("TOKEN_HASH");--> statement-breakpoint
+CREATE INDEX "USER_ROLE_TENANT_ROLE_IDX" ON "USER_ROLES" USING btree ("TENANT_ID","ROLE_ID");--> statement-breakpoint
+CREATE INDEX "USER_ROLE_USER_IDX" ON "USER_ROLES" USING btree ("USER_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "USER_TENANT_EMAIL_IDX" ON "USERS" USING btree ("TENANT_ID","EMAIL");--> statement-breakpoint
+CREATE INDEX "USER_TENANT_IDX" ON "USERS" USING btree ("TENANT_ID");--> statement-breakpoint
+CREATE INDEX "WEBHOOK_SUB_TENANT_IDX" ON "WEBHOOK_SUBSCRIPTIONS" USING btree ("TENANT_ID");--> statement-breakpoint
+CREATE INDEX "WEBHOOK_SUB_PROCESS_IDX" ON "WEBHOOK_SUBSCRIPTIONS" USING btree ("PROCESS_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "WS_MEMBER_IDX" ON "WORKSPACE_MEMBERS" USING btree ("WORKSPACE_ID","USER_ID");--> statement-breakpoint
+CREATE UNIQUE INDEX "WS_TENANT_SLUG_IDX" ON "WORKSPACES" USING btree ("TENANT_ID","SLUG");

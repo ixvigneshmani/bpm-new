@@ -232,6 +232,12 @@ export const roles = pgTable(
     /** System-seeded roles (manager/employee/finance on first run).
      *  Protects against accidental delete via the Roles API. */
     system: boolean("SYSTEM").notNull().default(false),
+    /** EE2 — sort order for the Roles admin page. Nullable so existing
+     *  rows don't need a backfill; the API treats null as "unordered,
+     *  alphabetic fallback". Added as part of the EE2 migration smoke
+     *  test (proves generate → migrate cycle works), but kept because
+     *  the feature is genuinely useful for the Roles admin UI. */
+    sortOrder: integer("SORT_ORDER"),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
