@@ -493,8 +493,14 @@ function CanvasInner() {
         <ReactFlow
           nodes={nodes}
           edges={visibleEdges}
-          onNodesChange={readOnly ? undefined : onNodesChange}
-          onEdgesChange={readOnly ? undefined : onEdgesChange}
+          /* Keep onNodesChange/onEdgesChange wired even in read-only
+           * mode — React Flow uses them to propagate SELECTION changes
+           * back to the store. With nodesDraggable=false there are no
+           * position changes, and Delete is gated at the keyboard
+           * listener, so the only changes that flow through are
+           * select/deselect events — which view-only users need. */
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
           onConnect={readOnly ? undefined : onConnect}
           onReconnect={readOnly ? undefined : onReconnect}
           reconnectRadius={20}
