@@ -128,17 +128,16 @@ export default function PropertiesPanel() {
 
   if (!selectedNode && selectedEdge) {
     return (
-      <ReadOnlyShell readOnly={readOnly}>
-        <EdgeProperties
-          edgeId={selectedEdge.id}
-          label={(selectedEdge.label as string) || ""}
-          flowType={(selectedEdge.data as { flowType?: string } | undefined)?.flowType === "message" ? "message" : "sequence"}
-          condition={(selectedEdge.data as { condition?: string } | undefined)?.condition ?? ""}
-          onLabelChange={(v) => updateEdgeLabel(selectedEdge.id, v)}
-          onFlowTypeChange={(v) => setEdgeFlowType(selectedEdge.id, v)}
-          onConditionChange={(v) => setEdgeCondition(selectedEdge.id, v)}
-        />
-      </ReadOnlyShell>
+      <EdgeProperties
+        edgeId={selectedEdge.id}
+        label={(selectedEdge.label as string) || ""}
+        flowType={(selectedEdge.data as { flowType?: string } | undefined)?.flowType === "message" ? "message" : "sequence"}
+        condition={(selectedEdge.data as { condition?: string } | undefined)?.condition ?? ""}
+        onLabelChange={(v) => updateEdgeLabel(selectedEdge.id, v)}
+        onFlowTypeChange={(v) => setEdgeFlowType(selectedEdge.id, v)}
+        onConditionChange={(v) => setEdgeCondition(selectedEdge.id, v)}
+        readOnly={readOnly}
+      />
     );
   }
 
@@ -661,42 +660,6 @@ export default function PropertiesPanel() {
   );
 }
 
-/* ReadOnlyShell — wraps the EdgeProperties early-return path with the
- * same disabled-fieldset + banner so edge editing is also locked. */
-function ReadOnlyShell({
-  readOnly,
-  children,
-}: {
-  readOnly: boolean;
-  children: React.ReactNode;
-}) {
-  if (!readOnly) return <>{children}</>;
-  return (
-    <div style={{
-      position: "absolute", top: 0, right: 0, bottom: 0,
-      width: "50%", minWidth: 420, zIndex: 10,
-      background: "#fff", borderLeft: "1px solid #E5E7EB",
-      display: "flex", flexDirection: "column", overflow: "hidden",
-    }}>
-      <div style={{
-        padding: "8px 16px",
-        background: "#FFFBEB",
-        borderBottom: "1px solid #FDE68A",
-        color: "#92400E",
-        fontSize: 11,
-        flexShrink: 0,
-      }}>
-        View only — properties are locked.
-      </div>
-      <fieldset
-        disabled
-        style={{ flex: 1, overflowY: "auto", border: 0, padding: 0, margin: 0, minWidth: 0 }}
-      >
-        {children}
-      </fieldset>
-    </div>
-  );
-}
 
 /* ─── Collapsible Section ─── */
 
@@ -776,6 +739,7 @@ function EdgeProperties({
   onLabelChange,
   onFlowTypeChange,
   onConditionChange,
+  readOnly = false,
 }: {
   edgeId: string;
   label: string;
@@ -784,6 +748,7 @@ function EdgeProperties({
   onLabelChange: (v: string) => void;
   onFlowTypeChange: (v: "sequence" | "message") => void;
   onConditionChange: (v: string) => void;
+  readOnly?: boolean;
 }) {
   return (
     <div style={{
@@ -811,7 +776,26 @@ function EdgeProperties({
         </div>
       </div>
 
-      <div style={{ padding: "20px 28px", display: "flex", flexDirection: "column", gap: 16 }}>
+      {readOnly && (
+        <div style={{
+          padding: "8px 28px",
+          background: "#FFFBEB",
+          borderBottom: "1px solid #FDE68A",
+          color: "#92400E",
+          fontSize: 11,
+          flexShrink: 0,
+        }}>
+          View only — properties are locked.
+        </div>
+      )}
+
+      <fieldset
+        disabled={readOnly}
+        style={{
+          padding: "20px 28px", display: "flex", flexDirection: "column", gap: 16,
+          border: 0, margin: 0, minWidth: 0,
+        }}
+      >
         <div>
           <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#98a2b3", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
             Label
@@ -880,7 +864,7 @@ function EdgeProperties({
             </div>
           </div>
         )}
-      </div>
+      </fieldset>
     </div>
   );
 }
