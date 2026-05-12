@@ -66,7 +66,7 @@ export default function ProcessPermissionsPage() {
         const [proc, grantsRes, usersRes, rolesRes] = await Promise.all([
           apiGet<ProcessMeta>(`/processes/${id}`),
           apiGet<Grant[]>(`/processes/${id}/permissions`),
-          apiGet<TenantUser[]>(`/users`).catch(() => [] as TenantUser[]),
+          apiGet<TenantUser[]>(`/users/grantable/${id}`).catch(() => [] as TenantUser[]),
           apiGet<TenantRole[]>(`/roles`).catch(() => [] as TenantRole[]),
         ]);
         if (cancelled) return;
