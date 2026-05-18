@@ -221,6 +221,7 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
           value={assignment?.value || ""}
           onChange={(v) => onChange({ type: "expression", value: v })}
           placeholder="${managerId}"
+          mode="variable-ref"
         />
       )}
     </div>

@@ -8,6 +8,7 @@ import type { ValidationRule, ValidationIssue } from "./types";
 import { EVENT_BASED_VALID_TARGETS } from "../bpmn/capabilities";
 import { isSubprocessType } from "../bpmn/element-map";
 import { poolOf as sharedPoolOf } from "../bpmn/scope";
+import { parseFeelCondition, parseVariableRef } from "../feel/parse";
 
 /** Node types valid as boundary-event hosts per BPMN 2.0 §10.5.5. */
 const BOUNDARY_VALID_HOSTS = new Set([
@@ -485,6 +486,310 @@ const associationEndpointsRule: ValidationRule = {
   },
 };
 
+/* ─── Designer Sweep B — new rules ────────────────────────────────── */
+
+/** A userTask must have an assignment — otherwise the engine logs a
+ *  diagnostic and leaves the task unassigned, and no one can claim it.
+ *  `directUser` needs a value, `role` needs a role key, `expression`
+ *  needs a non-empty FEEL expression. Anything else (no assignment
+ *  field at all) is flagged. */
+const userTaskAssignmentRule: ValidationRule = {
+  id: "user-task-assignment",
+  name: "User task assignment",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "userTask") continue;
+      const d = n.data as Record<string, unknown> | undefined;
+      const a = d?.assignment as { type?: string; value?: string } | undefined;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      if (!a || !a.type) {
+        issues.push({
+          id: `user-task-assignment:${n.id}`,
+          severity: "error",
+          ruleId: "user-task-assignment",
+          nodeId: n.id,
+          message: `User task "${label}" has no assignment — pick a user, role, or expression.`,
+        });
+        continue;
+      }
+      const v = typeof a.value === "string" ? a.value.trim() : "";
+      if (v.length === 0) {
+        issues.push({
+          id: `user-task-assignment:${n.id}`,
+          severity: "error",
+          ruleId: "user-task-assignment",
+          nodeId: n.id,
+          message: `User task "${label}" is assigned by ${a.type} but the value is empty.`,
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+/** Exclusive/inclusive gateways with conditional outgoing flows should
+ *  have an explicit default flow OR exhaustive conditions. We can't
+ *  prove exhaustiveness without a real solver, so we flag the
+ *  common-mistake shape: "more than one outgoing flow, every flow
+ *  has a condition, no default set." That's the configuration that
+ *  raises "no matching outgoing flow" at runtime. */
+const gatewayNonExhaustiveRule: ValidationRule = {
+  id: "gateway-non-exhaustive",
+  name: "Gateway non-exhaustive",
+  run: (nodes, edges) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "exclusiveGateway" && n.type !== "inclusiveGateway") continue;
+      const outgoing = edges.filter((e) => e.source === n.id);
+      if (outgoing.length < 2) continue;
+      const d = n.data as { defaultFlowId?: string } | undefined;
+      const hasDefault =
+        !!d?.defaultFlowId &&
+        outgoing.some((e) => e.id === d.defaultFlowId);
+      if (hasDefault) continue;
+      const allConditional = outgoing.every((e) => {
+        const cond = (e.data as { condition?: string } | undefined)?.condition;
+        return typeof cond === "string" && cond.trim().length > 0;
+      });
+      if (!allConditional) continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `gateway-non-exhaustive:${n.id}`,
+        severity: "warning",
+        ruleId: "gateway-non-exhaustive",
+        nodeId: n.id,
+        message: `Gateway "${label}" has conditions on every outgoing flow but no default — an instance with no matching condition will fail.`,
+      });
+    }
+    return issues;
+  },
+};
+
+/** Service task with no usable implementation. The engine's
+ *  `resolveServiceTaskTopic` only knows externalWorker, rest, and
+ *  connector. Anything else (or no implementation at all) silently
+ *  no-ops at runtime. Flag at design time so authors don't ship a
+ *  process that does nothing useful. */
+const KNOWN_SERVICE_IMPL_TYPES = new Set([
+  "externalWorker",
+  "rest",
+  "connector",
+]);
+
+const serviceTaskImplRule: ValidationRule = {
+  id: "service-task-impl",
+  name: "Service task implementation",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "serviceTask" && n.type !== "sendTask") continue;
+      const d = n.data as Record<string, unknown> | undefined;
+      const impl = d?.implementation as { type?: string; config?: unknown } | undefined;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      if (!impl || typeof impl !== "object" || !impl.type) {
+        issues.push({
+          id: `service-task-impl:${n.id}`,
+          severity: "error",
+          ruleId: "service-task-impl",
+          nodeId: n.id,
+          message: `Service task "${label}" has no implementation — pick external worker, REST, or a connector.`,
+        });
+        continue;
+      }
+      if (!KNOWN_SERVICE_IMPL_TYPES.has(impl.type)) {
+        issues.push({
+          id: `service-task-impl:${n.id}`,
+          severity: "warning",
+          ruleId: "service-task-impl",
+          nodeId: n.id,
+          message: `Service task "${label}" uses implementation type "${impl.type}" which the engine does not yet execute — it will no-op at runtime.`,
+        });
+        continue;
+      }
+      // Topic-shape sanity checks per type.
+      const config = (impl.config as Record<string, unknown>) ?? {};
+      if (impl.type === "externalWorker") {
+        const topic = config.jobType;
+        if (typeof topic !== "string" || !topic.trim()) {
+          issues.push({
+            id: `service-task-impl:${n.id}`,
+            severity: "error",
+            ruleId: "service-task-impl",
+            nodeId: n.id,
+            message: `Service task "${label}" uses external worker but the job type is empty.`,
+          });
+        }
+      } else if (impl.type === "connector") {
+        const ref = config.connectorId ?? config.connectorRef;
+        const op = config.operation ?? config.operationId;
+        if (typeof ref !== "string" || !ref) {
+          issues.push({
+            id: `service-task-impl:${n.id}`,
+            severity: "error",
+            ruleId: "service-task-impl",
+            nodeId: n.id,
+            message: `Service task "${label}" uses a connector but no connector is selected.`,
+          });
+        } else if (typeof op !== "string" || !op) {
+          issues.push({
+            id: `service-task-impl:${n.id}`,
+            severity: "error",
+            ruleId: "service-task-impl",
+            nodeId: n.id,
+            message: `Service task "${label}" selects connector "${ref}" but no operation is picked.`,
+          });
+        }
+      } else if (impl.type === "rest") {
+        const url = config.url;
+        if (typeof url !== "string" || !url.trim()) {
+          issues.push({
+            id: `service-task-impl:${n.id}`,
+            severity: "error",
+            ruleId: "service-task-impl",
+            nodeId: n.id,
+            message: `Service task "${label}" uses REST but no URL is set.`,
+          });
+        }
+      }
+    }
+    return issues;
+  },
+};
+
+/** Nodes that the engine can never reach from any start event in their
+ *  scope. Stronger than `disconnected-node` (which flags only nodes
+ *  with zero edges): a chain of nodes wired only into a dead-end can
+ *  have edges but still be unreachable from any start. */
+const unreachableNodeRule: ValidationRule = {
+  id: "unreachable-node",
+  name: "Unreachable node",
+  run: (nodes, edges) => {
+    const issues: ValidationIssue[] = [];
+    const byScope = groupByScope(nodes);
+    const adjacencyByScope = new Map<string | null, Map<string, string[]>>();
+    for (const [scopeId, scopeNodes] of byScope) {
+      const ids = new Set(scopeNodes.map((n) => n.id));
+      const adj = new Map<string, string[]>();
+      for (const e of edges) {
+        if (!ids.has(e.source) || !ids.has(e.target)) continue;
+        const flow = (e.data as { flowType?: string } | undefined)?.flowType;
+        // Only sequence flows drive reachability inside a scope. Message
+        // flows cross pool boundaries; associations are commentary.
+        if (flow === "message" || flow === "association") continue;
+        const arr = adj.get(e.source) ?? [];
+        arr.push(e.target);
+        adj.set(e.source, arr);
+      }
+      adjacencyByScope.set(scopeId, adj);
+    }
+    for (const [scopeId, scopeNodes] of byScope) {
+      const starts = scopeNodes.filter((n) => n.type === "startEvent");
+      if (starts.length === 0) continue;
+      const adj = adjacencyByScope.get(scopeId)!;
+      const reached = new Set<string>();
+      const stack = starts.map((s) => s.id);
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        if (reached.has(cur)) continue;
+        reached.add(cur);
+        for (const next of adj.get(cur) ?? []) stack.push(next);
+      }
+      for (const n of scopeNodes) {
+        // Artifacts and boundary events aren't reachable via sequence
+        // flow by definition — skip. Disconnected-node rule already
+        // covers nodes with zero edges.
+        if (
+          n.type === "boundaryEvent" ||
+          n.type === "textAnnotation" ||
+          n.type === "dataStore" ||
+          n.type === "group"
+        ) continue;
+        if (reached.has(n.id)) continue;
+        const hasAnyEdge = (adj.get(n.id)?.length ?? 0) > 0 ||
+          edges.some((e) => e.target === n.id);
+        if (!hasAnyEdge) continue; // disconnected-node handles this
+        issues.push({
+          id: `unreachable-node:${n.id}`,
+          severity: "warning",
+          ruleId: "unreachable-node",
+          nodeId: n.id,
+          message: `"${labelOf(n as { id: string; data: Record<string, unknown> })}" is wired up but no path from a start event reaches it.`,
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+/** Parse every FEEL expression on the canvas and flag the broken ones.
+ *  Sources today:
+ *    • sequence flow conditions (`edge.data.condition`)
+ *    • business-rule task expression bindings (`data.rule.expression`)
+ *    • user task expression assignments (`data.assignment.value` when
+ *      `assignment.type === "expression"`) — strict `${path}` form
+ *
+ *  Empty strings are skipped; required-but-empty cases are flagged by
+ *  the assignment rule (above) and Camunda-style "condition required"
+ *  rules at the edge level. */
+const feelExpressionRule: ValidationRule = {
+  id: "feel-expression",
+  name: "FEEL expression syntax",
+  run: (nodes, edges) => {
+    const issues: ValidationIssue[] = [];
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    for (const e of edges) {
+      const cond = (e.data as { condition?: string } | undefined)?.condition;
+      if (typeof cond !== "string" || cond.trim().length === 0) continue;
+      const res = parseFeelCondition(cond);
+      if (res.ok) continue;
+      issues.push({
+        id: `feel-expression:edge:${e.id}`,
+        severity: "error",
+        ruleId: "feel-expression",
+        edgeId: e.id,
+        message: `Sequence flow condition: ${res.error.message}`,
+      });
+    }
+    for (const n of nodes) {
+      const d = n.data as Record<string, unknown> | undefined;
+      if (n.type === "userTask") {
+        const a = d?.assignment as { type?: string; value?: string } | undefined;
+        if (a?.type === "expression" && typeof a.value === "string" && a.value.trim().length > 0) {
+          const res = parseVariableRef(a.value);
+          if (!res.ok) {
+            issues.push({
+              id: `feel-expression:assignment:${n.id}`,
+              severity: "error",
+              ruleId: "feel-expression",
+              nodeId: n.id,
+              message: `Assignee expression: ${res.error.message}`,
+            });
+          }
+        }
+      }
+      if (n.type === "businessRuleTask") {
+        const rule = d?.rule as { binding?: string; expression?: string } | undefined;
+        if (rule?.binding === "expression" && typeof rule.expression === "string" && rule.expression.trim().length > 0) {
+          const res = parseFeelCondition(rule.expression);
+          if (!res.ok) {
+            issues.push({
+              id: `feel-expression:rule:${n.id}`,
+              severity: "error",
+              ruleId: "feel-expression",
+              nodeId: n.id,
+              message: `Decision expression: ${res.error.message}`,
+            });
+          }
+        }
+      }
+    }
+    // Suppress unused-import warning when there are no nodes to check.
+    if (issues.length === 0 && byId.size === 0) return [];
+    return issues;
+  },
+};
+
 export const DEFAULT_RULES: ValidationRule[] = [
   noStartEventRule,
   noEndEventRule,
@@ -499,4 +804,9 @@ export const DEFAULT_RULES: ValidationRule[] = [
   laneRequiresPoolRule,
   emptyTextAnnotationRule,
   associationEndpointsRule,
+  userTaskAssignmentRule,
+  gatewayNonExhaustiveRule,
+  serviceTaskImplRule,
+  unreachableNodeRule,
+  feelExpressionRule,
 ];

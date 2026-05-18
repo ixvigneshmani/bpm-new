@@ -3,8 +3,9 @@
  * Uses inline styles (Tailwind preflight disabled for Ant Design compat).
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useVariableRegistry, TYPE_COLORS, TYPE_ICONS } from "../../../../store/variable-registry";
+import { parseFeelCondition, parseVariableRef } from "../../../../lib/feel/parse";
 import AiAssistButton from "./AiAssistButton";
 
 type Props = {
@@ -12,9 +13,16 @@ type Props = {
   onChange: (value: string) => void;
   placeholder?: string;
   label?: string;
+  /** Caller-supplied error overrides the parser's auto-check. Used by
+   *  sections that want to surface a domain error (e.g. "decisionId
+   *  not found") next to a syntactically-valid expression. */
   error?: string;
   showAiAssist?: boolean;
   multiline?: boolean;
+  /** Designer Sweep B — which expression surface this input belongs to.
+   *  Conditions accept the JS-subset; variable refs accept only the
+   *  strict `${path}` form. Defaults to condition. */
+  mode?: "condition" | "variable-ref";
 };
 
 const baseInput: React.CSSProperties = {
@@ -28,12 +36,25 @@ const baseInput: React.CSSProperties = {
 export default function FeelExpressionInput({
   value, onChange, placeholder = "= expression",
   label, error, showAiAssist = true, multiline = false,
+  mode = "condition",
 }: Props) {
   const [focused, setFocused] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const registry = useVariableRegistry();
+
+  // Designer Sweep B — parse on every value change. Empty input is not
+  // an error here (sections show their own "required" message); we
+  // only surface syntactic / structural problems.
+  const parseResult = useMemo(() => {
+    if (!value || !value.trim()) return null;
+    return mode === "variable-ref" ? parseVariableRef(value) : parseFeelCondition(value);
+  }, [value, mode]);
+  const autoError =
+    parseResult && !parseResult.ok ? parseResult.error.message : undefined;
+
+  const displayError = error ?? autoError;
 
   const lastWord = value.split(/[\s=+\-*/<>!&|(),]+/).pop() || "";
   const suggestions = lastWord.length > 0
@@ -59,8 +80,8 @@ export default function FeelExpressionInput({
 
   const inputStyles: React.CSSProperties = {
     ...baseInput,
-    borderColor: error ? "#f04438" : focused ? "#818cf8" : "#e5e7eb",
-    boxShadow: error ? "0 0 0 3px rgba(240,68,56,0.08)" : focused ? "0 0 0 3px rgba(99,102,241,0.08)" : "none",
+    borderColor: displayError ? "#f04438" : focused ? "#818cf8" : "#e5e7eb",
+    boxShadow: displayError ? "0 0 0 3px rgba(240,68,56,0.08)" : focused ? "0 0 0 3px rgba(99,102,241,0.08)" : "none",
   };
 
   const sharedProps = {
@@ -93,7 +114,7 @@ export default function FeelExpressionInput({
         )}
       </div>
 
-      {error && <div style={{ marginTop: 4, fontSize: 11, color: "#f04438" }}>{error}</div>}
+      {displayError && <div style={{ marginTop: 4, fontSize: 11, color: "#f04438" }}>{displayError}</div>}
 
       {/* Autocomplete dropdown */}
       {showSuggestions && focused && suggestions.length > 0 && (
