@@ -96,6 +96,27 @@ export default function BusinessRuleSection({ rule, onChange }: Props) {
       {/* DMN ref */}
       {current.binding === "dmnRef" && (
         <div style={configBox}>
+          <div style={{
+            padding: "10px 12px", borderRadius: 8, fontSize: 11,
+            color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a",
+            lineHeight: 1.5,
+          }}>
+            <strong>Design-only.</strong> DMN engine ships in milestone <code style={{ fontFamily: "var(--font-mono, monospace)" }}>D2</code>.
+            You can author a reference now — it will resolve once decisions are deployable.
+          </div>
+          <div>
+            <div style={labelStyle}>Decision</div>
+            <select
+              value=""
+              style={{ ...inputStyle, cursor: "not-allowed", color: "#98a2b3" }}
+              disabled
+            >
+              <option value="">No DMN decisions yet — defer to M-D2</option>
+            </select>
+            <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 6 }}>
+              Fall back to the decision ID below until the DMN registry lands.
+            </div>
+          </div>
           <div>
             <div style={labelStyle}>Decision ID</div>
             <input

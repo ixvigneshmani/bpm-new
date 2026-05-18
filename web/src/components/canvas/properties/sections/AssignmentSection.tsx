@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import type { Assignment, AssignmentType } from "../../../../types/bpmn-node-data";
 import { apiGet } from "../../../../lib/api";
+import useCanvasStore from "../../../../store/canvas-store";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 
 type Props = {
@@ -13,6 +14,7 @@ type Props = {
 };
 
 type RoleRow = { id: string; key: string; label: string };
+type UserRow = { id: string; email: string; displayName: string; isActive: boolean };
 
 const labelStyle: React.CSSProperties = {
   fontSize: 11, fontWeight: 600, textTransform: "uppercase",
@@ -36,8 +38,11 @@ const ASSIGNMENT_TYPES: { type: AssignmentType; label: string; desc: string; ico
  *  is re-mounted often (node-select churn). Lightweight in-memory cache
  *  across mounts avoids repeated /roles fetches in the same session. */
 let rolesCache: RoleRow[] | null = null;
+let usersCacheKey: string | null = null;
+let usersCache: UserRow[] | null = null;
 
 export default function AssignmentSection({ assignment, onChange }: Props) {
+  const processId = useCanvasStore((s) => s.processId);
   const currentType: AssignmentType = assignment?.type === "role" || assignment?.type === "expression"
     ? assignment.type
     : "directUser";
@@ -45,6 +50,12 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
   const [roles, setRoles] = useState<RoleRow[]>(rolesCache ?? []);
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [rolesLoading, setRolesLoading] = useState(false);
+
+  const [users, setUsers] = useState<UserRow[]>(
+    usersCacheKey === processId && usersCache ? usersCache : [],
+  );
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [usersLoading, setUsersLoading] = useState(false);
 
   useEffect(() => {
     if (rolesCache) return;
@@ -67,6 +78,34 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!processId) return;
+    if (usersCacheKey === processId && usersCache) {
+      setUsers(usersCache);
+      return;
+    }
+    let cancelled = false;
+    setUsersLoading(true);
+    setUsersError(null);
+    apiGet<UserRow[]>(`/users/assignable/${processId}`)
+      .then((data) => {
+        if (cancelled) return;
+        usersCacheKey = processId;
+        usersCache = data;
+        setUsers(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setUsersError(err?.message ?? "Failed to load users");
+      })
+      .finally(() => {
+        if (!cancelled) setUsersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [processId]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -105,13 +144,44 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
       {currentType === "directUser" && (
         <div>
           <div style={labelStyle}>User</div>
-          <input
-            type="text"
-            value={assignment?.value || ""}
-            onChange={(e) => onChange({ type: "directUser", value: e.target.value })}
-            style={inputStyle}
-            placeholder="User ID (uuid)"
-          />
+          {usersError ? (
+            <>
+              <div style={{ fontSize: 12, color: "#b42318", padding: "8px 12px", background: "#fef3f2", border: "1px solid #fecdca", borderRadius: 8, marginBottom: 8 }}>
+                {usersError}
+              </div>
+              <input
+                type="text"
+                value={assignment?.value || ""}
+                onChange={(e) => onChange({ type: "directUser", value: e.target.value })}
+                style={inputStyle}
+                placeholder="User ID (uuid)"
+              />
+            </>
+          ) : (
+            <select
+              value={assignment?.value || ""}
+              onChange={(e) => onChange({ type: "directUser", value: e.target.value })}
+              style={{ ...inputStyle, cursor: "pointer" }}
+              disabled={usersLoading}
+            >
+              <option value="" disabled>
+                {usersLoading ? "Loading users…" : "Select a user…"}
+              </option>
+              {/* Preserve any pre-existing uuid that isn't in the current list
+                  (e.g. user removed from tenant) so we don't silently drop it. */}
+              {assignment?.value &&
+                !users.some((u) => u.id === assignment.value) && (
+                  <option value={assignment.value}>
+                    {assignment.value} (unknown — kept)
+                  </option>
+                )}
+              {users.map((u) => (
+                <option key={u.id} value={u.id} disabled={!u.isActive}>
+                  {u.displayName} ({u.email}){!u.isActive ? " — inactive" : ""}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       )}
 

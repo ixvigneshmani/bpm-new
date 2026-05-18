@@ -15,6 +15,7 @@ import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode }
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import useCanvasStore from "../../../../store/canvas-store";
 import type { LoopMarker, CompensationMarker } from "../../../../types/bpmn-node-data";
+import NodeErrorMarker from "./NodeErrorMarker";
 
 type BaseTaskProps = NodeProps & {
   icon: ReactNode;
@@ -310,6 +311,8 @@ const BaseTaskNode = memo(({
 
       {/* All 4 sides: source + target handles for connect & reconnect */}
       <SideHandles />
+
+      <NodeErrorMarker nodeId={id} />
     </div>
   );
 });

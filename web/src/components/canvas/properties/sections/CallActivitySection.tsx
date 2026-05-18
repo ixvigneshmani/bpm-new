@@ -3,17 +3,29 @@
  * Uses inline styles (Tailwind preflight disabled for Ant Design compat).
  * ──────────────────────────────────────────────────────────────────── */
 
+import { useEffect, useState } from "react";
 import type {
   CallActivityConfig,
   CallActivityBinding,
   VariableMapping,
 } from "../../../../types/bpmn-node-data";
+import { apiGet } from "../../../../lib/api";
+import useCanvasStore from "../../../../store/canvas-store";
 import MappingTable from "../fields/MappingTable";
 
 type Props = {
   call: CallActivityConfig | undefined;
   onChange: (c: CallActivityConfig) => void;
 };
+
+type ProcessRow = {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+};
+
+let processesCache: ProcessRow[] | null = null;
 
 const labelStyle: React.CSSProperties = {
   fontSize: 11, fontWeight: 600, textTransform: "uppercase",
@@ -43,6 +55,7 @@ const BINDINGS: { value: CallActivityBinding; label: string; desc: string }[] = 
 ];
 
 export default function CallActivitySection({ call, onChange }: Props) {
+  const currentProcessId = useCanvasStore((s) => s.processId);
   const current: CallActivityConfig = call || {
     calledProcessId: "", binding: "latest", propagateAllVariables: false,
   };
@@ -50,18 +63,104 @@ export default function CallActivitySection({ call, onChange }: Props) {
   const inputMappings: VariableMapping[] = current.inputMappings || [];
   const outputMappings: VariableMapping[] = current.outputMappings || [];
 
+  const [processes, setProcesses] = useState<ProcessRow[]>(processesCache ?? []);
+  const [procsError, setProcsError] = useState<string | null>(null);
+  const [procsLoading, setProcsLoading] = useState(false);
+
+  useEffect(() => {
+    if (processesCache) return;
+    let cancelled = false;
+    setProcsLoading(true);
+    apiGet<ProcessRow[]>("/processes")
+      .then((data) => {
+        if (cancelled) return;
+        processesCache = data;
+        setProcesses(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setProcsError(err?.message ?? "Failed to load processes");
+      })
+      .finally(() => {
+        if (!cancelled) setProcsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Use slug for cross-env identity (D1 design); exclude self to prevent
+  // direct recursion. Status filter keeps ARCHIVED out.
+  const selectable = processes.filter(
+    (p) => p.id !== currentProcessId && p.status !== "ARCHIVED",
+  );
+  const selectedProcess = processes.find(
+    (p) => p.slug === current.calledProcessId || p.id === current.calledProcessId,
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={configBox}>
         <div>
-          <div style={labelStyle}>Called Process ID</div>
-          <input
-            type="text"
-            value={current.calledProcessId}
-            onChange={(e) => onChange({ ...current, calledProcessId: e.target.value })}
-            style={monoInput}
-            placeholder="order-fulfillment"
-          />
+          <div style={labelStyle}>Called Process</div>
+          {procsError ? (
+            <>
+              <div style={{ fontSize: 12, color: "#b42318", padding: "8px 12px", background: "#fef3f2", border: "1px solid #fecdca", borderRadius: 8, marginBottom: 8 }}>
+                {procsError}
+              </div>
+              <input
+                type="text"
+                value={current.calledProcessId}
+                onChange={(e) => onChange({ ...current, calledProcessId: e.target.value })}
+                style={monoInput}
+                placeholder="order-fulfillment"
+              />
+            </>
+          ) : (
+            <select
+              value={current.calledProcessId}
+              onChange={(e) => {
+                const next = selectable.find((p) => p.slug === e.target.value);
+                onChange({
+                  ...current,
+                  calledProcessId: e.target.value,
+                  calledProcessName: next?.name ?? current.calledProcessName,
+                });
+              }}
+              style={{ ...inputStyle, cursor: "pointer" }}
+              disabled={procsLoading}
+            >
+              <option value="" disabled>
+                {procsLoading ? "Loading processes…" : "Select a process…"}
+              </option>
+              {/* Preserve a pre-existing value not in the list (e.g. process
+                  archived or yet-to-be-imported in this env) so we don't
+                  silently drop it. */}
+              {current.calledProcessId &&
+                !selectable.some(
+                  (p) =>
+                    p.slug === current.calledProcessId ||
+                    p.id === current.calledProcessId,
+                ) && (
+                  <option value={current.calledProcessId}>
+                    {current.calledProcessId} (not found — kept)
+                  </option>
+                )}
+              {selectable.map((p) => (
+                <option key={p.id} value={p.slug}>
+                  {p.name} ({p.slug})
+                </option>
+              ))}
+            </select>
+          )}
+          {selectedProcess && (
+            <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 6, lineHeight: 1.5 }}>
+              Status: <strong style={{ color: "#475569" }}>{selectedProcess.status}</strong>
+              {selectedProcess.slug !== current.calledProcessId && (
+                <span style={{ color: "#b54708" }}> · stored by UUID — re-pick to use slug</span>
+              )}
+            </div>
+          )}
         </div>
         <div>
           <div style={labelStyle}>Display Name</div>

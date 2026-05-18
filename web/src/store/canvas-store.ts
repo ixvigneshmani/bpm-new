@@ -118,6 +118,14 @@ export type CanvasState = {
    *  to an edge-scoped validation issue. */
   selectEdge: (edgeId: string) => void;
 
+  /* Designer Sweep A — Problems panel state lifted into store so
+   * the canvas node markers can open the panel + scroll to an issue. */
+  problemsPanelOpen: boolean;
+  focusedIssueId: string | null;
+  setProblemsPanelOpen: (open: boolean) => void;
+  focusIssue: (issueId: string, nodeId?: string | null) => void;
+  clearFocusedIssue: () => void;
+
   setSaveStatus: (status: SaveStatus, error?: string | null) => void;
 
   setProcessId: (id: string | null) => void;
@@ -233,9 +241,62 @@ const useCanvasStore = create<CanvasState>()(
       saveError: null as SaveError,
       clipboard: null,
       connectMode: "sequence" as const,
+      problemsPanelOpen: false,
+      focusedIssueId: null as string | null,
 
       onNodesChange: (changes) => {
-        set({ nodes: applyNodeChanges(changes, get().nodes) });
+        const prevNodes = get().nodes;
+        // Designer Sweep A — boundary-event snap-to-host. Boundary events
+        // attach to an activity via `data.attachedToRef` (not parentId, so
+        // they can render outside the host's frame). React Flow won't move
+        // them when the host drags, leaving a visible disconnect. Mirror
+        // any position-change on a host into matching position-changes
+        // on each of its attached boundary children, applied in the same
+        // tick so the move is atomic in undo history.
+        const prevById = new Map(prevNodes.map((n) => [n.id, n]));
+        const boundariesByHost = new Map<string, { id: string; pos: { x: number; y: number } }[]>();
+        for (const n of prevNodes) {
+          if (n.type !== "boundaryEvent") continue;
+          const host = (n.data as { attachedToRef?: string } | undefined)?.attachedToRef;
+          if (!host) continue;
+          const arr = boundariesByHost.get(host) ?? [];
+          arr.push({ id: n.id, pos: n.position });
+          boundariesByHost.set(host, arr);
+        }
+
+        const extra: typeof changes = [];
+        const seen = new Set<string>();
+        for (const c of changes) {
+          if (c.type !== "position" || !c.position) continue;
+          const kids = boundariesByHost.get(c.id);
+          if (!kids || kids.length === 0) continue;
+          const prevHost = prevById.get(c.id);
+          if (!prevHost) continue;
+          const dx = c.position.x - prevHost.position.x;
+          const dy = c.position.y - prevHost.position.y;
+          if (dx === 0 && dy === 0) continue;
+          for (const k of kids) {
+            // De-dupe if a parent and a boundary both moved in the same
+            // batch (e.g. multi-select drag) — react flow will already
+            // emit a position change for the boundary; skip our mirror.
+            const key = `${k.id}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const alreadyMoving = changes.some(
+              (x) => x.type === "position" && x.id === k.id && x.position,
+            );
+            if (alreadyMoving) continue;
+            extra.push({
+              type: "position",
+              id: k.id,
+              position: { x: k.pos.x + dx, y: k.pos.y + dy },
+              dragging: c.dragging,
+            } as (typeof changes)[number]);
+          }
+        }
+
+        const merged = extra.length === 0 ? changes : [...changes, ...extra];
+        set({ nodes: applyNodeChanges(merged, prevNodes) });
       },
 
       onEdgesChange: (changes) => {
@@ -649,6 +710,29 @@ const useCanvasStore = create<CanvasState>()(
           nodes: nodes.map((n) => (n.selected ? { ...n, selected: false } : n)),
         });
       },
+
+      setProblemsPanelOpen: (open) =>
+        set({ problemsPanelOpen: open, focusedIssueId: open ? get().focusedIssueId : null }),
+
+      focusIssue: (issueId, nodeId) => {
+        const state = get();
+        const patch: Partial<CanvasState> = {
+          problemsPanelOpen: true,
+          focusedIssueId: issueId,
+        };
+        if (nodeId) {
+          patch.selectedNodeId = nodeId;
+          patch.nodes = state.nodes.map((n) =>
+            n.selected === (n.id === nodeId) ? n : { ...n, selected: n.id === nodeId },
+          );
+          patch.edges = state.edges.map((e) =>
+            e.selected ? { ...e, selected: false } : e,
+          );
+        }
+        set(patch as CanvasState);
+      },
+
+      clearFocusedIssue: () => set({ focusedIssueId: null }),
 
       setSaveStatus: (status, error) => {
         set({

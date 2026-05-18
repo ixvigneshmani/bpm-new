@@ -13,6 +13,7 @@ import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode }
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import useCanvasStore from "../../../../store/canvas-store";
 import { resizeHandleStyle } from "./BaseTaskNode";
+import NodeErrorMarker from "./NodeErrorMarker";
 
 type BaseSubprocessFrameProps = NodeProps & {
   accentColor: string;
@@ -158,6 +159,8 @@ const BaseSubprocessFrame = memo((props: BaseSubprocessFrameProps): ReactNode =>
       </div>
 
       <SideHandles enabled={!!selected} />
+
+      <NodeErrorMarker nodeId={id} />
     </div>
   );
 });

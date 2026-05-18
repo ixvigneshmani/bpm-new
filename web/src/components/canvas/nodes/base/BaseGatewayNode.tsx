@@ -7,6 +7,7 @@ import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode }
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import { cn } from "../../../../lib/utils";
 import useCanvasStore from "../../../../store/canvas-store";
+import NodeErrorMarker from "./NodeErrorMarker";
 
 type BaseGatewayProps = NodeProps & {
   icon: ReactNode;
@@ -138,6 +139,8 @@ const BaseGatewayNode = memo(({
 
         <RightConnectChip accentColor={accentColor} />
         <SideHandles />
+
+        <NodeErrorMarker nodeId={id} offsetTop={-4} offsetRight={-4} />
       </div>
 
       {editing ? (

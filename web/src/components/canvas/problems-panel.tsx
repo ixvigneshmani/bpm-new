@@ -5,7 +5,7 @@
  * the panel is collapsed.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import useCanvasStore from "../../store/canvas-store";
 import { useValidationIssues } from "../../store/validation-hook";
 import type { IssueSeverity } from "../../lib/validation/types";
@@ -20,7 +20,25 @@ export default function ProblemsPanel() {
   const issues = useValidationIssues();
   const setSelectedNode = useCanvasStore((s) => s.setSelectedNode);
   const selectEdge = useCanvasStore((s) => s.selectEdge);
-  const [open, setOpen] = useState(false);
+  const open = useCanvasStore((s) => s.problemsPanelOpen);
+  const setOpen = useCanvasStore((s) => s.setProblemsPanelOpen);
+  const focusedIssueId = useCanvasStore((s) => s.focusedIssueId);
+  const clearFocusedIssue = useCanvasStore((s) => s.clearFocusedIssue);
+
+  const issueRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  useEffect(() => {
+    if (!open || !focusedIssueId) return;
+    const el = issueRefs.current.get(focusedIssueId);
+    if (!el) return;
+    el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const prev = el.style.background;
+    el.style.background = "#FEF3C7";
+    const t = window.setTimeout(() => {
+      el.style.background = prev;
+      clearFocusedIssue();
+    }, 1400);
+    return () => window.clearTimeout(t);
+  }, [open, focusedIssueId, clearFocusedIssue]);
 
   const errorCount = issues.filter((i) => i.severity === "error").length;
   const warningCount = issues.filter((i) => i.severity === "warning").length;
@@ -29,7 +47,7 @@ export default function ProblemsPanel() {
   const trigger = (
     <button
       type="button"
-      onClick={() => setOpen((v) => !v)}
+      onClick={() => setOpen(!open)}
       title={`${issues.length} problem${issues.length === 1 ? "" : "s"}`}
       style={{
         position: "absolute",
@@ -140,6 +158,10 @@ export default function ProblemsPanel() {
               return (
                 <button
                   key={issue.id}
+                  ref={(el) => {
+                    if (el) issueRefs.current.set(issue.id, el);
+                    else issueRefs.current.delete(issue.id);
+                  }}
                   type="button"
                   disabled={!clickable}
                   onClick={() => {

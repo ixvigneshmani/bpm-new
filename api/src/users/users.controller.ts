@@ -46,4 +46,25 @@ export class UsersController {
     );
     return this.users.listForTenant(req.user.tenantId);
   }
+
+  /** Designer Sweep A — tenant users visible to anyone with `edit` on
+   *  the given process. Drives the userTask `directUser` picker so
+   *  designers don't have to paste UUIDs. */
+  @Get("assignable/:processId")
+  async assignable(
+    @Req() req: AuthenticatedRequest,
+    @Param("processId", ParseUUIDPipe) processId: string,
+  ) {
+    await this.permissions.assert(
+      {
+        userId: req.user.sub,
+        tenantId: req.user.tenantId,
+        systemRole: req.user.systemRole,
+        roles: req.user.roles ?? [],
+      },
+      processId,
+      "edit",
+    );
+    return this.users.listForTenant(req.user.tenantId);
+  }
 }

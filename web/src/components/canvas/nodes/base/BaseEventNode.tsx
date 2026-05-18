@@ -7,6 +7,7 @@ import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode }
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import { cn } from "../../../../lib/utils";
 import useCanvasStore from "../../../../store/canvas-store";
+import NodeErrorMarker from "./NodeErrorMarker";
 
 export type EventVariant = "start" | "end" | "intermediateThrow" | "intermediateCatch" | "boundary";
 
@@ -166,6 +167,8 @@ const BaseEventNode = memo(({
 
         {showSource && <RightConnectChip accentColor={accentColor} />}
         <SideHandles showSource={showSource} showTarget={showTarget} />
+
+        <NodeErrorMarker nodeId={id} offsetTop={-2} offsetRight={-2} />
       </div>
 
       {editing ? (
