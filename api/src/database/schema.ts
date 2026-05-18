@@ -744,6 +744,99 @@ export const outboxEvents = pgTable(
   ],
 );
 
+// ─── CONNECTOR_INSTANCES ────────────────────────────────────────────
+// I4 — Connector framework. One row per configured account/relay/etc.
+// for a given connector type. Tenant-scoped; secrets inside CONFIG are
+// encrypted at rest by ConnectorInstancesService using CryptoService,
+// per the connector definition's `secretFields` list.
+//
+// Identity model:
+//   • (tenantId, connectorType, name) is unique — name is the
+//     cross-env identity used by D1 bundles (instead of the uuid id).
+//   • At most one row per (tenantId, connectorType) has isDefault=true.
+//     Enforcement lives in the service layer; we don't use a partial
+//     unique index because flipping default would need a two-statement
+//     dance. The service runs both in a single txn instead.
+//
+// Why CONFIG is a single JSONB rather than per-connector columns:
+//   • Adding a new connector is a code-only change; no schema migration.
+//   • Schema lives in the connector definition (server-side) and the
+//     UI renders the form from it. DB stays generic.
+
+export const connectorInstances = pgTable(
+  "CONNECTOR_INSTANCES",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** Connector definition id, e.g. "mail", "rest", "slack". Matches
+     *  the `id` field on the registered ConnectorDefinition. */
+    connectorType: varchar("CONNECTOR_TYPE", { length: 64 }).notNull(),
+    /** Human-friendly name, unique per (tenantId, connectorType).
+     *  Used as the cross-env identity by D1 bundles — see
+     *  project_d1_design.md. */
+    name: varchar("NAME", { length: 255 }).notNull(),
+    /** Per-connector config blob. Secret fields (per the connector's
+     *  `secretFields` array) are encrypted by the service before
+     *  insert/update; the rest stay plaintext for UI display. */
+    config: jsonb("CONFIG").notNull().default({}),
+    enabled: boolean("ENABLED").notNull().default(true),
+    /** At most one default per (tenantId, connectorType). When the
+     *  designer doesn't pick a specific connection on a task, runtime
+     *  resolves to this. */
+    isDefault: boolean("IS_DEFAULT").notNull().default(false),
+    updatedBy: uuid("UPDATED_BY")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("CONN_INST_TENANT_TYPE_IDX").on(t.tenantId, t.connectorType),
+    uniqueIndex("CONN_INST_TENANT_TYPE_NAME_IDX").on(
+      t.tenantId,
+      t.connectorType,
+      t.name,
+    ),
+  ],
+);
+
+// ─── TENANT_MAIL_SETTINGS ───────────────────────────────────────────
+// I1 — per-tenant SMTP configuration. One row per tenant (PK = tenantId)
+// so reads are a single point-lookup. PASSWORD is stored encrypted at
+// rest via CryptoService (OS8) in the `enc:v1:<iv>:<ciphertext>` shape;
+// FROM_EMAIL/host/port/etc. are kept plaintext for operability + UI
+// display. ENABLED gates whether the engine `notify-email` handler
+// will dispatch — disabling pauses outgoing mail without losing config.
+
+export const tenantMailSettings = pgTable("TENANT_MAIL_SETTINGS", {
+  tenantId: uuid("TENANT_ID")
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  host: varchar("HOST", { length: 255 }).notNull(),
+  port: integer("PORT").notNull(),
+  /** True for implicit TLS (port 465); false for STARTTLS (587/25). */
+  secure: boolean("SECURE").notNull().default(false),
+  username: varchar("USERNAME", { length: 255 }),
+  /** Encrypted SMTP password. Up to 512 chars to hold the enc:v1
+   *  envelope around a typical 64-char password. */
+  passwordEncrypted: varchar("PASSWORD_ENCRYPTED", { length: 512 }),
+  fromEmail: varchar("FROM_EMAIL", { length: 255 }).notNull(),
+  fromName: varchar("FROM_NAME", { length: 255 }),
+  enabled: boolean("ENABLED").notNull().default(true),
+  updatedBy: uuid("UPDATED_BY")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 // ─── ENGINE_JOBS ────────────────────────────────────────────────────
 // Durable async work queue. The interpreter enqueues a job whenever
 // a node needs side-effects that shouldn't block the request thread

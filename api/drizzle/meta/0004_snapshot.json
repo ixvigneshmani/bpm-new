@@ -1,0 +1,3989 @@
+{
+  "id": "22124a67-e4fa-434f-91df-a728d98b0d23",
+  "prevId": "bb649445-3009-423a-abe0-1f7c65768be5",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.AI_INTERACTIONS": {
+      "name": "AI_INTERACTIONS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "KIND": {
+          "name": "KIND",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DESCRIPTION": {
+          "name": "DESCRIPTION",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "MODEL": {
+          "name": "MODEL",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "AI_INTERACTION_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "RESPONSE_JSON": {
+          "name": "RESPONSE_JSON",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ERROR_MESSAGE": {
+          "name": "ERROR_MESSAGE",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "TOKENS_IN": {
+          "name": "TOKENS_IN",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "TOKENS_OUT": {
+          "name": "TOKENS_OUT",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "DURATION_MS": {
+          "name": "DURATION_MS",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "AI_INTERACTIONS_TENANT_CREATED_IDX": {
+          "name": "AI_INTERACTIONS_TENANT_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "AI_INTERACTIONS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "AI_INTERACTIONS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "AI_INTERACTIONS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "AI_INTERACTIONS_USER_ID_USERS_ID_fk": {
+          "name": "AI_INTERACTIONS_USER_ID_USERS_ID_fk",
+          "tableFrom": "AI_INTERACTIONS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.API_TOKENS": {
+      "name": "API_TOKENS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ISSUED_BY": {
+          "name": "ISSUED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "TOKEN_HASH": {
+          "name": "TOKEN_HASH",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "SCOPES": {
+          "name": "SCOPES",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "EXPIRES_AT": {
+          "name": "EXPIRES_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "REVOKED_AT": {
+          "name": "REVOKED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "LAST_USED_AT": {
+          "name": "LAST_USED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "API_TOKEN_HASH_IDX": {
+          "name": "API_TOKEN_HASH_IDX",
+          "columns": [
+            {
+              "expression": "TOKEN_HASH",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "API_TOKEN_TENANT_IDX": {
+          "name": "API_TOKEN_TENANT_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "API_TOKENS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "API_TOKENS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "API_TOKENS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "API_TOKENS_ISSUED_BY_USERS_ID_fk": {
+          "name": "API_TOKENS_ISSUED_BY_USERS_ID_fk",
+          "tableFrom": "API_TOKENS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "ISSUED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.AUTH_ACCOUNTS": {
+      "name": "AUTH_ACCOUNTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROVIDER": {
+          "name": "PROVIDER",
+          "type": "AUTH_PROVIDER",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROVIDER_ACCOUNT_ID": {
+          "name": "PROVIDER_ACCOUNT_ID",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ACCESS_TOKEN": {
+          "name": "ACCESS_TOKEN",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "REFRESH_TOKEN": {
+          "name": "REFRESH_TOKEN",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "TOKEN_EXPIRES_AT": {
+          "name": "TOKEN_EXPIRES_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "AUTH_PROVIDER_ACCOUNT_IDX": {
+          "name": "AUTH_PROVIDER_ACCOUNT_IDX",
+          "columns": [
+            {
+              "expression": "PROVIDER",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "PROVIDER_ACCOUNT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "AUTH_USER_IDX": {
+          "name": "AUTH_USER_IDX",
+          "columns": [
+            {
+              "expression": "USER_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "AUTH_ACCOUNTS_USER_ID_USERS_ID_fk": {
+          "name": "AUTH_ACCOUNTS_USER_ID_USERS_ID_fk",
+          "tableFrom": "AUTH_ACCOUNTS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.BUSINESS_DOCUMENTS": {
+      "name": "BUSINESS_DOCUMENTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_BY": {
+          "name": "CREATED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "SCHEMA": {
+          "name": "SCHEMA",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "BIZ_DOC_TENANT_IDX": {
+          "name": "BIZ_DOC_TENANT_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "BUSINESS_DOCUMENTS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "BUSINESS_DOCUMENTS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "BUSINESS_DOCUMENTS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "BUSINESS_DOCUMENTS_CREATED_BY_USERS_ID_fk": {
+          "name": "BUSINESS_DOCUMENTS_CREATED_BY_USERS_ID_fk",
+          "tableFrom": "BUSINESS_DOCUMENTS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "CREATED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.CONNECTOR_INSTANCES": {
+      "name": "CONNECTOR_INSTANCES",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CONNECTOR_TYPE": {
+          "name": "CONNECTOR_TYPE",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CONFIG": {
+          "name": "CONFIG",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "ENABLED": {
+          "name": "ENABLED",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "IS_DEFAULT": {
+          "name": "IS_DEFAULT",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "UPDATED_BY": {
+          "name": "UPDATED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "CONN_INST_TENANT_TYPE_IDX": {
+          "name": "CONN_INST_TENANT_TYPE_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CONNECTOR_TYPE",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "CONN_INST_TENANT_TYPE_NAME_IDX": {
+          "name": "CONN_INST_TENANT_TYPE_NAME_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CONNECTOR_TYPE",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "NAME",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "CONNECTOR_INSTANCES_TENANT_ID_TENANTS_ID_fk": {
+          "name": "CONNECTOR_INSTANCES_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "CONNECTOR_INSTANCES",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "CONNECTOR_INSTANCES_UPDATED_BY_USERS_ID_fk": {
+          "name": "CONNECTOR_INSTANCES_UPDATED_BY_USERS_ID_fk",
+          "tableFrom": "CONNECTOR_INSTANCES",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "UPDATED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ENGINE_JOBS": {
+      "name": "ENGINE_JOBS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "INSTANCE_ID": {
+          "name": "INSTANCE_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "TOKEN_ID": {
+          "name": "TOKEN_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "JOB_TYPE": {
+          "name": "JOB_TYPE",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "TOPIC": {
+          "name": "TOPIC",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "INPUT": {
+          "name": "INPUT",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "RESULT": {
+          "name": "RESULT",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "ENGINE_JOB_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "ATTEMPTS": {
+          "name": "ATTEMPTS",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "MAX_ATTEMPTS": {
+          "name": "MAX_ATTEMPTS",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 3
+        },
+        "LAST_ERROR": {
+          "name": "LAST_ERROR",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "SCHEDULED_FOR": {
+          "name": "SCHEDULED_FOR",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "LOCKED_AT": {
+          "name": "LOCKED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "LOCKED_BY": {
+          "name": "LOCKED_BY",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ENGINE_JOB_QUEUE_IDX": {
+          "name": "ENGINE_JOB_QUEUE_IDX",
+          "columns": [
+            {
+              "expression": "STATUS",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "SCHEDULED_FOR",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ENGINE_JOB_INSTANCE_IDX": {
+          "name": "ENGINE_JOB_INSTANCE_IDX",
+          "columns": [
+            {
+              "expression": "INSTANCE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ENGINE_JOB_TENANT_CREATED_IDX": {
+          "name": "ENGINE_JOB_TENANT_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ENGINE_JOBS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "ENGINE_JOBS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "ENGINE_JOBS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ENVIRONMENT_BINDINGS": {
+      "name": "ENVIRONMENT_BINDINGS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "KEY": {
+          "name": "KEY",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "VALUE_KIND": {
+          "name": "VALUE_KIND",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "VALUE_PLAIN": {
+          "name": "VALUE_PLAIN",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "VALUE_SECRET": {
+          "name": "VALUE_SECRET",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "DESCRIPTION": {
+          "name": "DESCRIPTION",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_BY": {
+          "name": "CREATED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ENV_BINDING_TENANT_KEY_IDX": {
+          "name": "ENV_BINDING_TENANT_KEY_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "KEY",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ENVIRONMENT_BINDINGS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "ENVIRONMENT_BINDINGS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "ENVIRONMENT_BINDINGS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ENVIRONMENT_BINDINGS_CREATED_BY_USERS_ID_fk": {
+          "name": "ENVIRONMENT_BINDINGS_CREATED_BY_USERS_ID_fk",
+          "tableFrom": "ENVIRONMENT_BINDINGS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "CREATED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.IDEMPOTENCY_KEYS": {
+      "name": "IDEMPOTENCY_KEYS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ENDPOINT": {
+          "name": "ENDPOINT",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "KEY": {
+          "name": "KEY",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "REQUEST_HASH": {
+          "name": "REQUEST_HASH",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "RESPONSE_STATUS": {
+          "name": "RESPONSE_STATUS",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "RESPONSE_JSON": {
+          "name": "RESPONSE_JSON",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "EXPIRES_AT": {
+          "name": "EXPIRES_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "IDEMP_TENANT_ENDPOINT_KEY_IDX": {
+          "name": "IDEMP_TENANT_ENDPOINT_KEY_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ENDPOINT",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "KEY",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "IDEMP_EXPIRES_IDX": {
+          "name": "IDEMP_EXPIRES_IDX",
+          "columns": [
+            {
+              "expression": "EXPIRES_AT",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "IDEMPOTENCY_KEYS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "IDEMPOTENCY_KEYS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "IDEMPOTENCY_KEYS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.INSTANCE_EVENTS": {
+      "name": "INSTANCE_EVENTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "INSTANCE_ID": {
+          "name": "INSTANCE_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "TOKEN_ID": {
+          "name": "TOKEN_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "NODE_ID": {
+          "name": "NODE_ID",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "EVENT_TYPE": {
+          "name": "EVENT_TYPE",
+          "type": "INSTANCE_EVENT_TYPE",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PAYLOAD": {
+          "name": "PAYLOAD",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "EVENT_INSTANCE_CREATED_IDX": {
+          "name": "EVENT_INSTANCE_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "INSTANCE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "EVENT_TENANT_CREATED_IDX": {
+          "name": "EVENT_TENANT_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "INSTANCE_EVENTS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "INSTANCE_EVENTS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "INSTANCE_EVENTS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "INSTANCE_EVENTS_INSTANCE_ID_PROCESS_INSTANCES_ID_fk": {
+          "name": "INSTANCE_EVENTS_INSTANCE_ID_PROCESS_INSTANCES_ID_fk",
+          "tableFrom": "INSTANCE_EVENTS",
+          "tableTo": "PROCESS_INSTANCES",
+          "columnsFrom": [
+            "INSTANCE_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.INSTANCE_TOKENS": {
+      "name": "INSTANCE_TOKENS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "INSTANCE_ID": {
+          "name": "INSTANCE_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CURRENT_NODE_ID": {
+          "name": "CURRENT_NODE_ID",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "INSTANCE_TOKEN_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "WAITING_FOR": {
+          "name": "WAITING_FOR",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ASSIGNED_TO": {
+          "name": "ASSIGNED_TO",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CANDIDATE_ROLE": {
+          "name": "CANDIDATE_ROLE",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ERROR_MESSAGE": {
+          "name": "ERROR_MESSAGE",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "VERSION": {
+          "name": "VERSION",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "TOKEN_INSTANCE_IDX": {
+          "name": "TOKEN_INSTANCE_IDX",
+          "columns": [
+            {
+              "expression": "INSTANCE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "TOKEN_TENANT_STATUS_IDX": {
+          "name": "TOKEN_TENANT_STATUS_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "STATUS",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "TOKEN_ASSIGNED_IDX": {
+          "name": "TOKEN_ASSIGNED_IDX",
+          "columns": [
+            {
+              "expression": "ASSIGNED_TO",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "STATUS",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "INSTANCE_TOKENS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "INSTANCE_TOKENS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "INSTANCE_TOKENS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "INSTANCE_TOKENS_INSTANCE_ID_PROCESS_INSTANCES_ID_fk": {
+          "name": "INSTANCE_TOKENS_INSTANCE_ID_PROCESS_INSTANCES_ID_fk",
+          "tableFrom": "INSTANCE_TOKENS",
+          "tableTo": "PROCESS_INSTANCES",
+          "columnsFrom": [
+            "INSTANCE_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "INSTANCE_TOKENS_ASSIGNED_TO_USERS_ID_fk": {
+          "name": "INSTANCE_TOKENS_ASSIGNED_TO_USERS_ID_fk",
+          "tableFrom": "INSTANCE_TOKENS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "ASSIGNED_TO"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.MFA_RECOVERY_CODES": {
+      "name": "MFA_RECOVERY_CODES",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CODE_HASH": {
+          "name": "CODE_HASH",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "USED_AT": {
+          "name": "USED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "MFA_RECOVERY_USER_IDX": {
+          "name": "MFA_RECOVERY_USER_IDX",
+          "columns": [
+            {
+              "expression": "USER_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "MFA_RECOVERY_USER_HASH_IDX": {
+          "name": "MFA_RECOVERY_USER_HASH_IDX",
+          "columns": [
+            {
+              "expression": "USER_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CODE_HASH",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "MFA_RECOVERY_CODES_USER_ID_USERS_ID_fk": {
+          "name": "MFA_RECOVERY_CODES_USER_ID_USERS_ID_fk",
+          "tableFrom": "MFA_RECOVERY_CODES",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.OUTBOX_EVENTS": {
+      "name": "OUTBOX_EVENTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "INSTANCE_ID": {
+          "name": "INSTANCE_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "EVENT_TYPE": {
+          "name": "EVENT_TYPE",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PAYLOAD": {
+          "name": "PAYLOAD",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "OUTBOX_EVENT_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "DISPATCHED_AT": {
+          "name": "DISPATCHED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "OUTBOX_STATUS_CREATED_IDX": {
+          "name": "OUTBOX_STATUS_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "STATUS",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "OUTBOX_TENANT_CREATED_IDX": {
+          "name": "OUTBOX_TENANT_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "OUTBOX_EVENTS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "OUTBOX_EVENTS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "OUTBOX_EVENTS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PERMISSION_AUDIT_EVENTS": {
+      "name": "PERMISSION_AUDIT_EVENTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ACTION": {
+          "name": "ACTION",
+          "type": "PERMISSION_AUDIT_ACTION",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "GRANTEE_TYPE": {
+          "name": "GRANTEE_TYPE",
+          "type": "PROCESS_GRANTEE_TYPE",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "GRANTEE_ID": {
+          "name": "GRANTEE_ID",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PERMISSION": {
+          "name": "PERMISSION",
+          "type": "PROCESS_PERMISSION",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ACTOR_USER_ID": {
+          "name": "ACTOR_USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CORRELATION_ID": {
+          "name": "CORRELATION_ID",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PERM_AUDIT_PROCESS_CREATED_IDX": {
+          "name": "PERM_AUDIT_PROCESS_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PERM_AUDIT_TENANT_CREATED_IDX": {
+          "name": "PERM_AUDIT_TENANT_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PERM_AUDIT_GRANTEE_IDX": {
+          "name": "PERM_AUDIT_GRANTEE_IDX",
+          "columns": [
+            {
+              "expression": "GRANTEE_TYPE",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "GRANTEE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "PERMISSION_AUDIT_EVENTS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "PERMISSION_AUDIT_EVENTS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "PERMISSION_AUDIT_EVENTS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PERMISSION_AUDIT_EVENTS_PROCESS_ID_PROCESSES_ID_fk": {
+          "name": "PERMISSION_AUDIT_EVENTS_PROCESS_ID_PROCESSES_ID_fk",
+          "tableFrom": "PERMISSION_AUDIT_EVENTS",
+          "tableTo": "PROCESSES",
+          "columnsFrom": [
+            "PROCESS_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PERMISSION_AUDIT_EVENTS_ACTOR_USER_ID_USERS_ID_fk": {
+          "name": "PERMISSION_AUDIT_EVENTS_ACTOR_USER_ID_USERS_ID_fk",
+          "tableFrom": "PERMISSION_AUDIT_EVENTS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "ACTOR_USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PROCESS_DOCUMENTS": {
+      "name": "PROCESS_DOCUMENTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DOCUMENT_ID": {
+          "name": "DOCUMENT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "SCHEMA_OVERRIDE": {
+          "name": "SCHEMA_OVERRIDE",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "SOURCE": {
+          "name": "SOURCE",
+          "type": "DOC_SOURCE",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PROC_DOC_PROCESS_IDX": {
+          "name": "PROC_DOC_PROCESS_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "PROCESS_DOCUMENTS_PROCESS_ID_PROCESSES_ID_fk": {
+          "name": "PROCESS_DOCUMENTS_PROCESS_ID_PROCESSES_ID_fk",
+          "tableFrom": "PROCESS_DOCUMENTS",
+          "tableTo": "PROCESSES",
+          "columnsFrom": [
+            "PROCESS_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_DOCUMENTS_DOCUMENT_ID_BUSINESS_DOCUMENTS_ID_fk": {
+          "name": "PROCESS_DOCUMENTS_DOCUMENT_ID_BUSINESS_DOCUMENTS_ID_fk",
+          "tableFrom": "PROCESS_DOCUMENTS",
+          "tableTo": "BUSINESS_DOCUMENTS",
+          "columnsFrom": [
+            "DOCUMENT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PROCESS_INSTANCES": {
+      "name": "PROCESS_INSTANCES",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "STARTED_BY": {
+          "name": "STARTED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DEFINITION_SNAPSHOT": {
+          "name": "DEFINITION_SNAPSHOT",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "PROCESS_VERSION_ID": {
+          "name": "PROCESS_VERSION_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "DEFINITION_HASH": {
+          "name": "DEFINITION_HASH",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "BUSINESS_KEY": {
+          "name": "BUSINESS_KEY",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "PROCESS_INSTANCE_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'running'"
+        },
+        "VARIABLES": {
+          "name": "VARIABLES",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "ERROR_MESSAGE": {
+          "name": "ERROR_MESSAGE",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "STARTED_AT": {
+          "name": "STARTED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "COMPLETED_AT": {
+          "name": "COMPLETED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "VERSION": {
+          "name": "VERSION",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PROC_INST_TENANT_CREATED_IDX": {
+          "name": "PROC_INST_TENANT_CREATED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "CREATED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_INST_PROCESS_IDX": {
+          "name": "PROC_INST_PROCESS_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_INST_TENANT_STATUS_IDX": {
+          "name": "PROC_INST_TENANT_STATUS_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "STATUS",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_INST_TENANT_BUSINESSKEY_IDX": {
+          "name": "PROC_INST_TENANT_BUSINESSKEY_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "BUSINESS_KEY",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "PROCESS_INSTANCES_TENANT_ID_TENANTS_ID_fk": {
+          "name": "PROCESS_INSTANCES_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "PROCESS_INSTANCES",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_INSTANCES_PROCESS_ID_PROCESSES_ID_fk": {
+          "name": "PROCESS_INSTANCES_PROCESS_ID_PROCESSES_ID_fk",
+          "tableFrom": "PROCESS_INSTANCES",
+          "tableTo": "PROCESSES",
+          "columnsFrom": [
+            "PROCESS_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_INSTANCES_STARTED_BY_USERS_ID_fk": {
+          "name": "PROCESS_INSTANCES_STARTED_BY_USERS_ID_fk",
+          "tableFrom": "PROCESS_INSTANCES",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "STARTED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_INSTANCES_PROCESS_VERSION_ID_PROCESS_VERSIONS_ID_fk": {
+          "name": "PROCESS_INSTANCES_PROCESS_VERSION_ID_PROCESS_VERSIONS_ID_fk",
+          "tableFrom": "PROCESS_INSTANCES",
+          "tableTo": "PROCESS_VERSIONS",
+          "columnsFrom": [
+            "PROCESS_VERSION_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PROCESS_PERMISSIONS": {
+      "name": "PROCESS_PERMISSIONS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "GRANTEE_TYPE": {
+          "name": "GRANTEE_TYPE",
+          "type": "PROCESS_GRANTEE_TYPE",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "GRANTEE_ID": {
+          "name": "GRANTEE_ID",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PERMISSION": {
+          "name": "PERMISSION",
+          "type": "PROCESS_PERMISSION",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "GRANTED_BY": {
+          "name": "GRANTED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "GRANTED_AT": {
+          "name": "GRANTED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PROC_PERM_UNIQUE_IDX": {
+          "name": "PROC_PERM_UNIQUE_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "GRANTEE_TYPE",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "GRANTEE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "PERMISSION",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_PERM_PROCESS_IDX": {
+          "name": "PROC_PERM_PROCESS_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_PERM_GRANTEE_IDX": {
+          "name": "PROC_PERM_GRANTEE_IDX",
+          "columns": [
+            {
+              "expression": "GRANTEE_TYPE",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "GRANTEE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "PROCESS_PERMISSIONS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "PROCESS_PERMISSIONS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "PROCESS_PERMISSIONS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_PERMISSIONS_PROCESS_ID_PROCESSES_ID_fk": {
+          "name": "PROCESS_PERMISSIONS_PROCESS_ID_PROCESSES_ID_fk",
+          "tableFrom": "PROCESS_PERMISSIONS",
+          "tableTo": "PROCESSES",
+          "columnsFrom": [
+            "PROCESS_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_PERMISSIONS_GRANTED_BY_USERS_ID_fk": {
+          "name": "PROCESS_PERMISSIONS_GRANTED_BY_USERS_ID_fk",
+          "tableFrom": "PROCESS_PERMISSIONS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "GRANTED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PROCESS_VERSIONS": {
+      "name": "PROCESS_VERSIONS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "HASH": {
+          "name": "HASH",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CANVAS_DATA": {
+          "name": "CANVAS_DATA",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "VERSION": {
+          "name": "VERSION",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "PUBLISHED_BY": {
+          "name": "PUBLISHED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PUBLISHED_AT": {
+          "name": "PUBLISHED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "IMPORTED_FROM": {
+          "name": "IMPORTED_FROM",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PROC_VER_PROCESS_HASH_IDX": {
+          "name": "PROC_VER_PROCESS_HASH_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "HASH",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_VER_TENANT_PUBLISHED_IDX": {
+          "name": "PROC_VER_TENANT_PUBLISHED_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "PUBLISHED_AT",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROC_VER_PROCESS_VERSION_IDX": {
+          "name": "PROC_VER_PROCESS_VERSION_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "VERSION",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "PROCESS_VERSIONS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "PROCESS_VERSIONS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "PROCESS_VERSIONS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_VERSIONS_PROCESS_ID_PROCESSES_ID_fk": {
+          "name": "PROCESS_VERSIONS_PROCESS_ID_PROCESSES_ID_fk",
+          "tableFrom": "PROCESS_VERSIONS",
+          "tableTo": "PROCESSES",
+          "columnsFrom": [
+            "PROCESS_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESS_VERSIONS_PUBLISHED_BY_USERS_ID_fk": {
+          "name": "PROCESS_VERSIONS_PUBLISHED_BY_USERS_ID_fk",
+          "tableFrom": "PROCESS_VERSIONS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "PUBLISHED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.PROCESSES": {
+      "name": "PROCESSES",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_BY": {
+          "name": "CREATED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DESCRIPTION": {
+          "name": "DESCRIPTION",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CANVAS_DATA": {
+          "name": "CANVAS_DATA",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "PROCESS_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'DRAFT'"
+        },
+        "VERSION": {
+          "name": "VERSION",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'v1.0'"
+        },
+        "STEP": {
+          "name": "STEP",
+          "type": "WIZARD_STEP",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'DETAILS'"
+        },
+        "SLUG": {
+          "name": "SLUG",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "PROCESS_TENANT_IDX": {
+          "name": "PROCESS_TENANT_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "PROCESS_TENANT_SLUG_IDX": {
+          "name": "PROCESS_TENANT_SLUG_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "SLUG",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "PROCESSES_TENANT_ID_TENANTS_ID_fk": {
+          "name": "PROCESSES_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "PROCESSES",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "PROCESSES_CREATED_BY_USERS_ID_fk": {
+          "name": "PROCESSES_CREATED_BY_USERS_ID_fk",
+          "tableFrom": "PROCESSES",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "CREATED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ROLES": {
+      "name": "ROLES",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "KEY": {
+          "name": "KEY",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "LABEL": {
+          "name": "LABEL",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DESCRIPTION": {
+          "name": "DESCRIPTION",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "SYSTEM": {
+          "name": "SYSTEM",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "SORT_ORDER": {
+          "name": "SORT_ORDER",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ROLE_TENANT_KEY_IDX": {
+          "name": "ROLE_TENANT_KEY_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "KEY",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ROLE_TENANT_IDX": {
+          "name": "ROLE_TENANT_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ROLES_TENANT_ID_TENANTS_ID_fk": {
+          "name": "ROLES_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "ROLES",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.SESSIONS": {
+      "name": "SESSIONS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "TOKEN_HASH": {
+          "name": "TOKEN_HASH",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "SESSION_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "IP_ADDRESS": {
+          "name": "IP_ADDRESS",
+          "type": "varchar(45)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "USER_AGENT": {
+          "name": "USER_AGENT",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "EXPIRES_AT": {
+          "name": "EXPIRES_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "SESSION_USER_IDX": {
+          "name": "SESSION_USER_IDX",
+          "columns": [
+            {
+              "expression": "USER_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "SESSION_TOKEN_IDX": {
+          "name": "SESSION_TOKEN_IDX",
+          "columns": [
+            {
+              "expression": "TOKEN_HASH",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "SESSIONS_USER_ID_USERS_ID_fk": {
+          "name": "SESSIONS_USER_ID_USERS_ID_fk",
+          "tableFrom": "SESSIONS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "SESSIONS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "SESSIONS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "SESSIONS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "SESSIONS_TOKEN_HASH_unique": {
+          "name": "SESSIONS_TOKEN_HASH_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "TOKEN_HASH"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.TENANT_MAIL_SETTINGS": {
+      "name": "TENANT_MAIL_SETTINGS",
+      "schema": "",
+      "columns": {
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "HOST": {
+          "name": "HOST",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PORT": {
+          "name": "PORT",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "SECURE": {
+          "name": "SECURE",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "USERNAME": {
+          "name": "USERNAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "PASSWORD_ENCRYPTED": {
+          "name": "PASSWORD_ENCRYPTED",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "FROM_EMAIL": {
+          "name": "FROM_EMAIL",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "FROM_NAME": {
+          "name": "FROM_NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ENABLED": {
+          "name": "ENABLED",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "UPDATED_BY": {
+          "name": "UPDATED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "TENANT_MAIL_SETTINGS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "TENANT_MAIL_SETTINGS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "TENANT_MAIL_SETTINGS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "TENANT_MAIL_SETTINGS_UPDATED_BY_USERS_ID_fk": {
+          "name": "TENANT_MAIL_SETTINGS_UPDATED_BY_USERS_ID_fk",
+          "tableFrom": "TENANT_MAIL_SETTINGS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "UPDATED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.TENANTS": {
+      "name": "TENANTS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "SLUG": {
+          "name": "SLUG",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PLAN": {
+          "name": "PLAN",
+          "type": "TENANT_PLAN",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'free'"
+        },
+        "LOGO_URL": {
+          "name": "LOGO_URL",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "DOMAIN": {
+          "name": "DOMAIN",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "SETTINGS": {
+          "name": "SETTINGS",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "TENANTS_SLUG_unique": {
+          "name": "TENANTS_SLUG_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "SLUG"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.USER_ROLES": {
+      "name": "USER_ROLES",
+      "schema": "",
+      "columns": {
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ROLE_ID": {
+          "name": "ROLE_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ASSIGNED_AT": {
+          "name": "ASSIGNED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "ASSIGNED_BY": {
+          "name": "ASSIGNED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "USER_ROLE_TENANT_ROLE_IDX": {
+          "name": "USER_ROLE_TENANT_ROLE_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ROLE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "USER_ROLE_USER_IDX": {
+          "name": "USER_ROLE_USER_IDX",
+          "columns": [
+            {
+              "expression": "USER_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "USER_ROLES_USER_ID_USERS_ID_fk": {
+          "name": "USER_ROLES_USER_ID_USERS_ID_fk",
+          "tableFrom": "USER_ROLES",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "USER_ROLES_ROLE_ID_ROLES_ID_fk": {
+          "name": "USER_ROLES_ROLE_ID_ROLES_ID_fk",
+          "tableFrom": "USER_ROLES",
+          "tableTo": "ROLES",
+          "columnsFrom": [
+            "ROLE_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "USER_ROLES_TENANT_ID_TENANTS_ID_fk": {
+          "name": "USER_ROLES_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "USER_ROLES",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "USER_ROLES_ASSIGNED_BY_USERS_ID_fk": {
+          "name": "USER_ROLES_ASSIGNED_BY_USERS_ID_fk",
+          "tableFrom": "USER_ROLES",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "ASSIGNED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "USER_ROLES_USER_ID_ROLE_ID_pk": {
+          "name": "USER_ROLES_USER_ID_ROLE_ID_pk",
+          "columns": [
+            "USER_ID",
+            "ROLE_ID"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.USERS": {
+      "name": "USERS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "EMAIL": {
+          "name": "EMAIL",
+          "type": "varchar(320)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DISPLAY_NAME": {
+          "name": "DISPLAY_NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "AVATAR_URL": {
+          "name": "AVATAR_URL",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "PASSWORD_HASH": {
+          "name": "PASSWORD_HASH",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ROLE": {
+          "name": "ROLE",
+          "type": "USER_ROLE",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'member'"
+        },
+        "LOCALE": {
+          "name": "LOCALE",
+          "type": "varchar(10)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'en'"
+        },
+        "IS_ACTIVE": {
+          "name": "IS_ACTIVE",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "MFA_ENABLED": {
+          "name": "MFA_ENABLED",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "MFA_SECRET": {
+          "name": "MFA_SECRET",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "EMAIL_VERIFIED_AT": {
+          "name": "EMAIL_VERIFIED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "LAST_LOGIN_AT": {
+          "name": "LAST_LOGIN_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "USER_TENANT_EMAIL_IDX": {
+          "name": "USER_TENANT_EMAIL_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "EMAIL",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "USER_TENANT_IDX": {
+          "name": "USER_TENANT_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "USERS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "USERS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "USERS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.WEBHOOK_SUBSCRIPTIONS": {
+      "name": "WEBHOOK_SUBSCRIPTIONS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "PROCESS_ID": {
+          "name": "PROCESS_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "URL": {
+          "name": "URL",
+          "type": "varchar(2048)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "EVENT_TYPES": {
+          "name": "EVENT_TYPES",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'*'"
+        },
+        "SECRET": {
+          "name": "SECRET",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "STATUS": {
+          "name": "STATUS",
+          "type": "WEBHOOK_SUB_STATUS",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "CREATED_BY": {
+          "name": "CREATED_BY",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "WEBHOOK_SUB_TENANT_IDX": {
+          "name": "WEBHOOK_SUB_TENANT_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "WEBHOOK_SUB_PROCESS_IDX": {
+          "name": "WEBHOOK_SUB_PROCESS_IDX",
+          "columns": [
+            {
+              "expression": "PROCESS_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "WEBHOOK_SUBSCRIPTIONS_TENANT_ID_TENANTS_ID_fk": {
+          "name": "WEBHOOK_SUBSCRIPTIONS_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "WEBHOOK_SUBSCRIPTIONS",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "WEBHOOK_SUBSCRIPTIONS_PROCESS_ID_PROCESSES_ID_fk": {
+          "name": "WEBHOOK_SUBSCRIPTIONS_PROCESS_ID_PROCESSES_ID_fk",
+          "tableFrom": "WEBHOOK_SUBSCRIPTIONS",
+          "tableTo": "PROCESSES",
+          "columnsFrom": [
+            "PROCESS_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "WEBHOOK_SUBSCRIPTIONS_CREATED_BY_USERS_ID_fk": {
+          "name": "WEBHOOK_SUBSCRIPTIONS_CREATED_BY_USERS_ID_fk",
+          "tableFrom": "WEBHOOK_SUBSCRIPTIONS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "CREATED_BY"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.WORKSPACE_MEMBERS": {
+      "name": "WORKSPACE_MEMBERS",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "WORKSPACE_ID": {
+          "name": "WORKSPACE_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "USER_ID": {
+          "name": "USER_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ROLE": {
+          "name": "ROLE",
+          "type": "USER_ROLE",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'member'"
+        },
+        "JOINED_AT": {
+          "name": "JOINED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "WS_MEMBER_IDX": {
+          "name": "WS_MEMBER_IDX",
+          "columns": [
+            {
+              "expression": "WORKSPACE_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "USER_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "WORKSPACE_MEMBERS_WORKSPACE_ID_WORKSPACES_ID_fk": {
+          "name": "WORKSPACE_MEMBERS_WORKSPACE_ID_WORKSPACES_ID_fk",
+          "tableFrom": "WORKSPACE_MEMBERS",
+          "tableTo": "WORKSPACES",
+          "columnsFrom": [
+            "WORKSPACE_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "WORKSPACE_MEMBERS_USER_ID_USERS_ID_fk": {
+          "name": "WORKSPACE_MEMBERS_USER_ID_USERS_ID_fk",
+          "tableFrom": "WORKSPACE_MEMBERS",
+          "tableTo": "USERS",
+          "columnsFrom": [
+            "USER_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.WORKSPACES": {
+      "name": "WORKSPACES",
+      "schema": "",
+      "columns": {
+        "ID": {
+          "name": "ID",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "TENANT_ID": {
+          "name": "TENANT_ID",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "NAME": {
+          "name": "NAME",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "SLUG": {
+          "name": "SLUG",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "DESCRIPTION": {
+          "name": "DESCRIPTION",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "CREATED_AT": {
+          "name": "CREATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "UPDATED_AT": {
+          "name": "UPDATED_AT",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "WS_TENANT_SLUG_IDX": {
+          "name": "WS_TENANT_SLUG_IDX",
+          "columns": [
+            {
+              "expression": "TENANT_ID",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "SLUG",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "WORKSPACES_TENANT_ID_TENANTS_ID_fk": {
+          "name": "WORKSPACES_TENANT_ID_TENANTS_ID_fk",
+          "tableFrom": "WORKSPACES",
+          "tableTo": "TENANTS",
+          "columnsFrom": [
+            "TENANT_ID"
+          ],
+          "columnsTo": [
+            "ID"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {
+    "public.AI_INTERACTION_STATUS": {
+      "name": "AI_INTERACTION_STATUS",
+      "schema": "public",
+      "values": [
+        "success",
+        "error"
+      ]
+    },
+    "public.AUTH_PROVIDER": {
+      "name": "AUTH_PROVIDER",
+      "schema": "public",
+      "values": [
+        "credentials",
+        "google",
+        "microsoft",
+        "saml"
+      ]
+    },
+    "public.DOC_SOURCE": {
+      "name": "DOC_SOURCE",
+      "schema": "public",
+      "values": [
+        "TEMPLATE",
+        "PASTE",
+        "EMPTY"
+      ]
+    },
+    "public.ENGINE_JOB_STATUS": {
+      "name": "ENGINE_JOB_STATUS",
+      "schema": "public",
+      "values": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "dead"
+      ]
+    },
+    "public.INSTANCE_EVENT_TYPE": {
+      "name": "INSTANCE_EVENT_TYPE",
+      "schema": "public",
+      "values": [
+        "instance-started",
+        "instance-completed",
+        "instance-failed",
+        "instance-cancelled",
+        "node-entered",
+        "node-exited",
+        "edge-taken",
+        "token-created",
+        "token-completed",
+        "token-waiting",
+        "token-resumed",
+        "task-claimed",
+        "task-unclaimed",
+        "task-completed",
+        "task-reassigned",
+        "task-skipped",
+        "service-task-attempt-failed",
+        "variable-set",
+        "variable-edited",
+        "variable-unresolved",
+        "instance-suspended",
+        "instance-resumed",
+        "instance-modified",
+        "error"
+      ]
+    },
+    "public.INSTANCE_TOKEN_STATUS": {
+      "name": "INSTANCE_TOKEN_STATUS",
+      "schema": "public",
+      "values": [
+        "active",
+        "waiting",
+        "completed",
+        "failed"
+      ]
+    },
+    "public.OUTBOX_EVENT_STATUS": {
+      "name": "OUTBOX_EVENT_STATUS",
+      "schema": "public",
+      "values": [
+        "pending",
+        "dispatched",
+        "failed"
+      ]
+    },
+    "public.PERMISSION_AUDIT_ACTION": {
+      "name": "PERMISSION_AUDIT_ACTION",
+      "schema": "public",
+      "values": [
+        "granted",
+        "revoked"
+      ]
+    },
+    "public.PROCESS_GRANTEE_TYPE": {
+      "name": "PROCESS_GRANTEE_TYPE",
+      "schema": "public",
+      "values": [
+        "user",
+        "role"
+      ]
+    },
+    "public.PROCESS_INSTANCE_STATUS": {
+      "name": "PROCESS_INSTANCE_STATUS",
+      "schema": "public",
+      "values": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "suspended"
+      ]
+    },
+    "public.PROCESS_PERMISSION": {
+      "name": "PROCESS_PERMISSION",
+      "schema": "public",
+      "values": [
+        "view",
+        "start",
+        "edit",
+        "publish",
+        "admin"
+      ]
+    },
+    "public.PROCESS_STATUS": {
+      "name": "PROCESS_STATUS",
+      "schema": "public",
+      "values": [
+        "DRAFT",
+        "ACTIVE",
+        "PENDING",
+        "REVIEW"
+      ]
+    },
+    "public.SESSION_STATUS": {
+      "name": "SESSION_STATUS",
+      "schema": "public",
+      "values": [
+        "active",
+        "expired",
+        "revoked"
+      ]
+    },
+    "public.TENANT_PLAN": {
+      "name": "TENANT_PLAN",
+      "schema": "public",
+      "values": [
+        "free",
+        "pro",
+        "enterprise"
+      ]
+    },
+    "public.USER_ROLE": {
+      "name": "USER_ROLE",
+      "schema": "public",
+      "values": [
+        "owner",
+        "admin",
+        "member",
+        "viewer"
+      ]
+    },
+    "public.WEBHOOK_SUB_STATUS": {
+      "name": "WEBHOOK_SUB_STATUS",
+      "schema": "public",
+      "values": [
+        "active",
+        "paused",
+        "disabled"
+      ]
+    },
+    "public.WIZARD_STEP": {
+      "name": "WIZARD_STEP",
+      "schema": "public",
+      "values": [
+        "DETAILS",
+        "DOCUMENT",
+        "CANVAS"
+      ]
+    }
+  },
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

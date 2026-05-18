@@ -49,6 +49,7 @@ import {
 } from "../database/schema";
 import { inArray } from "drizzle-orm";
 import { REST_SERVICE_TASK_TOPIC, SERVICE_TASK_TOPIC } from "./service-task-registry";
+import { CONNECTOR_TOPIC } from "../connectors/connector-registry";
 import { WorkerService } from "./worker.service";
 import { CorrelationContext } from "../common/observability/correlation-context";
 
@@ -4058,6 +4059,13 @@ export function resolveServiceTaskTopic(
     // worker's retry loop rather than being lost as a silent noop
     // here. Keep this branch tight — just route to the handler.
     return REST_SERVICE_TASK_TOPIC;
+  }
+  if (impl.type === "connector") {
+    // I4 — Connector framework. ConnectorDispatcherService validates
+    // connector/operation/connection inside its handler so malformed
+    // configs surface as a clear error in the worker retry loop, not
+    // a silent noop.
+    return CONNECTOR_TOPIC;
   }
   if (impl.type !== "externalWorker") {
     logger?.warn?.(

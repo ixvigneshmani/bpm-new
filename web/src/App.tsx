@@ -5,6 +5,7 @@ import { PageErrorBoundary } from "./components/layout/page-error-boundary";
 import LoginPage from "./pages/LoginPage";
 import MfaChallengePage from "./pages/MfaChallengePage";
 import SecuritySettingsPage from "./pages/SecuritySettingsPage";
+import MailSettingsPage from "./pages/MailSettingsPage";
 import DashboardLayout from "./pages/DashboardLayout";
 import DashboardPage from "./pages/DashboardPage";
 import ProcessListPage from "./pages/ProcessListPage";
@@ -50,6 +51,7 @@ export function App() {
         <Route path="running" element={guarded(<InstancesListPage />)} />
         <Route path="instances/:id" element={guarded(<InstanceDetailPage />)} />
         <Route path="settings/security" element={guarded(<SecuritySettingsPage />)} />
+        <Route path="settings/email" element={guarded(<MailSettingsPage />)} />
         <Route path="console" element={guarded(<ConsoleLayout />)}>
           <Route index element={<Navigate to="/console/processes" replace />} />
           <Route path="processes" element={<ProcessesPanel />} />

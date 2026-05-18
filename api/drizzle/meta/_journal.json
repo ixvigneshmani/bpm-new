@@ -22,6 +22,20 @@
       "when": 1778569753042,
       "tag": "0002_os8_widen_webhook_secret",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1778649560892,
+      "tag": "0003_i1_mail_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778654285362,
+      "tag": "0004_i4_s1_connector_instances",
+      "breakpoints": true
     }
   ]
 }

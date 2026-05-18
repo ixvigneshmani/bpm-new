@@ -40,4 +40,8 @@ export const EXECUTABLE_SERVICE_TASK_IMPL_TYPES: ReadonlySet<string> = new Set([
   // I2 — REST handler shipped 2026-05-06. Reads the canvas RestConfig
   // straight out of `nodeData.implementation.config` at runtime.
   "rest",
+  // I4 — Connector framework. Engine routes type=connector to the
+  // ConnectorDispatcher which resolves connector + connection +
+  // operation and runs the registered handler.
+  "connector",
 ]);
