@@ -25,8 +25,6 @@ import { EngineService, parseDurationToMs } from "./engine.service";
 import {
   logHandler,
   noopHandler,
-  REST_SERVICE_TASK_TOPIC,
-  restHandler,
   SERVICE_TASK_TOPIC,
   ServiceTaskRegistry,
   setVariableHandler,
@@ -87,11 +85,13 @@ export class ServiceTaskService implements OnModuleInit {
     this.registry.register("noop", noopHandler);
     this.registry.register("log", logHandler);
     this.registry.register("set-variable", setVariableHandler);
-    // I2: REST handler keyed under a synthetic topic. Engine maps any
-    // serviceTask with `implementation.type === "rest"` to this topic
-    // (see resolveServiceTaskTopic) so the same retry/dead-letter
-    // machinery drives it.
-    this.registry.register(REST_SERVICE_TASK_TOPIC, restHandler);
+    // I4 Sprint 3: the legacy __rest__ topic is retired. Engine now
+    // routes implementation.type=rest to __connector__, and the
+    // ConnectorDispatcher synthesises the connector shape on the fly.
+    // The standalone restHandler and REST_SERVICE_TASK_TOPIC constant
+    // remain exported from service-task-registry as historical
+    // surface (some external tests may import them) but are no longer
+    // registered.
 
     // Single worker registration: dispatches by inner userTopic.
     // The onDead callback closes the loop on permanent failure so

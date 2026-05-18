@@ -163,9 +163,23 @@ export type ExternalWorkerConfig = {
   headers?: KeyValuePair[];
 };
 
+/** I4 connector framework shape — what the engine's
+ *  ConnectorDispatcher reads on every dispatch.
+ *
+ *  • connector     — connector id, e.g. "mail", "rest", "slack"
+ *  • connectionId  — uuid of a CONNECTOR_INSTANCES row, OR null when
+ *                    the connector has connectionRequired=false (REST)
+ *                    and the task wants to run standalone
+ *  • operation     — operation id within the connector
+ *  • input         — per-call data matching the operation's
+ *                    inputSchema; strings inside support ${var}
+ *                    interpolation at runtime
+ */
 export type ConnectorConfig = {
-  connectorType: string;
-  config: Record<string, unknown>;
+  connector: string;
+  connectionId: string | null;
+  operation: string;
+  input: Record<string, unknown>;
 };
 
 export type ServiceImplementation =

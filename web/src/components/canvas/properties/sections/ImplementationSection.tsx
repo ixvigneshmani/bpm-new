@@ -2,13 +2,16 @@
  * Uses inline styles (Tailwind preflight disabled for Ant Design compat).
  * ──────────────────────────────────────────────────────────────────── */
 
+import { useEffect, useState } from "react";
 import type {
   ServiceImplementation,
   RestConfig,
   BindingType,
   KeyValuePair,
+  ConnectorConfig,
 } from "../../../../types/bpmn-node-data";
 import { EXECUTABLE_SERVICE_TASK_IMPL_TYPES } from "../../../../lib/bpmn/capabilities";
+import { apiGet } from "../../../../lib/api";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 import AiAssistButton from "../fields/AiAssistButton";
 
@@ -68,7 +71,7 @@ export default function ImplementationSection({ implementation, onChange }: Prop
       case "rest": onChange({ type: "rest", config: { method: "GET", url: "", headers: [], queryParams: [], body: "" } }); break;
       case "externalWorker": onChange({ type: "externalWorker", config: { jobType: "", headers: [] } }); break;
       case "inlineScript": onChange({ type: "inlineScript", config: { language: "feel", script: "" } }); break;
-      case "connector": onChange({ type: "connector", config: { connectorType: "", config: {} } }); break;
+      case "connector": onChange({ type: "connector", config: { connector: "", connectionId: null, operation: "", input: {} } }); break;
       case "soap": onChange({ type: "soap", config: { wsdlUrl: "", operation: "" } }); break;
       case "wasmModule": onChange({ type: "wasmModule", config: { moduleRef: "" } }); break;
     }
@@ -230,28 +233,12 @@ export default function ImplementationSection({ implementation, onChange }: Prop
         </div>
       )}
 
-      {/* Connector */}
+      {/* Connector — schema-driven picker fed by the live registry. */}
       {implementation?.type === "connector" && (
-        <div style={configBox}>
-          <div style={labelStyle}>Connector Type</div>
-          <select
-            value={implementation.config.connectorType}
-            onChange={(e) => onChange({ ...implementation, config: { ...implementation.config, connectorType: e.target.value } })}
-            style={{ ...inputStyle, paddingRight: 28 }}
-          >
-            <option value="">Select a connector...</option>
-            <option value="kafka">Kafka</option>
-            <option value="rabbitmq">RabbitMQ</option>
-            <option value="smtp">SMTP</option>
-            <option value="sftp">SFTP</option>
-            <option value="s3">S3 / Azure Blob</option>
-            <option value="jdbc">JDBC</option>
-            <option value="mongodb">MongoDB</option>
-            <option value="redis">Redis</option>
-            <option value="graphql">GraphQL</option>
-            <option value="grpc">gRPC</option>
-          </select>
-        </div>
+        <ConnectorConfigPanel
+          config={implementation.config}
+          onChange={(c) => onChange({ type: "connector", config: c })}
+        />
       )}
     </div>
   );
@@ -568,3 +555,296 @@ function KvEditor(props: {
     </div>
   );
 }
+
+/* ─── Connector Config Panel ──────────────────────────────────────────
+ * Schema-driven picker. Fetches connector definitions + tenant
+ * connections from the API; renders connector type → connection (when
+ * required) → operation → operation input fields.
+ *
+ * Why fetch live: the connector registry lives in the API. Hard-coding
+ * the list in the canvas would mean every new connector requires a
+ * front-end change. Now they don't.
+ * ──────────────────────────────────────────────────────────────────── */
+
+type ConnectorFieldSpec =
+  | { type: "string"; required?: boolean; secret?: boolean; placeholder?: string; description?: string; maxLength?: number }
+  | { type: "email"; required?: boolean; placeholder?: string; description?: string }
+  | { type: "integer"; required?: boolean; min?: number; max?: number; default?: number; description?: string }
+  | { type: "boolean"; default?: boolean; description?: string }
+  | { type: "url"; required?: boolean; placeholder?: string; description?: string }
+  | { type: "enum"; required?: boolean; options: string[]; default?: string; description?: string };
+
+type ConnectorOperationSpec = {
+  id: string;
+  name: string;
+  description?: string;
+  inputSchema: Record<string, ConnectorFieldSpec>;
+  outputKeys: string[];
+};
+
+type ConnectorDefinitionSpec = {
+  id: string;
+  name: string;
+  description: string;
+  connectionSchema: Record<string, ConnectorFieldSpec>;
+  secretFields: string[];
+  connectionRequired: boolean;
+  hasTestAction: boolean;
+  operations: ConnectorOperationSpec[];
+};
+
+type ConnectionRow = {
+  id: string;
+  connectorType: string;
+  name: string;
+  enabled: boolean;
+  isDefault: boolean;
+};
+
+function ConnectorConfigPanel({
+  config,
+  onChange,
+}: {
+  config: ConnectorConfig;
+  onChange: (c: ConnectorConfig) => void;
+}) {
+  const [defs, setDefs] = useState<ConnectorDefinitionSpec[] | null>(null);
+  const [conns, setConns] = useState<ConnectionRow[] | null>(null);
+  const [loadError, setLoadError] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [d, c] = await Promise.all([
+          apiGet<ConnectorDefinitionSpec[]>("/connectors/definitions"),
+          apiGet<ConnectionRow[]>("/connectors/connections"),
+        ]);
+        if (cancelled) return;
+        setDefs(d);
+        setConns(c);
+      } catch (e: any) {
+        if (!cancelled) setLoadError(e?.message ?? "Failed to load connectors.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const def = defs?.find((d) => d.id === config.connector);
+  const op = def?.operations.find((o) => o.id === config.operation);
+  const typeConnections = (conns ?? []).filter(
+    (c) => c.connectorType === config.connector && c.enabled,
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {loadError && (
+        <div style={{ padding: 8, background: "#FEF3F2", border: "1px solid #FECDCA", borderRadius: 6, color: "#B42318", fontSize: 12 }}>
+          {loadError}
+        </div>
+      )}
+
+      {/* Connector type */}
+      <div>
+        <div style={labelStyle}>Connector</div>
+        <select
+          value={config.connector}
+          onChange={(e) => {
+            const next = e.target.value;
+            const d = defs?.find((dd) => dd.id === next);
+            // Auto-pick the only operation; auto-pick the default
+            // connection of the chosen type (if any).
+            const opId = d?.operations.length === 1 ? d.operations[0].id : "";
+            const defaultConn = (conns ?? []).find(
+              (c) => c.connectorType === next && c.isDefault && c.enabled,
+            );
+            onChange({
+              connector: next,
+              connectionId: defaultConn?.id ?? null,
+              operation: opId,
+              input: {},
+            });
+          }}
+          style={{ ...inputStyle, paddingRight: 28 }}
+          disabled={!defs}
+        >
+          <option value="">{defs ? "Select a connector…" : "Loading…"}</option>
+          {(defs ?? []).map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+        {def && (
+          <div style={{ fontSize: 11, color: "#98A2B3", marginTop: 4 }}>{def.description}</div>
+        )}
+      </div>
+
+      {/* Connection picker — shown when the connector exposes any
+          connection schema. Optional for connectionRequired=false
+          (REST) — operator can run standalone. */}
+      {def && Object.keys(def.connectionSchema).length > 0 && (
+        <div>
+          <div style={labelStyle}>
+            Connection {def.connectionRequired ? "*" : "(optional)"}
+          </div>
+          <select
+            value={config.connectionId ?? ""}
+            onChange={(e) => onChange({ ...config, connectionId: e.target.value || null })}
+            style={{ ...inputStyle, paddingRight: 28 }}
+          >
+            <option value="">
+              {def.connectionRequired ? "Select a connection…" : "(no connection — task carries full config)"}
+            </option>
+            {typeConnections.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+                {c.isDefault ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+          {typeConnections.length === 0 && def.connectionRequired && (
+            <div style={{ fontSize: 11, color: "#B42318", marginTop: 4 }}>
+              No enabled {def.name} connections. Add one under Settings → Connections.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Operation — auto-collapse to a single-line label when there's
+          only one to pick. */}
+      {def && def.operations.length > 1 && (
+        <div>
+          <div style={labelStyle}>Operation *</div>
+          <select
+            value={config.operation}
+            onChange={(e) => onChange({ ...config, operation: e.target.value, input: {} })}
+            style={{ ...inputStyle, paddingRight: 28 }}
+          >
+            <option value="">Select an operation…</option>
+            {def.operations.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {def && def.operations.length === 1 && (
+        <div style={{ fontSize: 11, color: "#98A2B3" }}>
+          Operation: <strong>{def.operations[0].name}</strong>
+        </div>
+      )}
+
+      {/* Operation input — schema-driven. */}
+      {op && (
+        <div style={configBox}>
+          <div style={{ ...labelStyle, marginBottom: 4 }}>{op.name} input</div>
+          {op.description && (
+            <div style={{ fontSize: 11, color: "#667085", marginBottom: 4 }}>{op.description}</div>
+          )}
+          {Object.entries(op.inputSchema).map(([key, spec]) => (
+            <ConnectorInputField
+              key={key}
+              fieldKey={key}
+              spec={spec}
+              value={(config.input as Record<string, unknown>)[key]}
+              onChange={(v) =>
+                onChange({
+                  ...config,
+                  input: { ...(config.input as Record<string, unknown>), [key]: v },
+                })
+              }
+            />
+          ))}
+          {op.outputKeys.length > 0 && (
+            <div style={{ fontSize: 11, color: "#98A2B3" }}>
+              Returns: {op.outputKeys.map((k) => <code key={k} style={{ background: "#fff", padding: "1px 5px", borderRadius: 3, marginRight: 4 }}>{k}</code>)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConnectorInputField({
+  fieldKey,
+  spec,
+  value,
+  onChange,
+}: {
+  fieldKey: string;
+  spec: ConnectorFieldSpec;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const required = "required" in spec && spec.required;
+  const description = "description" in spec ? spec.description : undefined;
+  const placeholder = "placeholder" in spec ? spec.placeholder : undefined;
+
+  let inputEl: React.ReactNode;
+  if (spec.type === "boolean") {
+    return (
+      <div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#344054" }}>
+          <input type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />
+          {humanizeKey(fieldKey)}
+        </label>
+        {description && <div style={{ fontSize: 11, color: "#98A2B3", marginTop: 4 }}>{description}</div>}
+      </div>
+    );
+  }
+  if (spec.type === "integer") {
+    inputEl = (
+      <input
+        type="number"
+        min={spec.min}
+        max={spec.max}
+        value={typeof value === "number" ? value : ""}
+        onChange={(e) => onChange(e.target.value === "" ? "" : parseInt(e.target.value, 10))}
+        required={required}
+        style={inputStyle}
+      />
+    );
+  } else if (spec.type === "enum") {
+    inputEl = (
+      <select
+        value={typeof value === "string" ? value : (spec.default ?? "")}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ ...inputStyle, paddingRight: 28 }}
+      >
+        {spec.options.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+      </select>
+    );
+  } else {
+    // string / email / url — text input with ${var} hint.
+    inputEl = (
+      <input
+        type={spec.type === "email" ? "email" : spec.type === "url" ? "url" : "text"}
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        required={required}
+        style={monoInput}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ ...labelStyle, marginBottom: 4 }}>
+        {humanizeKey(fieldKey)} {required && "*"}
+      </div>
+      {inputEl}
+      {description && <div style={{ fontSize: 11, color: "#98A2B3", marginTop: 4 }}>{description}</div>}
+    </div>
+  );
+}
+
+function humanizeKey(k: string): string {
+  return k.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
+}
+

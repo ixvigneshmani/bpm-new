@@ -65,14 +65,38 @@ export class ConnectorDispatcherService implements OnModuleInit {
 
   private handle: ServiceTaskHandler = async (input: ServiceTaskInput) => {
     const impl = input.nodeData.implementation as
-      | { type?: unknown; config?: ConnectorTaskConfig }
+      | { type?: unknown; config?: Record<string, unknown> }
       | undefined;
-    if (!impl || impl.type !== "connector" || !impl.config) {
+    if (!impl || !impl.config) {
       throw new Error(
-        'connector dispatch: nodeData.implementation must be { type: "connector", config: ConnectorTaskConfig }.',
+        'connector dispatch: nodeData.implementation must be { type: "connector" | "rest", config: ... }.',
       );
     }
-    const cfg = impl.config;
+
+    // Legacy shim: a canvas authored before the framework existed
+    // carries `implementation.type === "rest"` with the rest config
+    // (method/url/headers/queryParams/body/auth) flat on
+    // `impl.config`. The engine routes it here (see
+    // resolveServiceTaskTopic). Translate to the connector shape so
+    // the rest of this handler doesn't need to know about it.
+    let cfg: ConnectorTaskConfig;
+    if (impl.type === "rest") {
+      cfg = {
+        connector: "rest",
+        connectionId: null,
+        operation: "request",
+        input: impl.config,
+      };
+      this.logger.log(
+        `Legacy type=rest shim → connector=rest/request for tenant ${input.tenantId} instance ${input.instanceId}.`,
+      );
+    } else if (impl.type === "connector") {
+      cfg = impl.config as ConnectorTaskConfig;
+    } else {
+      throw new Error(
+        `connector dispatch: unexpected implementation.type "${String(impl.type)}".`,
+      );
+    }
 
     const connectorId = typeof cfg.connector === "string" ? cfg.connector : "";
     const operationId = typeof cfg.operation === "string" ? cfg.operation : "";

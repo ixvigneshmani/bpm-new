@@ -4054,11 +4054,12 @@ export function resolveServiceTaskTopic(
     return "noop";
   }
   if (impl.type === "rest") {
-    // The handler validates the rest config itself (URL required,
-    // method valid, etc.) so a malformed config surfaces inside the
-    // worker's retry loop rather than being lost as a silent noop
-    // here. Keep this branch tight — just route to the handler.
-    return REST_SERVICE_TASK_TOPIC;
+    // I4 Sprint 3: type=rest is now a legacy alias for the REST
+    // connector. The dispatcher detects it and synthesises the
+    // connector shape on the fly so already-published canvases run
+    // unchanged. The dedicated __rest__ topic + restHandler are
+    // retired.
+    return CONNECTOR_TOPIC;
   }
   if (impl.type === "connector") {
     // I4 — Connector framework. ConnectorDispatcherService validates

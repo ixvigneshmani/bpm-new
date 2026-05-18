@@ -61,7 +61,7 @@ export function isPrivateIp(ip: string): boolean {
   return true; // unparseable → block
 }
 
-async function assertSsrfSafe(parsedUrl: URL): Promise<void> {
+export async function assertSsrfSafe(parsedUrl: URL): Promise<void> {
   if (process.env.REST_ALLOW_PRIVATE_HOSTS === "1") return;
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
     throw new Error(
