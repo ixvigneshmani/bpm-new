@@ -175,6 +175,10 @@ export class ConnectorInstancesService {
           updatedBy: input.userId,
         })
         .returning();
+      // Fire the per-connector save hook (e.g. Mail clears its
+      // breaker). Sync, intentionally — a misbehaving hook should
+      // surface immediately rather than create an inconsistent state.
+      def.onConnectionSaved?.(input.tenantId, row.id);
       return this.toPublic(row);
     });
   }
@@ -241,6 +245,7 @@ export class ConnectorInstancesService {
           ),
         )
         .returning();
+      def.onConnectionSaved?.(tenantId, row.id);
       return this.toPublic(row);
     });
   }

@@ -9,7 +9,6 @@ import { ProcessesModule } from "./processes/processes.module";
 import { AiModule } from "./ai/ai.module";
 import { ConnectorsModule } from "./connectors/connectors.module";
 import { EngineModule } from "./engine/engine.module";
-import { MailModule } from "./mail/mail.module";
 import { RolesModule } from "./roles/roles.module";
 import { VersionController } from "./common/version.controller";
 import { CorrelationContext } from "./common/observability/correlation-context";
@@ -96,7 +95,6 @@ const env = process.env.NODE_ENV || "development";
     AiModule,
     EngineModule,
     ConnectorsModule,
-    MailModule,
     RolesModule,
   ],
   controllers: [VersionController],

@@ -806,36 +806,10 @@ export const connectorInstances = pgTable(
   ],
 );
 
-// ─── TENANT_MAIL_SETTINGS ───────────────────────────────────────────
-// I1 — per-tenant SMTP configuration. One row per tenant (PK = tenantId)
-// so reads are a single point-lookup. PASSWORD is stored encrypted at
-// rest via CryptoService (OS8) in the `enc:v1:<iv>:<ciphertext>` shape;
-// FROM_EMAIL/host/port/etc. are kept plaintext for operability + UI
-// display. ENABLED gates whether the engine `notify-email` handler
-// will dispatch — disabling pauses outgoing mail without losing config.
-
-export const tenantMailSettings = pgTable("TENANT_MAIL_SETTINGS", {
-  tenantId: uuid("TENANT_ID")
-    .primaryKey()
-    .references(() => tenants.id, { onDelete: "cascade" }),
-  host: varchar("HOST", { length: 255 }).notNull(),
-  port: integer("PORT").notNull(),
-  /** True for implicit TLS (port 465); false for STARTTLS (587/25). */
-  secure: boolean("SECURE").notNull().default(false),
-  username: varchar("USERNAME", { length: 255 }),
-  /** Encrypted SMTP password. Up to 512 chars to hold the enc:v1
-   *  envelope around a typical 64-char password. */
-  passwordEncrypted: varchar("PASSWORD_ENCRYPTED", { length: 512 }),
-  fromEmail: varchar("FROM_EMAIL", { length: 255 }).notNull(),
-  fromName: varchar("FROM_NAME", { length: 255 }),
-  enabled: boolean("ENABLED").notNull().default(true),
-  updatedBy: uuid("UPDATED_BY")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  updatedAt: timestamp("UPDATED_AT", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+// TENANT_MAIL_SETTINGS retired 2026-05-18 (I4 Sprint 2). Replaced by
+// the Mail connector + CONNECTOR_INSTANCES (connectorType='mail').
+// Data migration: scripts/migrate-mail-to-connector.ts.
+// SQL migration: 0005_i4_s2_drop_tenant_mail_settings.sql.
 
 // ─── ENGINE_JOBS ────────────────────────────────────────────────────
 // Durable async work queue. The interpreter enqueues a job whenever

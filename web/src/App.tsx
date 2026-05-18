@@ -5,7 +5,7 @@ import { PageErrorBoundary } from "./components/layout/page-error-boundary";
 import LoginPage from "./pages/LoginPage";
 import MfaChallengePage from "./pages/MfaChallengePage";
 import SecuritySettingsPage from "./pages/SecuritySettingsPage";
-import MailSettingsPage from "./pages/MailSettingsPage";
+import ConnectionsSettingsPage from "./pages/ConnectionsSettingsPage";
 import DashboardLayout from "./pages/DashboardLayout";
 import DashboardPage from "./pages/DashboardPage";
 import ProcessListPage from "./pages/ProcessListPage";
@@ -51,7 +51,11 @@ export function App() {
         <Route path="running" element={guarded(<InstancesListPage />)} />
         <Route path="instances/:id" element={guarded(<InstanceDetailPage />)} />
         <Route path="settings/security" element={guarded(<SecuritySettingsPage />)} />
-        <Route path="settings/email" element={guarded(<MailSettingsPage />)} />
+        <Route path="settings/connections" element={guarded(<ConnectionsSettingsPage />)} />
+        {/* I4 Sprint 2: /settings/email retired. Old bookmarks land on the
+            unified Connections page. Drop this redirect once one release
+            cycle has passed (~next session's cleanup). */}
+        <Route path="settings/email" element={<Navigate to="/settings/connections" replace />} />
         <Route path="console" element={guarded(<ConsoleLayout />)}>
           <Route index element={<Navigate to="/console/processes" replace />} />
           <Route path="processes" element={<ProcessesPanel />} />

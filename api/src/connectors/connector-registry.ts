@@ -135,6 +135,13 @@ export type ConnectorDefinition = {
   /** Optional. When present, the controller exposes a POST
    *  /connections/:id/test endpoint. */
   testAction?: ConnectorTestAction;
+  /** Optional lifecycle hook invoked AFTER a connection of this type
+   *  is created or updated. Used by stateful connectors (Mail's
+   *  circuit breaker) to clear in-memory state on operator-driven
+   *  config changes — operator intent on Save is "I fixed it, try
+   *  again now," not "respect the cooldown from the previous broken
+   *  config." Sync function; throw means the save is rolled back. */
+  onConnectionSaved?: (tenantId: string, connectionId: string) => void;
 };
 
 @Injectable()

@@ -36,6 +36,13 @@
       "when": 1778654285362,
       "tag": "0004_i4_s1_connector_instances",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779087384116,
+      "tag": "0005_i4_s2_drop_tenant_mail_settings",
+      "breakpoints": true
     }
   ]
 }

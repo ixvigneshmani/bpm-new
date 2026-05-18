@@ -13,6 +13,8 @@
     "db:migrate:prod": "NODE_ENV=production tsx scripts/migrate.ts",
     "db:stamp-baseline": "tsx scripts/stamp-baseline.ts",
     "db:encrypt-secrets": "tsx scripts/encrypt-secrets.ts",
+    "db:migrate-mail-to-connector": "tsx scripts/migrate-mail-to-connector.ts",
+    "db:migrate-mail-to-connector:prod": "NODE_ENV=production tsx scripts/migrate-mail-to-connector.ts",
     "db:push": "drizzle-kit push",
     "db:push:test": "NODE_ENV=test drizzle-kit push",
     "db:push:prod": "NODE_ENV=production drizzle-kit push",

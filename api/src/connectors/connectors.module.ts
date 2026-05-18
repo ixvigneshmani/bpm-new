@@ -5,7 +5,9 @@ import { ConnectorDispatcherService } from "./connector-dispatcher.service";
 import { ConnectorInstancesService } from "./connector-instances.service";
 import { ConnectorRegistry } from "./connector-registry";
 import { ConnectorsController } from "./connectors.controller";
+import { MailConnector } from "./connectors/mail.connector";
 import { NoopConnector } from "./connectors/noop.connector";
+import { NotifyEmailLegacyShim } from "./legacy/notify-email-shim";
 
 /** I4 — Connector framework. Owns:
  *   • ConnectorRegistry (catalog of definitions)
@@ -27,6 +29,8 @@ import { NoopConnector } from "./connectors/noop.connector";
     ConnectorInstancesService,
     ConnectorDispatcherService,
     NoopConnector,
+    MailConnector,
+    NotifyEmailLegacyShim,
   ],
   exports: [ConnectorRegistry, ConnectorInstancesService],
 })
