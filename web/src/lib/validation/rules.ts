@@ -722,6 +722,30 @@ const unreachableNodeRule: ValidationRule = {
   },
 };
 
+/** callActivity has no runtime dispatcher yet — a token reaching one
+ *  silently hops to the next edge without executing the child process.
+ *  Flag at design time so authors know the node is a placeholder until
+ *  the runtime lands (tracked in the E-series engine roadmap). */
+const callActivityRuntimeRule: ValidationRule = {
+  id: "call-activity-runtime",
+  name: "Call activity runtime",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "callActivity") continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `call-activity-runtime:${n.id}`,
+        severity: "warning",
+        ruleId: "call-activity-runtime",
+        nodeId: n.id,
+        message: `Call activity "${label}" — the engine doesn't yet execute child processes. Tokens will hop past this node without running the called flow.`,
+      });
+    }
+    return issues;
+  },
+};
+
 /** Parse every FEEL expression on the canvas and flag the broken ones.
  *  Sources today:
  *    • sequence flow conditions (`edge.data.condition`)
@@ -808,5 +832,6 @@ export const DEFAULT_RULES: ValidationRule[] = [
   gatewayNonExhaustiveRule,
   serviceTaskImplRule,
   unreachableNodeRule,
+  callActivityRuntimeRule,
   feelExpressionRule,
 ];

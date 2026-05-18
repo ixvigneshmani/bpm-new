@@ -1,5 +1,5 @@
 import { Injectable, Inject } from "@nestjs/common";
-import { eq } from "drizzle-orm";
+import { and, eq, or, ilike, asc } from "drizzle-orm";
 import { DATABASE, Database } from "../database/database.module";
 import { users, userRoles, roles } from "../database/schema";
 
@@ -39,8 +39,18 @@ export class UsersService {
   /** List tenant users for the Act-as impersonation picker. Returns
    *  only the fields the picker needs; pulls role keys per user with
    *  an IN-list join so the admin can see "who holds manager" without
-   *  a follow-up query. */
-  async listForTenant(tenantId: string): Promise<Array<{
+   *  a follow-up query.
+   *
+   *  Sweep-B cleanup #3 — accepts an optional case-insensitive
+   *  substring `search` (matched against display name + email) and
+   *  a `limit` (capped at 200) so the assignee picker can ship a
+   *  searchable, paged UX for tenants with thousands of users.
+   *  Default limit keeps the legacy "give me everyone" behaviour for
+   *  callers (act-as picker) that already render everything. */
+  async listForTenant(
+    tenantId: string,
+    opts: { search?: string; limit?: number } = {},
+  ): Promise<Array<{
     id: string;
     email: string;
     displayName: string;
@@ -48,6 +58,17 @@ export class UsersService {
     systemRole: string;
     roles: string[];
   }>> {
+    const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 1000);
+    const searchTerm = opts.search?.trim();
+    const filters = searchTerm
+      ? and(
+          eq(users.tenantId, tenantId),
+          or(
+            ilike(users.displayName, `%${searchTerm}%`),
+            ilike(users.email, `%${searchTerm}%`),
+          ),
+        )
+      : eq(users.tenantId, tenantId);
     const us = await this.db
       .select({
         id: users.id,
@@ -57,7 +78,9 @@ export class UsersService {
         systemRole: users.role,
       })
       .from(users)
-      .where(eq(users.tenantId, tenantId));
+      .where(filters)
+      .orderBy(asc(users.displayName))
+      .limit(limit);
     // One-pass role join — N users × M roles is fine at tenant scale.
     const roleRows = await this.db
       .select({ userId: userRoles.userId, key: roles.key })

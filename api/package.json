@@ -15,6 +15,7 @@
     "db:encrypt-secrets": "tsx scripts/encrypt-secrets.ts",
     "db:migrate-mail-to-connector": "tsx scripts/migrate-mail-to-connector.ts",
     "db:migrate-mail-to-connector:prod": "NODE_ENV=production tsx scripts/migrate-mail-to-connector.ts",
+    "db:scan-canvases": "tsx scripts/scan-canvases-for-issues.ts",
     "db:push": "drizzle-kit push",
     "db:push:test": "NODE_ENV=test drizzle-kit push",
     "db:push:prod": "NODE_ENV=production drizzle-kit push",

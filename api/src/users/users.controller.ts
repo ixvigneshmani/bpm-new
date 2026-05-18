@@ -1,4 +1,4 @@
-import { Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Req, UseGuards } from "@nestjs/common";
+import { Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Query, Req, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../common/types/authenticated-request";
 import { UsersService } from "./users.service";
@@ -49,11 +49,18 @@ export class UsersController {
 
   /** Designer Sweep A — tenant users visible to anyone with `edit` on
    *  the given process. Drives the userTask `directUser` picker so
-   *  designers don't have to paste UUIDs. */
+   *  designers don't have to paste UUIDs.
+   *
+   *  Sweep-B cleanup #3 — supports `?search=&limit=` so the picker
+   *  can ship a search box for tenants with hundreds of users.
+   *  Default is 50 matches; client passes higher limits for explicit
+   *  "show all" UX. */
   @Get("assignable/:processId")
   async assignable(
     @Req() req: AuthenticatedRequest,
     @Param("processId", ParseUUIDPipe) processId: string,
+    @Query("search") search?: string,
+    @Query("limit") limit?: string,
   ) {
     await this.permissions.assert(
       {
@@ -65,6 +72,10 @@ export class UsersController {
       processId,
       "edit",
     );
-    return this.users.listForTenant(req.user.tenantId);
+    const parsedLimit = limit ? Number.parseInt(limit, 10) : 50;
+    return this.users.listForTenant(req.user.tenantId, {
+      search,
+      limit: Number.isFinite(parsedLimit) ? parsedLimit : 50,
+    });
   }
 }

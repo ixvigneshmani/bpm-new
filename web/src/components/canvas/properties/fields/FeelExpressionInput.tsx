@@ -5,7 +5,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useVariableRegistry, TYPE_COLORS, TYPE_ICONS } from "../../../../store/variable-registry";
-import { parseFeelCondition, parseVariableRef } from "../../../../lib/feel/parse";
+import { parseFeelCondition, parseVariableRef, evaluate } from "../../../../lib/feel/parse";
 import AiAssistButton from "./AiAssistButton";
 
 type Props = {
@@ -55,6 +55,21 @@ export default function FeelExpressionInput({
     parseResult && !parseResult.ok ? parseResult.error.message : undefined;
 
   const displayError = error ?? autoError;
+
+  // Sweep-B cleanup #8 — dry-run preview against a deterministic sample
+  // scope. Only shown when the expression parses cleanly; on type
+  // errors we fall back to "—" rather than spamming a noisy stack.
+  const preview = useMemo(() => {
+    if (!parseResult?.ok) return null;
+    if (mode === "variable-ref") return null; // variable refs are paths, not expressions
+    try {
+      const scope = registry.getSampleScope();
+      const v = evaluate(parseResult.ast, scope);
+      return formatPreviewValue(v);
+    } catch {
+      return "—";
+    }
+  }, [parseResult, registry, mode]);
 
   const lastWord = value.split(/[\s=+\-*/<>!&|(),]+/).pop() || "";
   const suggestions = lastWord.length > 0
@@ -115,6 +130,12 @@ export default function FeelExpressionInput({
       </div>
 
       {displayError && <div style={{ marginTop: 4, fontSize: 11, color: "#f04438" }}>{displayError}</div>}
+      {!displayError && preview !== null && (
+        <div style={{ marginTop: 4, fontSize: 11, color: "#98a2b3", fontFamily: "var(--font-mono, monospace)" }}>
+          evaluates to: <span style={{ color: "#475467", fontWeight: 600 }}>{preview}</span>
+          <span style={{ marginLeft: 6, color: "#cbd5e1" }}>(sample data)</span>
+        </div>
+      )}
 
       {/* Autocomplete dropdown */}
       {showSuggestions && focused && suggestions.length > 0 && (
@@ -149,4 +170,18 @@ export default function FeelExpressionInput({
       )}
     </div>
   );
+}
+
+function formatPreviewValue(v: unknown): string {
+  if (v === undefined) return "—";
+  if (v === null) return "null";
+  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "number" && !Number.isFinite(v)) return String(v);
+  if (typeof v === "boolean" || typeof v === "number") return String(v);
+  try {
+    const s = JSON.stringify(v);
+    return s.length > 40 ? s.slice(0, 37) + "…" : s;
+  } catch {
+    return String(v);
+  }
 }

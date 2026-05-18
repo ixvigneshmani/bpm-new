@@ -5,10 +5,12 @@
  * the panel is collapsed.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import useCanvasStore from "../../store/canvas-store";
 import { useValidationIssues } from "../../store/validation-hook";
 import type { IssueSeverity } from "../../lib/validation/types";
+
+type SeverityFilter = "all" | IssueSeverity;
 
 const SEVERITY_STYLE: Record<IssueSeverity, { color: string; bg: string; icon: string }> = {
   error: { color: "#B42318", bg: "#FEE4E2", icon: "✕" },
@@ -24,6 +26,31 @@ export default function ProblemsPanel() {
   const setOpen = useCanvasStore((s) => s.setProblemsPanelOpen);
   const focusedIssueId = useCanvasStore((s) => s.focusedIssueId);
   const clearFocusedIssue = useCanvasStore((s) => s.clearFocusedIssue);
+
+  // Sweep-B cleanup #10 — severity filter when issue lists get long.
+  const [severityFilter, setSeverityFilter] = useState<SeverityFilter>("all");
+  const filteredIssues = useMemo(
+    () => (severityFilter === "all" ? issues : issues.filter((i) => i.severity === severityFilter)),
+    [issues, severityFilter],
+  );
+
+  // Sweep-B cleanup #11 — Cmd/Ctrl+Shift+M toggles the Problems panel,
+  // matching VS Code / IntelliJ / Camunda conventions.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "m") return;
+      if (!e.shiftKey) return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      // Bail if the user is typing into a form field — Cmd+Shift+M
+      // shouldn't fight Slack-style keystrokes inside an input.
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)) return;
+      e.preventDefault();
+      setOpen(!open);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, setOpen]);
 
   const issueRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   useEffect(() => {
@@ -118,8 +145,39 @@ export default function ProblemsPanel() {
             borderBottom: "1px solid #F2F4F7",
           }}
         >
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#101828" }}>
-            Problems <span style={{ color: "#98A2B3", fontWeight: 500 }}>({issues.length})</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#101828" }}>
+              Problems <span style={{ color: "#98A2B3", fontWeight: 500 }}>({issues.length})</span>
+            </div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["all", "error", "warning", "info"] as SeverityFilter[]).map((f) => {
+                const count =
+                  f === "all" ? issues.length : issues.filter((i) => i.severity === f).length;
+                const active = severityFilter === f;
+                return (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setSeverityFilter(f)}
+                    style={{
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      border: `1px solid ${active ? "#818cf8" : "#E5E7EB"}`,
+                      background: active ? "#eef2ff" : "#fff",
+                      color: active ? "#4f46e5" : "#667085",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      textTransform: "capitalize",
+                      cursor: "pointer",
+                      fontFamily: "inherit",
+                    }}
+                    title={`Show ${f}`}
+                  >
+                    {f} {count > 0 && <span style={{ opacity: 0.7 }}>{count}</span>}
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <button
             type="button"
@@ -147,12 +205,14 @@ export default function ProblemsPanel() {
 
         {/* Issue list */}
         <div style={{ overflowY: "auto", padding: "4px 0" }}>
-          {issues.length === 0 ? (
+          {filteredIssues.length === 0 ? (
             <div style={{ padding: "24px 14px", textAlign: "center", fontSize: 12, color: "#98A2B3" }}>
-              This canvas has no validation issues.
+              {issues.length === 0
+                ? "This canvas has no validation issues."
+                : `No ${severityFilter} issues. Clear the filter to see all ${issues.length}.`}
             </div>
           ) : (
-            issues.map((issue) => {
+            filteredIssues.map((issue) => {
               const s = SEVERITY_STYLE[issue.severity];
               const clickable = Boolean(issue.nodeId || issue.edgeId);
               return (

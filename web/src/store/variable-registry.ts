@@ -275,6 +275,43 @@ export function useVariableRegistry() {
         const lower = prefix.toLowerCase();
         return flatList.filter((v) => v.path.toLowerCase().includes(lower));
       },
+
+      /** Sweep-B cleanup #8 — deterministic sample scope for the
+       *  designer's FEEL "evaluates to:" preview. Each declared
+       *  variable gets a type-based stand-in (number → 42, string →
+       *  "sample", boolean → true, date → today). Real runtime values
+       *  obviously differ; the preview is for sanity-checking syntax
+       *  + operator semantics, not actual outcomes. */
+      getSampleScope(): Record<string, unknown> {
+        const scope: Record<string, unknown> = {};
+        const sampleFor = (t: VariableType): unknown => {
+          switch (t) {
+            case "number": return 42;
+            case "string": return "sample";
+            case "boolean": return true;
+            case "date": return new Date().toISOString();
+            case "object": return {};
+            case "array": return [];
+          }
+        };
+        const fill = (tree: VariableNode[], out: Record<string, unknown>) => {
+          for (const v of tree) {
+            if (v.type === "object" && v.children) {
+              out[v.name] = {};
+              fill(v.children, out[v.name] as Record<string, unknown>);
+            } else {
+              out[v.name] = sampleFor(v.type);
+            }
+          }
+        };
+        fill(variables, scope);
+        // Node-declared outputs (no nested children) get a flat sample.
+        for (const v of nodeFlat) {
+          if (v.path.includes(".")) continue;
+          if (scope[v.path] === undefined) scope[v.path] = sampleFor(v.type);
+        }
+        return scope;
+      },
     };
     // nodes is read inside via getState() — the digest drives re-computation.
     // eslint-disable-next-line react-hooks/exhaustive-deps

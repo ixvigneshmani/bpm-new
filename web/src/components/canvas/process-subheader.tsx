@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import useCanvasStore from "../../store/canvas-store";
+import { useValidationIssues } from "../../store/validation-hook";
 import { apiPost } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { STATUS_COLORS, STATUS_DISPLAY } from "../../lib/constants";
@@ -42,6 +43,13 @@ export default function ProcessSubheader({
   const saveStatus = useCanvasStore((s) => s.saveStatus);
   const lastSavedAt = useCanvasStore((s) => s.lastSavedAt);
   const saveError = useCanvasStore((s) => s.saveError);
+
+  // Sweep-B cleanup #2 — gate Save and Republish on hard validation
+  // errors. Warnings are advisory and don't block. Empty canvases
+  // (zero nodes) pass — the rules don't fire on them.
+  const issues = useValidationIssues();
+  const errorCount = issues.filter((i) => i.severity === "error").length;
+  const hasErrors = errorCount > 0;
 
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
@@ -144,8 +152,14 @@ export default function ProcessSubheader({
         {!readOnly && (
           <button
             onClick={() => onSave?.()}
-            disabled={!dirty || saveStatus === "saving"}
-            title={dirty ? "Save canvas (⌘S)" : "No changes to save"}
+            disabled={!dirty || saveStatus === "saving" || hasErrors}
+            title={
+              hasErrors
+                ? `Fix the ${errorCount} error${errorCount === 1 ? "" : "s"} in the Problems panel before saving.`
+                : dirty
+                  ? "Save canvas (⌘S)"
+                  : "No changes to save"
+            }
             style={{
               display: "flex", alignItems: "center", gap: 5,
               padding: "5px 12px", borderRadius: 6,
@@ -153,7 +167,7 @@ export default function ProcessSubheader({
               background: dirty ? "#4F46E5" : "#F9FAFB",
               color: dirty ? "#fff" : "#9CA3AF",
               fontSize: 12, fontWeight: 600,
-              cursor: dirty && saveStatus !== "saving" ? "pointer" : "not-allowed",
+              cursor: dirty && saveStatus !== "saving" && !hasErrors ? "pointer" : "not-allowed",
               fontFamily: "inherit",
               transition: "all 0.15s ease",
               whiteSpace: "nowrap",
@@ -194,11 +208,13 @@ export default function ProcessSubheader({
         {processId && canPublish && (
           <button
             onClick={onPublish}
-            disabled={publishing}
+            disabled={publishing || hasErrors}
             title={
-              isDraft
-                ? "Mark this process Active so others can start instances against it."
-                : "Snapshot the current canvas as a new published version."
+              hasErrors
+                ? `Fix the ${errorCount} error${errorCount === 1 ? "" : "s"} in the Problems panel before publishing.`
+                : isDraft
+                  ? "Mark this process Active so others can start instances against it."
+                  : "Snapshot the current canvas as a new published version."
             }
             style={{
               display: "flex", alignItems: "center", gap: 5,
@@ -207,9 +223,9 @@ export default function ProcessSubheader({
               background: isDraft ? "#10B981" : "#fff",
               color: isDraft ? "#fff" : "#374151",
               fontSize: 12, fontWeight: 600,
-              cursor: publishing ? "not-allowed" : "pointer",
+              cursor: publishing || hasErrors ? "not-allowed" : "pointer",
               fontFamily: "inherit",
-              opacity: publishing ? 0.6 : 1,
+              opacity: publishing || hasErrors ? 0.6 : 1,
               whiteSpace: "nowrap",
             }}
           >

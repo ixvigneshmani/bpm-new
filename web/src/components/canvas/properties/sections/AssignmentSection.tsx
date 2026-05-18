@@ -38,8 +38,13 @@ const ASSIGNMENT_TYPES: { type: AssignmentType; label: string; desc: string; ico
  *  is re-mounted often (node-select churn). Lightweight in-memory cache
  *  across mounts avoids repeated /roles fetches in the same session. */
 let rolesCache: RoleRow[] | null = null;
-let usersCacheKey: string | null = null;
-let usersCache: UserRow[] | null = null;
+
+/** Sweep-B cleanup #3 — users are fetched per-search-term so we don't
+ *  hold thousands of users in memory at large tenants. Cache the
+ *  (processId, searchTerm) tuple so re-opening the panel for the same
+ *  task doesn't re-fetch. */
+const usersCache = new Map<string, UserRow[]>();
+const usersCacheKey = (processId: string, search: string) => `${processId}::${search}`;
 
 export default function AssignmentSection({ assignment, onChange }: Props) {
   const processId = useCanvasStore((s) => s.processId);
@@ -51,11 +56,13 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [rolesLoading, setRolesLoading] = useState(false);
 
-  const [users, setUsers] = useState<UserRow[]>(
-    usersCacheKey === processId && usersCache ? usersCache : [],
-  );
+  const [users, setUsers] = useState<UserRow[]>(() => {
+    if (!processId) return [];
+    return usersCache.get(usersCacheKey(processId, "")) ?? [];
+  });
   const [usersError, setUsersError] = useState<string | null>(null);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [userSearch, setUserSearch] = useState("");
 
   useEffect(() => {
     if (rolesCache) return;
@@ -81,31 +88,40 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
 
   useEffect(() => {
     if (!processId) return;
-    if (usersCacheKey === processId && usersCache) {
-      setUsers(usersCache);
+    const trimmed = userSearch.trim();
+    const cacheKey = usersCacheKey(processId, trimmed);
+    const hit = usersCache.get(cacheKey);
+    if (hit) {
+      setUsers(hit);
       return;
     }
     let cancelled = false;
     setUsersLoading(true);
     setUsersError(null);
-    apiGet<UserRow[]>(`/users/assignable/${processId}`)
-      .then((data) => {
-        if (cancelled) return;
-        usersCacheKey = processId;
-        usersCache = data;
-        setUsers(data);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setUsersError(err?.message ?? "Failed to load users");
-      })
-      .finally(() => {
-        if (!cancelled) setUsersLoading(false);
-      });
+    // Debounce keystrokes so the API isn't hit on every character.
+    const debounce = trimmed.length === 0 ? 0 : 220;
+    const handle = window.setTimeout(() => {
+      const params = new URLSearchParams({ limit: "50" });
+      if (trimmed) params.set("search", trimmed);
+      apiGet<UserRow[]>(`/users/assignable/${processId}?${params.toString()}`)
+        .then((data) => {
+          if (cancelled) return;
+          usersCache.set(cacheKey, data);
+          setUsers(data);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setUsersError(err?.message ?? "Failed to load users");
+        })
+        .finally(() => {
+          if (!cancelled) setUsersLoading(false);
+        });
+    }, debounce);
     return () => {
       cancelled = true;
+      window.clearTimeout(handle);
     };
-  }, [processId]);
+  }, [processId, userSearch]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -158,29 +174,43 @@ export default function AssignmentSection({ assignment, onChange }: Props) {
               />
             </>
           ) : (
-            <select
-              value={assignment?.value || ""}
-              onChange={(e) => onChange({ type: "directUser", value: e.target.value })}
-              style={{ ...inputStyle, cursor: "pointer" }}
-              disabled={usersLoading}
-            >
-              <option value="" disabled>
-                {usersLoading ? "Loading users…" : "Select a user…"}
-              </option>
-              {/* Preserve any pre-existing uuid that isn't in the current list
-                  (e.g. user removed from tenant) so we don't silently drop it. */}
-              {assignment?.value &&
-                !users.some((u) => u.id === assignment.value) && (
-                  <option value={assignment.value}>
-                    {assignment.value} (unknown — kept)
-                  </option>
-                )}
-              {users.map((u) => (
-                <option key={u.id} value={u.id} disabled={!u.isActive}>
-                  {u.displayName} ({u.email}){!u.isActive ? " — inactive" : ""}
+            <>
+              <input
+                type="text"
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                placeholder="Search by name or email…"
+                style={{ ...inputStyle, marginBottom: 6 }}
+              />
+              <select
+                value={assignment?.value || ""}
+                onChange={(e) => onChange({ type: "directUser", value: e.target.value })}
+                style={{ ...inputStyle, cursor: "pointer" }}
+                disabled={usersLoading}
+              >
+                <option value="" disabled>
+                  {usersLoading ? "Loading users…" : users.length === 0 ? "No matches" : "Select a user…"}
                 </option>
-              ))}
-            </select>
+                {/* Preserve any pre-existing uuid that isn't in the current list
+                    (e.g. user removed from tenant or filtered out by search). */}
+                {assignment?.value &&
+                  !users.some((u) => u.id === assignment.value) && (
+                    <option value={assignment.value}>
+                      {assignment.value} (not in current results)
+                    </option>
+                  )}
+                {users.map((u) => (
+                  <option key={u.id} value={u.id} disabled={!u.isActive}>
+                    {u.displayName} ({u.email}){!u.isActive ? " — inactive" : ""}
+                  </option>
+                ))}
+              </select>
+              {users.length === 50 && (
+                <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 4 }}>
+                  Showing first 50 — refine the search if you don't see the right user.
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
