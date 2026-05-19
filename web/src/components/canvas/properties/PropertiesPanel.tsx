@@ -6,6 +6,7 @@
 import { useState } from "react";
 import useCanvasStore from "../../../store/canvas-store";
 import type {
+  BpmnNodeData,
   BoundaryEventData,
   UserTaskData,
   ServiceTaskData,
@@ -148,8 +149,12 @@ export default function PropertiesPanel() {
   const data = selectedNode.data as Record<string, unknown>;
   const bpmnType = (data.bpmnType as string) || selectedNode.type || "unknown";
 
-  // Helpers to update specific data fields
-  const update = (patch: Record<string, unknown>) => updateNodeData(selectedNode.id, patch as any);
+  // Helpers to update specific data fields. Section components pass
+  // node-type-specific patches; the store action signature is the
+  // BPM union, so the cast narrows at the call site — kept here as
+  // a single typed boundary rather than `as any`-ing every section.
+  const update = (patch: Record<string, unknown>) =>
+    updateNodeData(selectedNode.id, patch as Partial<BpmnNodeData>);
 
   // Build section list based on node type
   const sections: SectionConfig[] = [];

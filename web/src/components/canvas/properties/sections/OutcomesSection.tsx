@@ -17,7 +17,7 @@
  * Inline styles (Tailwind doesn't reliably resolve in `.props-panel`).
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { Outcome } from "../../../../types/bpmn-node-data";
 
 type Props = {
@@ -54,14 +54,30 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
   const add = (label = "") => {
     onChange([...outcomes, { uid: newUid(), id: slug(label), label }]);
   };
+  /** Append several outcomes in a single onChange call. The plural form
+   *  is needed because the "Approve / Reject" preset (and any future
+   *  multi-add suggestion) was previously calling `add()` twice in the
+   *  same click handler — both calls captured the stale `outcomes` from
+   *  the same render, so only the LAST insert survived. */
+  const addMany = (labels: string[]) => {
+    if (labels.length === 0) return;
+    onChange([
+      ...outcomes,
+      ...labels.map((label) => ({ uid: newUid(), id: slug(label), label })),
+    ]);
+  };
 
   // Track whether two outcomes resolve to the same id — that would
   // make gateway routing ambiguous.
-  const idCounts = outcomes.reduce<Record<string, number>>((acc, o) => {
-    const id = o.id?.trim() || slug(o.label);
-    if (id) acc[id] = (acc[id] ?? 0) + 1;
-    return acc;
-  }, {});
+  const idCounts = useMemo(
+    () =>
+      outcomes.reduce<Record<string, number>>((acc, o) => {
+        const id = o.id?.trim() || slug(o.label);
+        if (id) acc[id] = (acc[id] ?? 0) + 1;
+        return acc;
+      }, {}),
+    [outcomes],
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -77,7 +93,7 @@ export default function OutcomesSection({ outcomes = [], onChange }: Props) {
             No outcomes — runtime shows a single <strong>Complete</strong> button.
           </div>
           <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button type="button" onClick={() => { add("Approve"); add("Reject"); }} style={S.btnSuggest}>
+            <button type="button" onClick={() => addMany(["Approve", "Reject"])} style={S.btnSuggest}>
               Approve / Reject
             </button>
             <button type="button" onClick={() => add("")} style={S.btnGhost}>

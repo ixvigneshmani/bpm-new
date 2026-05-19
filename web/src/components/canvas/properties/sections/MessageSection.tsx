@@ -10,6 +10,7 @@ import type {
 } from "../../../../types/bpmn-node-data";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 import MappingTable from "../fields/MappingTable";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 
 type Props = {
   mode: "send" | "receive";
@@ -44,7 +45,13 @@ export default function MessageSection({
   const payload: VariableMapping[] = base.payloadMappings || [];
 
   return (
-    <div style={configBox}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <DesignOnlyBanner milestone="E8">
+        {mode === "send"
+          ? "Send Task payload + target system persist with the canvas; the engine doesn't yet emit the message at runtime. Ships with the event-semantics milestone."
+          : "Receive Task correlation + payload mapping persist with the canvas; the engine doesn't yet wait for a matching message at runtime. Ships with the event-semantics milestone."}
+      </DesignOnlyBanner>
+      <div style={configBox}>
       {/* Message name */}
       <div>
         <div style={labelStyle}>Message Name</div>
@@ -122,6 +129,7 @@ export default function MessageSection({
           sourceLabel={mode === "send" ? "From variable" : "From payload"}
           targetLabel={mode === "send" ? "Payload field" : "To variable"}
         />
+      </div>
       </div>
     </div>
   );

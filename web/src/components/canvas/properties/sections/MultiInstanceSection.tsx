@@ -233,12 +233,29 @@ export default function MultiInstanceSection({
           onChange={(e) => onCompensationChange({ enabled: e.target.checked })}
           style={{ width: 16, height: 16, cursor: "pointer" }}
         />
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#344054" }}>
-            Compensation activity
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#344054" }}>
+              Compensation activity
+            </span>
+            <span
+              style={{
+                padding: "1px 7px",
+                borderRadius: 999,
+                background: "#fef3c7",
+                color: "#92400e",
+                fontSize: 9,
+                fontWeight: 800,
+                letterSpacing: "0.04em",
+              }}
+              title="Engine doesn't yet invoke compensation handlers — ships with the event-semantics milestone."
+            >
+              DESIGN-ONLY · E8
+            </span>
           </div>
           <div style={{ fontSize: 10, color: "#98a2b3", marginTop: 2 }}>
             This activity can be invoked to undo the effects of a completed activity.
+            The engine doesn't yet trigger compensation handlers at runtime.
           </div>
         </div>
       </label>

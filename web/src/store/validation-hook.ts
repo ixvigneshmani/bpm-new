@@ -3,9 +3,16 @@
  * the result. Subscribed with a custom equality function that compares
  * a minimal "connectivity digest", so drag/pan frames (which mutate
  * node positions but not structure) don't cause a re-render.
+ *
+ * Triage cleanup — module-level cache by digest. Previously every
+ * `<NodeErrorMarker>` consumer called this hook, and each one ran
+ * `runValidation` in its own `useMemo`. On a 50-node canvas the rules
+ * fired ~50 times per structural change. With the cache they fire
+ * once; every other consumer (and the precomputed `byNodeId` map)
+ * reads from the shared result. The cache is keyed by digest, which
+ * is itself derived from the structural fields the rules read.
  * ──────────────────────────────────────────────────────────────────── */
 
-import { useMemo } from "react";
 import type { Node, Edge } from "@xyflow/react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import useCanvasStore from "./canvas-store";
@@ -71,12 +78,76 @@ const selectSnapshot = (s: CanvasState): Snapshot => ({
 
 const eqByDigest = (a: Snapshot, b: Snapshot) => a.digest === b.digest;
 
+/* ─── Shared cache (module-level) ───────────────────────────────────
+ * The validation engine is pure: same (nodes, edges) digest → same
+ * issue array. So we don't need a per-component memo — one module-level
+ * cache serves every caller in the canvas. */
+let cachedDigest: string | null = null;
+let cachedIssues: ValidationIssue[] = [];
+let cachedByNodeId: Map<string, ValidationIssue[]> = new Map();
+const EMPTY_ISSUES: ValidationIssue[] = [];
+
+function ensureCache(snapshot: Snapshot): {
+  issues: ValidationIssue[];
+  byNodeId: Map<string, ValidationIssue[]>;
+} {
+  if (snapshot.digest !== cachedDigest) {
+    cachedDigest = snapshot.digest;
+    cachedIssues = runValidation(snapshot.nodes, snapshot.edges);
+    const map = new Map<string, ValidationIssue[]>();
+    for (const i of cachedIssues) {
+      if (!i.nodeId) continue;
+      const arr = map.get(i.nodeId) ?? [];
+      arr.push(i);
+      map.set(i.nodeId, arr);
+    }
+    cachedByNodeId = map;
+  }
+  return { issues: cachedIssues, byNodeId: cachedByNodeId };
+}
+
+/** Non-hook variant exported for unit tests so they don't need a
+ *  React renderer. Same cache as the hook — so a test calling this
+ *  twice with the same canvas confirms cache identity, and changing
+ *  the structurally-relevant fields produces a fresh array. */
+export function getValidationIssues(nodes: Node[], edges: Edge[]): ValidationIssue[] {
+  return ensureCache({ nodes, edges, digest: connectivityDigest(nodes, edges) }).issues;
+}
+
+/** Non-hook variant of `connectivityDigest` for tests. */
+export function digestOf(nodes: Node[], edges: Edge[]): string {
+  return connectivityDigest(nodes, edges);
+}
+
+/** Returns ALL validation issues for the current canvas. Use this in
+ *  the Problems panel, save-button gating, and other "all issues"
+ *  consumers. The returned array reference is stable across renders
+ *  until the digest changes. */
 export function useValidationIssues(): ValidationIssue[] {
-  const { nodes, edges, digest } = useStoreWithEqualityFn(
+  const snapshot = useStoreWithEqualityFn(
     useCanvasStore,
     selectSnapshot,
     eqByDigest,
   );
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => runValidation(nodes, edges), [digest]);
+  return ensureCache(snapshot).issues;
+}
+
+/** Returns the validation issues scoped to a single node id. O(1)
+ *  lookup against the shared `byNodeId` map, so an N-marker canvas
+ *  does 1 validation pass instead of N. */
+export function useNodeIssues(nodeId: string): ValidationIssue[] {
+  const snapshot = useStoreWithEqualityFn(
+    useCanvasStore,
+    selectSnapshot,
+    eqByDigest,
+  );
+  const { byNodeId } = ensureCache(snapshot);
+  return byNodeId.get(nodeId) ?? EMPTY_ISSUES;
+}
+
+/** Test-only — reset the module cache so each test starts clean. */
+export function __resetValidationCache(): void {
+  cachedDigest = null;
+  cachedIssues = [];
+  cachedByNodeId = new Map();
 }

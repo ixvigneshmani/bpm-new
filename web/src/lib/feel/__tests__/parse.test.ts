@@ -64,6 +64,40 @@ describe("parseFeelCondition", () => {
       expect(evaluate(r.ast, { amount: 500, approved: true })).toBe(false);
     }
   });
+
+  it("evaluates a ternary against a scope", () => {
+    const r = parseFeelCondition("amount > 1000 ? 'manual' : 'auto'");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(evaluate(r.ast, { amount: 5000 })).toBe("manual");
+      expect(evaluate(r.ast, { amount: 100 })).toBe("auto");
+    }
+  });
+
+  it("evaluator returns undefined for unknown identifiers", () => {
+    const r = parseFeelCondition("missing > 5");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // JS NaN-style: undefined > 5 is false, doesn't throw.
+      // The preview UI surfaces this as "false" — documented behaviour.
+      expect(evaluate(r.ast, {})).toBe(false);
+    }
+  });
+
+  it("evaluator returns truthy/falsy on type-coercion comparisons", () => {
+    // Documents engine parity: the runtime uses `new Function()` to
+    // run the expression, which JS-coerces "5" > 3 → true. The
+    // designer evaluator follows the same semantics so what the
+    // user sees in the "evaluates to:" preview matches runtime.
+    const r = parseFeelCondition("flag == 1");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // `==` is loose equality: 1 == "1" → true.
+      expect(evaluate(r.ast, { flag: "1" })).toBe(true);
+      expect(evaluate(r.ast, { flag: 1 })).toBe(true);
+      expect(evaluate(r.ast, { flag: 2 })).toBe(false);
+    }
+  });
 });
 
 describe("parseVariableRef", () => {

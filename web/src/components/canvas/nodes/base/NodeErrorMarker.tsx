@@ -7,7 +7,7 @@
 
 import { memo } from "react";
 import useCanvasStore from "../../../../store/canvas-store";
-import { useValidationIssues } from "../../../../store/validation-hook";
+import { useNodeIssues } from "../../../../store/validation-hook";
 import type { IssueSeverity } from "../../../../lib/validation/types";
 
 type Props = {
@@ -27,11 +27,13 @@ const SEV_COLOR: Record<IssueSeverity, { dot: string; ring: string }> = {
 const SEV_RANK: Record<IssueSeverity, number> = { error: 0, warning: 1, info: 2 };
 
 function NodeErrorMarker({ nodeId, offsetTop = -6, offsetRight = -6 }: Props) {
-  const issues = useValidationIssues();
+  const mineRef = useNodeIssues(nodeId);
   const focusIssue = useCanvasStore((s) => s.focusIssue);
 
-  const mine = issues.filter((i) => i.nodeId === nodeId);
-  if (mine.length === 0) return null;
+  if (mineRef.length === 0) return null;
+  // Local copy because we sort by severity; mutating the cached array
+  // would persist across renders and break other consumers.
+  const mine = [...mineRef];
 
   mine.sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity]);
   const top = mine[0];
