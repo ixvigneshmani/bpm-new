@@ -149,6 +149,7 @@ function OutcomeRow(props: {
         <span
           style={{
             ...S.idChip,
+            marginLeft: "auto",
             background: warning ? "#FEF2F2" : "#F2F4F7",
             color: warning ? "#B42318" : "#475467",
             borderColor: warning ? "#FCA5A5" : "transparent",
@@ -207,7 +208,6 @@ const S = {
   } as React.CSSProperties,
   input: {
     flex: 1, minWidth: 0,
-    maxWidth: 280,
     padding: "7px 10px", borderRadius: 6,
     border: "1px solid #E5E7EB", fontSize: 12, color: "#101828",
     outline: "none", fontFamily: "inherit", background: "#fff",
