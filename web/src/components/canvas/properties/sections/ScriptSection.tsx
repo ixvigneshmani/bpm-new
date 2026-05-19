@@ -28,11 +28,6 @@ const monoInput: React.CSSProperties = {
   ...inputStyle, fontFamily: "var(--font-mono, monospace)", fontSize: 12,
 };
 
-const configBox: React.CSSProperties = {
-  border: "1px solid #f2f4f7", borderRadius: 12, background: "#f9fafb",
-  padding: 16, display: "flex", flexDirection: "column", gap: 12,
-};
-
 const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
   { value: "feel", label: "FEEL" },
   { value: "javascript", label: "JavaScript" },
@@ -57,7 +52,6 @@ export default function ScriptSection({ script, onChange }: Props) {
         execute inline scripts. Use an external worker for production
         logic until the script-execution sandbox ships.
       </DesignOnlyBanner>
-      <div style={configBox}>
       {/* Language selector */}
       <div>
         <div style={labelStyle}>Language</div>
@@ -110,13 +104,12 @@ export default function ScriptSection({ script, onChange }: Props) {
           type="text"
           value={cfg.resultVariable || ""}
           onChange={(e) => onChange({ ...cfg, resultVariable: e.target.value })}
-          style={monoInput}
+          style={{ ...monoInput, width: 240, maxWidth: "100%" }}
           placeholder="discountAmount"
         />
         <div style={{ marginTop: 4, fontSize: 10, color: "#98a2b3" }}>
           Script return value is written to this variable. Leave empty to discard.
         </div>
-      </div>
       </div>
     </div>
   );

@@ -152,8 +152,8 @@ export default function MultiInstanceSection({
               min={1}
               value={current.loopMaximum ?? ""}
               onChange={(e) => onLoopChange({ ...current, loopMaximum: e.target.value ? Number(e.target.value) : undefined })}
-              style={monoInput}
-              placeholder="Optional hard cap"
+              style={{ ...monoInput, width: 140, maxWidth: "100%" }}
+              placeholder="Optional"
             />
           </div>
         </div>
@@ -202,7 +202,7 @@ export default function MultiInstanceSection({
               type="text"
               value={current.elementVariable || ""}
               onChange={(e) => onLoopChange({ ...current, elementVariable: e.target.value })}
-              style={monoInput}
+              style={{ ...monoInput, width: 200, maxWidth: "100%" }}
               placeholder="item"
             />
             <div style={{ marginTop: 4, fontSize: 10, color: "#98a2b3" }}>

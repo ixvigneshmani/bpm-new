@@ -52,7 +52,7 @@ export default function MessageSection({
           type="text"
           value={base.messageName}
           onChange={(e) => onChange({ ...base, messageName: e.target.value })}
-          style={inputStyle}
+          style={{ ...inputStyle, width: 320, maxWidth: "100%" }}
           placeholder={mode === "send" ? "OrderShipped" : "PaymentConfirmed"}
         />
       </div>
@@ -75,8 +75,8 @@ export default function MessageSection({
             onChange={(e) =>
               onChange({ ...(base as SendMessageConfig), targetSystem: e.target.value })
             }
-            style={inputStyle}
-            placeholder="kafka:orders-topic, smtp:noreply@x.com..."
+            style={{ ...inputStyle, width: 360, maxWidth: "100%", fontFamily: "var(--font-mono, monospace)", fontSize: 12 }}
+            placeholder="kafka:orders-topic"
           />
           <div style={{ marginTop: 4, fontSize: 10, color: "#98a2b3" }}>
             Optional. Broker, queue, or endpoint reference.

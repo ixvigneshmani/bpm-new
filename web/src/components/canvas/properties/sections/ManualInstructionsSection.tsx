@@ -22,14 +22,9 @@ const textareaStyle: React.CSSProperties = {
   lineHeight: "1.6", resize: "vertical", minHeight: 120,
 };
 
-const configBox: React.CSSProperties = {
-  border: "1px solid #f2f4f7", borderRadius: 12, background: "#f9fafb",
-  padding: 16, display: "flex", flexDirection: "column", gap: 8,
-};
-
 export default function ManualInstructionsSection({ instructions, onChange }: Props) {
   return (
-    <div style={configBox}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ ...labelStyle, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span>Operator Instructions</span>
         <AiAssistButton tooltip="AI: Generate instructions" />

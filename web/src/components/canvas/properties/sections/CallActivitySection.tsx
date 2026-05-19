@@ -211,7 +211,7 @@ export default function CallActivitySection({ call, onChange }: Props) {
               type="text"
               value={current.version || ""}
               onChange={(e) => onChange({ ...current, version: e.target.value })}
-              style={monoInput}
+              style={{ ...monoInput, width: 120, maxWidth: "100%" }}
               placeholder="v3"
             />
           </div>

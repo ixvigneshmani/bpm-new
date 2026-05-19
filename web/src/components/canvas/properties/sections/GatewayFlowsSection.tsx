@@ -388,7 +388,8 @@ function FlowCard(props: {
             onChange={(e) => onLabelChange(e.target.value)}
             placeholder="optional"
             style={{
-              width: "100%", padding: "6px 10px", borderRadius: 6,
+              width: 280, maxWidth: "100%",
+              padding: "6px 10px", borderRadius: 6,
               border: "1px solid #E5E7EB", fontSize: 12, color: "#101828",
               outline: "none", fontFamily: "inherit", boxSizing: "border-box",
             }}

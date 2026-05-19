@@ -121,7 +121,7 @@ export default function BusinessRuleSection({ rule, onChange }: Props) {
               type="text"
               value={current.decisionId}
               onChange={(e) => onChange({ ...current, decisionId: e.target.value })}
-              style={monoInput}
+              style={{ ...monoInput, width: 280, maxWidth: "100%" }}
               placeholder="approve-loan-decision"
             />
           </div>
