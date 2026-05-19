@@ -334,6 +334,18 @@ body {
   background: #d0d5dd;
 }
 
+/* Read-only state — when `effectivePermissions` lacks `edit` the whole
+   palette is wrapped in <fieldset disabled>. The native disabled greying
+   only applies to form controls; our custom card / pill buttons stay
+   fully opaque, which makes them look interactive. This rule fades any
+   button-shaped control inside a disabled fieldset so the read-only
+   state is unambiguous. */
+.props-panel fieldset[disabled] button,
+.props-panel fieldset[disabled] [role="button"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* ─── Sidebar collapse ────────────────────────────────────────────── */
 
 .sidebar-fade {

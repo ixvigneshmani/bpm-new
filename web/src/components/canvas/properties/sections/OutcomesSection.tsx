@@ -133,24 +133,31 @@ function OutcomeRow(props: {
   return (
     <div style={S.row}>
       <div style={S.indexPill}>{index}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <input
-          type="text"
-          value={outcome.label}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="e.g. Approve"
-          autoFocus={!outcome.label}
+      <input
+        type="text"
+        value={outcome.label}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="e.g. Approve"
+        autoFocus={!outcome.label}
+        style={{
+          ...S.input,
+          borderColor: warning ? "#FCA5A5" : "#E5E7EB",
+        }}
+        title={warning ?? undefined}
+      />
+      {computedId && (
+        <span
           style={{
-            ...S.input,
-            borderColor: warning ? "#FCA5A5" : "#E5E7EB",
+            ...S.idChip,
+            background: warning ? "#FEF2F2" : "#F2F4F7",
+            color: warning ? "#B42318" : "#475467",
+            borderColor: warning ? "#FCA5A5" : "transparent",
           }}
-        />
-        {computedId && (
-          <div style={{ marginTop: 3, fontSize: 10, color: warning ? "#B42318" : "#98A2B3", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-            {warning ?? `id: ${computedId}`}
-          </div>
-        )}
-      </div>
+          title={warning ?? `Gateway condition: outcome == "${computedId}"`}
+        >
+          {warning ? "!" : "id:"}&nbsp;{computedId}
+        </span>
+      )}
       <button
         type="button"
         onClick={onRemove}
@@ -185,7 +192,7 @@ const S = {
     borderRadius: 8, padding: "14px 14px",
   } as React.CSSProperties,
   row: {
-    display: "flex", alignItems: "flex-start", gap: 8,
+    display: "flex", alignItems: "center", gap: 8,
     padding: "8px 10px",
     background: "#fff",
     border: "1px solid #E4E7EC",
@@ -197,13 +204,24 @@ const S = {
     display: "flex", alignItems: "center", justifyContent: "center",
     fontSize: 10, fontWeight: 700,
     flexShrink: 0,
-    marginTop: 4,
   } as React.CSSProperties,
   input: {
-    width: "100%", padding: "6px 10px", borderRadius: 6,
+    flex: 1, minWidth: 0,
+    maxWidth: 280,
+    padding: "7px 10px", borderRadius: 6,
     border: "1px solid #E5E7EB", fontSize: 12, color: "#101828",
     outline: "none", fontFamily: "inherit", background: "#fff",
     boxSizing: "border-box" as const,
+  } as React.CSSProperties,
+  idChip: {
+    display: "inline-flex", alignItems: "center",
+    padding: "3px 8px", borderRadius: 999,
+    border: "1px solid transparent",
+    fontSize: 10, fontWeight: 600,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    whiteSpace: "nowrap" as const,
+    maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis",
+    flexShrink: 0,
   } as React.CSSProperties,
   btnIcon: {
     width: 26, height: 26, borderRadius: 6,
@@ -211,7 +229,6 @@ const S = {
     cursor: "pointer", fontSize: 12, fontFamily: "inherit",
     display: "flex", alignItems: "center", justifyContent: "center",
     flexShrink: 0,
-    marginTop: 3,
     transition: "background 120ms, border-color 120ms",
   } as React.CSSProperties,
   btnGhost: {
