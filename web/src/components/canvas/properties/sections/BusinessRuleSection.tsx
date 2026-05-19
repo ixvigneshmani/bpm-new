@@ -8,6 +8,7 @@ import type {
   BusinessRuleBinding,
 } from "../../../../types/bpmn-node-data";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 
 type Props = {
   rule: BusinessRuleConfig | undefined;
@@ -96,14 +97,11 @@ export default function BusinessRuleSection({ rule, onChange }: Props) {
       {/* DMN ref */}
       {current.binding === "dmnRef" && (
         <div style={configBox}>
-          <div style={{
-            padding: "10px 12px", borderRadius: 8, fontSize: 11,
-            color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a",
-            lineHeight: 1.5,
-          }}>
-            <strong>Design-only.</strong> DMN engine ships in milestone <code style={{ fontFamily: "var(--font-mono, monospace)" }}>D2</code>.
-            You can author a reference now — it will resolve once decisions are deployable.
-          </div>
+          <DesignOnlyBanner kind="violet" milestone="D2">
+            DMN engine ships with the dedicated DMN milestone. You can
+            author a reference now — it will resolve once decision
+            registries are deployable.
+          </DesignOnlyBanner>
           <div>
             <div style={labelStyle}>Decision</div>
             <select
@@ -143,6 +141,11 @@ export default function BusinessRuleSection({ rule, onChange }: Props) {
       {/* Inline table */}
       {current.binding === "inlineTable" && (
         <div style={configBox}>
+          <DesignOnlyBanner kind="violet" milestone="D2">
+            Inline decision tables ship with the DMN milestone. The table
+            builder isn't enabled yet — link is captured for the
+            future-resolved table id.
+          </DesignOnlyBanner>
           <div style={{
             padding: "12px 14px", borderRadius: 10,
             border: "1px dashed #e5e7eb", background: "#fff",

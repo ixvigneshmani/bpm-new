@@ -4,9 +4,12 @@
  *  - ordering: Parallel | Sequential (ad-hoc)
  *  - method: transaction protocol (transaction)
  *  - triggeredByEvent indicator (event subprocess — read-only, structural)
+ *
+ * Refactored Session 2: dropped Tailwind for shared inline-style tokens.
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { TransactionMethod } from "../../../../types/bpmn-node-data";
+import { hintStyle, inputStyle, labelStyle, sectionStack } from "../styles";
 
 type SubprocessVariant = "subProcess" | "eventSubProcess" | "transaction" | "adHocSubProcess";
 
@@ -24,32 +27,44 @@ export default function SubprocessConfigSection(props: SubprocessConfigProps) {
   const { variant, isExpanded, onIsExpandedChange } = props;
 
   return (
-    <div className="space-y-3">
-      <label className="flex items-start gap-2 text-[12px] text-gray-700">
+    <div style={sectionStack}>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 10,
+          cursor: "pointer",
+          padding: "10px 12px",
+          borderRadius: 10,
+          border: "1px solid #e5e7eb",
+          background: "#fff",
+        }}
+      >
         <input
           type="checkbox"
           checked={isExpanded}
           onChange={(e) => onIsExpandedChange(e.target.checked)}
-          className="mt-0.5"
+          style={{ marginTop: 2, width: 16, height: 16, cursor: "pointer" }}
         />
-        <span>
-          <span className="font-medium">Expanded</span>
-          <span className="block text-[10px] text-gray-500">
-            When checked, the shape renders as a resizable frame and its children are visible.
-            Uncheck to collapse to a task-sized box with a <code>+</code> marker.
-          </span>
-        </span>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#344054" }}>Expanded</div>
+          <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 2, lineHeight: 1.5 }}>
+            When checked, the shape renders as a resizable frame and its
+            children are visible. Uncheck to collapse to a task-sized box
+            with a <code style={{ fontFamily: "var(--font-mono, monospace)" }}>+</code> marker.
+          </div>
+        </div>
       </label>
 
       {variant === "adHocSubProcess" && props.onOrderingChange && (
         <div>
-          <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-            Ordering
-          </label>
+          <div style={labelStyle}>Ordering</div>
           <select
             value={props.ordering || "Parallel"}
-            onChange={(e) => props.onOrderingChange!(e.target.value as "Parallel" | "Sequential")}
-            className="w-full rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-700 outline-none focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+            onChange={(e) =>
+              props.onOrderingChange!(e.target.value as "Parallel" | "Sequential")
+            }
+            style={{ ...inputStyle, cursor: "pointer" }}
           >
             <option value="Parallel">Parallel — activities may run concurrently</option>
             <option value="Sequential">Sequential — one activity at a time</option>
@@ -59,30 +74,43 @@ export default function SubprocessConfigSection(props: SubprocessConfigProps) {
 
       {variant === "transaction" && props.onMethodChange && (
         <div>
-          <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-            Transaction Protocol
-          </label>
+          <div style={labelStyle}>Transaction Protocol</div>
           <select
             value={props.method || ""}
-            onChange={(e) => props.onMethodChange!((e.target.value || undefined) as TransactionMethod | undefined)}
-            className="w-full rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-700 outline-none focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+            onChange={(e) =>
+              props.onMethodChange!(
+                (e.target.value || undefined) as TransactionMethod | undefined,
+              )
+            }
+            style={{ ...inputStyle, cursor: "pointer" }}
           >
             <option value="">— Unspecified —</option>
             <option value="##Compensate">##Compensate</option>
             <option value="##Store">##Store</option>
             <option value="##Image">##Image</option>
           </select>
-          <div className="mt-1 text-[10px] text-gray-500">
+          <div style={hintStyle}>
             Rarely tuned by modelers — round-trips for interop with engines that use it.
           </div>
         </div>
       )}
 
       {variant === "eventSubProcess" && (
-        <div className="rounded-md border border-violet-100 bg-violet-50/40 px-3 py-2 text-[11px] text-violet-900">
-          <span className="font-medium">Triggered by event.</span> This subprocess starts when its
-          inner start event fires (no incoming sequence flow). Place an event-typed start event
-          (timer, message, signal, error, escalation, compensation, conditional) inside it.
+        <div
+          style={{
+            padding: "10px 12px",
+            borderRadius: 10,
+            background: "#f5f3ff",
+            border: "1px solid #ddd6fe",
+            fontSize: 11.5,
+            color: "#5b21b6",
+            lineHeight: 1.55,
+          }}
+        >
+          <strong>Triggered by event.</strong> This subprocess starts when its
+          inner start event fires (no incoming sequence flow). Place an
+          event-typed start event (timer, message, signal, error, escalation,
+          compensation, conditional) inside it.
         </div>
       )}
     </div>

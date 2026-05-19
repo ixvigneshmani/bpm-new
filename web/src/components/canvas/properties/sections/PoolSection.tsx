@@ -1,6 +1,11 @@
 /* ─── PoolSection ────────────────────────────────────────────────────
  * Pool (bpmn:Participant) properties: participant name, orientation.
+ *
+ * Refactored Session 2: dropped Tailwind in favour of the shared
+ * inline-style tokens.
  * ──────────────────────────────────────────────────────────────────── */
+
+import { hintStyle, inputStyle, labelStyle, sectionStack } from "../styles";
 
 export type PoolSectionProps = {
   participantName: string;
@@ -11,37 +16,51 @@ export type PoolSectionProps = {
 
 export default function PoolSection(props: PoolSectionProps) {
   return (
-    <div className="space-y-3">
+    <div style={sectionStack}>
       <div>
-        <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-          Participant Name
-        </label>
+        <div style={labelStyle}>Participant Name</div>
         <input
           type="text"
           value={props.participantName}
           onChange={(e) => props.onParticipantNameChange(e.target.value)}
-          className="w-full rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-700 outline-none focus:border-brand-400 focus:ring-1 focus:ring-brand-50"
+          style={inputStyle}
           placeholder="e.g. Customer"
         />
-        <div className="mt-1 text-[10px] text-gray-500">
-          Written to <code>bpmn:Participant@name</code>. Shown on the pool's left band.
+        <div style={hintStyle}>
+          Written to <code style={{ fontFamily: "var(--font-mono, monospace)" }}>bpmn:Participant@name</code>.
+          Shown on the pool's left band.
         </div>
       </div>
 
-      <label className="flex items-start gap-2 text-[12px] text-gray-700">
+      <label
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 10,
+          cursor: "pointer",
+          padding: "10px 12px",
+          borderRadius: 10,
+          border: "1px solid #e5e7eb",
+          background: "#fff",
+        }}
+      >
         <input
           type="checkbox"
           checked={props.isHorizontal}
           onChange={(e) => props.onIsHorizontalChange(e.target.checked)}
-          className="mt-0.5"
+          style={{ marginTop: 2, width: 16, height: 16, cursor: "pointer" }}
         />
-        <span>
-          <span className="font-medium">Horizontal orientation</span>
-          <span className="block text-[10px] text-gray-500">
-            Lanes stack vertically inside the pool. Vertical pools aren't rendered yet — toggle
-            only affects the BPMN DI <code>isHorizontal</code> attribute on export.
-          </span>
-        </span>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#344054" }}>
+            Horizontal orientation
+          </div>
+          <div style={{ fontSize: 11, color: "#98a2b3", marginTop: 2, lineHeight: 1.5 }}>
+            Lanes stack vertically inside the pool. Vertical pools aren't
+            rendered yet — toggle only affects the BPMN DI{" "}
+            <code style={{ fontFamily: "var(--font-mono, monospace)" }}>isHorizontal</code>{" "}
+            attribute on export.
+          </div>
+        </div>
       </label>
     </div>
   );

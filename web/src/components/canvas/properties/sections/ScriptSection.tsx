@@ -5,6 +5,7 @@
 
 import type { ScriptConfig, ScriptLanguage } from "../../../../types/bpmn-node-data";
 import AiAssistButton from "../fields/AiAssistButton";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 
 type Props = {
   script: ScriptConfig | undefined;
@@ -50,7 +51,13 @@ export default function ScriptSection({ script, onChange }: Props) {
   const cfg: ScriptConfig = script || { language: "feel", script: "" };
 
   return (
-    <div style={configBox}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <DesignOnlyBanner milestone="E8">
+        Script bodies persist with the canvas; the engine doesn't yet
+        execute inline scripts. Use an external worker for production
+        logic until the script-execution sandbox ships.
+      </DesignOnlyBanner>
+      <div style={configBox}>
       {/* Language selector */}
       <div>
         <div style={labelStyle}>Language</div>
@@ -109,6 +116,7 @@ export default function ScriptSection({ script, onChange }: Props) {
         <div style={{ marginTop: 4, fontSize: 10, color: "#98a2b3" }}>
           Script return value is written to this variable. Leave empty to discard.
         </div>
+      </div>
       </div>
     </div>
   );

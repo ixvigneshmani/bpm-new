@@ -9,6 +9,7 @@ import type {
   CompensationMarker,
 } from "../../../../types/bpmn-node-data";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 
 type Props = {
   loopMarker: LoopMarker | undefined;
@@ -71,6 +72,12 @@ export default function MultiInstanceSection({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <DesignOnlyBanner milestone="E8">
+        Loop and multi-instance markers persist with the canvas; the
+        engine still treats every activity as a single execution.
+        Token-multiplication semantics ship with the event-semantics
+        milestone.
+      </DesignOnlyBanner>
       {/* Marker kind selector */}
       <div>
         <div style={labelStyle}>Execution Mode</div>

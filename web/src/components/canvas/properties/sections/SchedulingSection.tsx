@@ -19,6 +19,7 @@
 import { useState } from "react";
 import type { SchedulingConfig, SlaConfig } from "../../../../types/bpmn-node-data";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 import {
   configBox,
   formatIsoDuration,
@@ -201,29 +202,15 @@ export default function SchedulingSection({
             style={{ width: 16, height: 16, cursor: "pointer" }}
           />
           <span>Set an SLA on this task</span>
-          <span
-            style={{
-              marginLeft: "auto",
-              padding: "2px 8px",
-              borderRadius: 999,
-              background: "#fffbeb",
-              border: "1px solid #fde68a",
-              color: "#92400e",
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: "0.04em",
-            }}
-          >
-            DESIGN-ONLY · E8
-          </span>
         </label>
 
         {slaEnabled && (
           <div style={configBox}>
-            <div style={{ ...hintStyle, marginTop: 0, color: "#667085" }}>
-              SLA fields persist with the canvas; the engine's enforcement
-              behaviour ships with milestone E8 (event semantics).
-            </div>
+            <DesignOnlyBanner milestone="E8">
+              SLA fields persist with the canvas; the engine doesn't yet
+              enforce reaction time, completion deadline, or breach action.
+              Behaviour ships with the event-semantics milestone.
+            </DesignOnlyBanner>
 
             <div style={twoColumnGrid}>
               <div>
