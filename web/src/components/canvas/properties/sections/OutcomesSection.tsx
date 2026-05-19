@@ -145,20 +145,18 @@ function OutcomeRow(props: {
         }}
         title={warning ?? undefined}
       />
-      {computedId && (
-        <span
-          style={{
-            ...S.idChip,
-            marginLeft: "auto",
-            background: warning ? "#FEF2F2" : "#F2F4F7",
-            color: warning ? "#B42318" : "#475467",
-            borderColor: warning ? "#FCA5A5" : "transparent",
-          }}
-          title={warning ?? `Gateway condition: outcome == "${computedId}"`}
-        >
-          {warning ? "!" : "id:"}&nbsp;{computedId}
-        </span>
-      )}
+      <span
+        style={{
+          ...S.idChip,
+          background: warning ? "#FEF2F2" : "#F2F4F7",
+          color: warning ? "#B42318" : "#475467",
+          borderColor: warning ? "#FCA5A5" : "transparent",
+          visibility: computedId ? "visible" : "hidden",
+        }}
+        title={warning ?? `Gateway condition: outcome == "${computedId}"`}
+      >
+        {warning ? "!" : "id:"}&nbsp;{computedId || "—"}
+      </span>
       <button
         type="button"
         onClick={onRemove}
@@ -193,7 +191,10 @@ const S = {
     borderRadius: 8, padding: "14px 14px",
   } as React.CSSProperties,
   row: {
-    display: "flex", alignItems: "center", gap: 8,
+    display: "grid",
+    gridTemplateColumns: "22px 1fr 160px 26px",
+    alignItems: "center",
+    gap: 8,
     padding: "8px 10px",
     background: "#fff",
     border: "1px solid #E4E7EC",
@@ -214,14 +215,14 @@ const S = {
     boxSizing: "border-box" as const,
   } as React.CSSProperties,
   idChip: {
-    display: "inline-flex", alignItems: "center",
-    padding: "3px 8px", borderRadius: 999,
+    display: "inline-flex", alignItems: "center", justifyContent: "flex-start",
+    padding: "3px 10px", borderRadius: 999,
     border: "1px solid transparent",
     fontSize: 10, fontWeight: 600,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
     whiteSpace: "nowrap" as const,
-    maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis",
-    flexShrink: 0,
+    overflow: "hidden", textOverflow: "ellipsis",
+    width: "100%", boxSizing: "border-box",
   } as React.CSSProperties,
   btnIcon: {
     width: 26, height: 26, borderRadius: 6,
