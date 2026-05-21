@@ -11,6 +11,7 @@ import type {
 import FeelExpressionInput from "../fields/FeelExpressionInput";
 import MappingTable from "../fields/MappingTable";
 import DesignOnlyBanner from "../banners/DesignOnlyBanner";
+import { configBox, inputStyle, labelStyle } from "../styles";
 
 type Props = {
   mode: "send" | "receive";
@@ -18,23 +19,6 @@ type Props = {
   onChange: (c: SendMessageConfig | ReceiveMessageConfig) => void;
   instantiate?: boolean;
   onInstantiateChange?: (v: boolean) => void;
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "#98a2b3", marginBottom: 8,
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "10px 14px", borderRadius: 10,
-  border: "1px solid #e5e7eb", fontSize: 13, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
-  lineHeight: "1.5",
-};
-
-const configBox: React.CSSProperties = {
-  border: "1px solid #f2f4f7", borderRadius: 12, background: "#f9fafb",
-  padding: 16, display: "flex", flexDirection: "column", gap: 12,
 };
 
 export default function MessageSection({

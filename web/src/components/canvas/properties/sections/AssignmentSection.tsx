@@ -7,6 +7,7 @@ import type { Assignment, AssignmentType } from "../../../../types/bpmn-node-dat
 import { apiGet } from "../../../../lib/api";
 import useCanvasStore from "../../../../store/canvas-store";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
+import { inputStyle, labelStyle } from "../styles";
 
 type Props = {
   assignment: Assignment | undefined;
@@ -15,18 +16,6 @@ type Props = {
 
 type RoleRow = { id: string; key: string; label: string };
 type UserRow = { id: string; email: string; displayName: string; isActive: boolean };
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "#98a2b3", marginBottom: 8,
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "10px 14px", borderRadius: 10,
-  border: "1px solid #e5e7eb", fontSize: 13, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
-  lineHeight: "1.5",
-};
 
 const ASSIGNMENT_TYPES: { type: AssignmentType; label: string; desc: string; icon: string }[] = [
   { type: "directUser", label: "Direct User", desc: "Assign to a specific person", icon: "👤" },

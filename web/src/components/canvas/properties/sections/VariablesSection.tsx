@@ -7,6 +7,7 @@ import { useState } from "react";
 import type { VariableMapping, KeyValuePair } from "../../../../types/bpmn-node-data";
 import MappingTable from "../fields/MappingTable";
 import { useVariableRegistry, TYPE_COLORS, TYPE_ICONS, type VariableNode as VarNode } from "../../../../store/variable-registry";
+import { inputStyle } from "../styles";
 
 type Props = {
   inputMappings: VariableMapping[];
@@ -15,12 +16,6 @@ type Props = {
   onInputMappingsChange: (m: VariableMapping[]) => void;
   onOutputMappingsChange: (m: VariableMapping[]) => void;
   onExtensionPropertiesChange: (p: KeyValuePair[]) => void;
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "8px 12px", borderRadius: 8,
-  border: "1px solid #e5e7eb", fontSize: 12, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
 };
 
 export default function VariablesSection({

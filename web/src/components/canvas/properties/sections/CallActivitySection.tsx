@@ -12,6 +12,7 @@ import type {
 import { apiGet } from "../../../../lib/api";
 import useCanvasStore from "../../../../store/canvas-store";
 import MappingTable from "../fields/MappingTable";
+import { configBox, inputStyle, labelStyle, monoInput } from "../styles";
 
 type Props = {
   call: CallActivityConfig | undefined;
@@ -26,27 +27,6 @@ type ProcessRow = {
 };
 
 let processesCache: ProcessRow[] | null = null;
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "#98a2b3", marginBottom: 8,
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "10px 14px", borderRadius: 10,
-  border: "1px solid #e5e7eb", fontSize: 13, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
-  lineHeight: "1.5",
-};
-
-const monoInput: React.CSSProperties = {
-  ...inputStyle, fontFamily: "var(--font-mono, monospace)", fontSize: 12,
-};
-
-const configBox: React.CSSProperties = {
-  border: "1px solid #f2f4f7", borderRadius: 12, background: "#f9fafb",
-  padding: 16, display: "flex", flexDirection: "column", gap: 12,
-};
 
 const BINDINGS: { value: CallActivityBinding; label: string; desc: string }[] = [
   { value: "latest", label: "Latest", desc: "Always call the latest deployed version" },

@@ -4,22 +4,18 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import AiAssistButton from "../fields/AiAssistButton";
+import { inputStyle, labelStyle } from "../styles";
 
 type Props = {
   instructions: string | undefined;
   onChange: (value: string) => void;
 };
 
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "#98a2b3", marginBottom: 8,
-};
-
 const textareaStyle: React.CSSProperties = {
-  width: "100%", padding: "10px 14px", borderRadius: 10,
-  border: "1px solid #e5e7eb", fontSize: 13, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
-  lineHeight: "1.6", resize: "vertical", minHeight: 120,
+  ...inputStyle,
+  lineHeight: "1.6",
+  resize: "vertical",
+  minHeight: 120,
 };
 
 export default function ManualInstructionsSection({ instructions, onChange }: Props) {

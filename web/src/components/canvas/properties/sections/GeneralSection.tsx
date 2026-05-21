@@ -5,19 +5,7 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import { NODE_THEMES } from "../../../../types/bpmn-node-data";
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "#98a2b3", marginBottom: 8,
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "10px 14px", borderRadius: 10,
-  border: "1px solid #e5e7eb", fontSize: 13, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
-  transition: "border-color 0.15s, box-shadow 0.15s",
-  lineHeight: "1.5",
-};
+import { inputStyle, labelStyle } from "../styles";
 
 type Props = {
   nodeId: string;

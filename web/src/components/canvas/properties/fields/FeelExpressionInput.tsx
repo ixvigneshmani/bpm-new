@@ -34,10 +34,15 @@ const baseInput: React.CSSProperties = {
 };
 
 export default function FeelExpressionInput({
-  value, onChange, placeholder = "= expression",
+  value: rawValue, onChange, placeholder = "= expression",
   label, error, showAiAssist = true, multiline = false,
   mode = "condition",
 }: Props) {
+  // Defensive: callers can pass `undefined` (e.g. a freshly-added
+  // timer boundary's `definition.value`). Normalize to "" so downstream
+  // `.split` / parser calls don't NPE on first render before the user
+  // has typed anything.
+  const value = rawValue ?? "";
   const [focused, setFocused] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);

@@ -6,26 +6,11 @@
 import type { ScriptConfig, ScriptLanguage } from "../../../../types/bpmn-node-data";
 import AiAssistButton from "../fields/AiAssistButton";
 import DesignOnlyBanner from "../banners/DesignOnlyBanner";
+import { labelStyle, monoInput } from "../styles";
 
 type Props = {
   script: ScriptConfig | undefined;
   onChange: (script: ScriptConfig) => void;
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-  letterSpacing: "0.05em", color: "#98a2b3", marginBottom: 8,
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%", padding: "10px 14px", borderRadius: 10,
-  border: "1px solid #e5e7eb", fontSize: 13, color: "#111827",
-  fontFamily: "inherit", outline: "none", background: "#fff",
-  lineHeight: "1.5",
-};
-
-const monoInput: React.CSSProperties = {
-  ...inputStyle, fontFamily: "var(--font-mono, monospace)", fontSize: 12,
 };
 
 const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
