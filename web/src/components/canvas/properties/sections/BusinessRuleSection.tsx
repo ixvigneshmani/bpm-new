@@ -157,6 +157,11 @@ export default function BusinessRuleSection({ rule, onChange }: Props) {
       {/* Expression */}
       {current.binding === "expression" && (
         <div style={configBox}>
+          <DesignOnlyBanner milestone="E8">
+            Engine today doesn't evaluate this expression — the token
+            hops straight past the task. FEEL expression evaluation +
+            result-variable write ship in P5 of the engine sprint.
+          </DesignOnlyBanner>
           <FeelExpressionInput
             label="Decision Expression"
             value={current.expression}

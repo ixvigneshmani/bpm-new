@@ -27,6 +27,7 @@
 import { useMemo } from "react";
 import type { Edge, Node } from "@xyflow/react";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 import { NODE_THEMES } from "../../../../types/bpmn-node-data";
 import type { Outcome } from "../../../../types/bpmn-node-data";
 import { EVENT_BASED_VALID_TARGETS } from "../../../../lib/bpmn/capabilities";
@@ -119,8 +120,23 @@ export default function GatewayFlowsSection(props: Props) {
     }
   };
 
+  // P0: engine today only branches on `exclusiveGateway`. Parallel,
+  // inclusive, and event-based gateways silently take the first outgoing
+  // edge — parity ships in P1 (parallel/inclusive) and P3+P6 (eventBased).
+  const runtimeNote =
+    kind === "parallel"
+      ? "Engine today takes only the first outgoing edge. Parallel split/join executes in P1 of the engine sprint."
+      : kind === "inclusive"
+      ? "Engine today takes only the first outgoing edge. Inclusive split/join executes in P1 of the engine sprint."
+      : kind === "eventBased"
+      ? "Engine today doesn't race events on this gateway — the first outgoing edge wins. Event-based dispatch ships in P3."
+      : null;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {runtimeNote && (
+        <DesignOnlyBanner milestone="E8">{runtimeNote}</DesignOnlyBanner>
+      )}
       {/* Kind banner */}
       <div
         style={{

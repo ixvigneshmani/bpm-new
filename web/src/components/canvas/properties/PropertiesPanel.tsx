@@ -62,6 +62,7 @@ import CallActivitySection from "./sections/CallActivitySection";
 import MultiInstanceSection from "./sections/MultiInstanceSection";
 import SubprocessConfigSection from "./sections/SubprocessConfigSection";
 import PoolSection from "./sections/PoolSection";
+import DesignOnlyBanner from "./banners/DesignOnlyBanner";
 
 /** BPMN types that support activity markers (loop / multi-instance / compensation).
  *  Subprocess variants are valid boundary-event hosts per BPMN 2.0 §10.5.5 and
@@ -208,6 +209,13 @@ export default function PropertiesPanel() {
       defaultOpen: true,
       content: (
         <div style={sectionStack}>
+          <DesignOnlyBanner milestone="E8">
+            Engine today doesn't register boundary-event subscriptions —
+            the host activity will never be interrupted or forked by this
+            event. Boundary execution (timer + message + error + escalation
+            + signal + cancel + compensation) ships in P2/P3/P4/P6 of the
+            engine sprint depending on event kind.
+          </DesignOnlyBanner>
           <div>
             <div style={labelStyle}>Attached to activity</div>
             <select

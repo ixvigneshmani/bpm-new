@@ -1046,6 +1046,12 @@ export const instanceTokens = pgTable(
      *  assignedTo set at entry-time, but both can be non-null after
      *  claim (role gate + specific claimant). */
     candidateRole: varchar("CANDIDATE_ROLE", { length: 64 }),
+    /** P0 task scheduling — only meaningful for tokens waiting on a
+     *  userTask. Set by the engine on entry from the node's
+     *  `data.scheduling`; null when no scheduling is configured. Surfaced
+     *  in listTasks so the inbox can sort by due/priority. */
+    dueAt: timestamp("DUE_AT", { withTimezone: true }),
+    priority: integer("PRIORITY"),
     errorMessage: text("ERROR_MESSAGE"),
     // Optimistic-locking guard. Every UPDATE bumps `version`; the
     // interpreter's update statement asserts the prior version in the

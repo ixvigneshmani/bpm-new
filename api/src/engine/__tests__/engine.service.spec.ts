@@ -18,6 +18,7 @@ import {
   pickNextEdge,
   projectCanvas,
   resolveDirectUserAssignee,
+  resolveTaskScheduling,
   type EngineCanvas,
   type EngineNode,
 } from "../engine.service";
@@ -1983,5 +1984,156 @@ describe("EngineService.completeTask", () => {
     });
     expect(out.instanceStatus).toBe("running");
     expect(out.tokenStatus).toBe("waiting");
+  });
+
+  // ─── P0: outcome list validation ──────────────────────────────────
+  describe("outcome list validation", () => {
+    const outcomesCanvas = {
+      nodes: [
+        { id: "s", type: "startEvent" },
+        {
+          id: "t",
+          type: "userTask",
+          data: {
+            outcomes: [
+              { id: "approve", label: "Approve" },
+              { id: "reject", label: "Reject" },
+            ],
+          },
+        },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "t" },
+        { id: "e2", source: "t", target: "e" },
+      ],
+    };
+
+    it("accepts a submitted outcome that matches a declared id", async () => {
+      const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: outcomesCanvas });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_A,
+        formData: { outcome: "approve" },
+      });
+      expect(out.instanceStatus).toBe("completed");
+    });
+
+    it("accepts an outcome matching a declared label", async () => {
+      const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: outcomesCanvas });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_A,
+        formData: { outcome: "Reject" },
+      });
+      expect(out.instanceStatus).toBe("completed");
+    });
+
+    it("rejects completion without an outcome when outcomes are declared", async () => {
+      const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: outcomesCanvas });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      await expect(
+        service.completeTask({
+          tokenId: "tok-waiting",
+          tenantId: "tenant-1",
+          userId: UUID_A,
+          formData: { approval: "yes" },
+        }),
+      ).rejects.toThrow(/declared outcomes/);
+    });
+
+    it("rejects an outcome that is not in the declared list", async () => {
+      const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: outcomesCanvas });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      await expect(
+        service.completeTask({
+          tokenId: "tok-waiting",
+          tenantId: "tenant-1",
+          userId: UUID_A,
+          formData: { outcome: "delegate" },
+        }),
+      ).rejects.toThrow(/not declared/);
+    });
+
+    it("skips validation when the task declares no outcomes", async () => {
+      const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: happyCanvas });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.completeTask({
+        tokenId: "tok-waiting",
+        tenantId: "tenant-1",
+        userId: UUID_A,
+        formData: { outcome: "anything-goes" },
+      });
+      expect(out.instanceStatus).toBe("completed");
+    });
+  });
+});
+
+// ─── P0: task scheduling resolver ────────────────────────────────────
+
+describe("resolveTaskScheduling", () => {
+  const node = (scheduling?: Record<string, unknown>): EngineNode => ({
+    id: "t",
+    type: "userTask",
+    data: scheduling ? { scheduling } : {},
+  });
+
+  it("returns nulls when no scheduling is configured", () => {
+    expect(resolveTaskScheduling(node())).toEqual({ dueAt: null, priority: null });
+    expect(resolveTaskScheduling(node({}))).toEqual({ dueAt: null, priority: null });
+  });
+
+  it("parses a static ISO datetime into dueAt", () => {
+    const { dueAt } = resolveTaskScheduling(
+      node({ dueDate: "2026-12-01T09:00:00Z" }),
+    );
+    expect(dueAt?.toISOString()).toBe("2026-12-01T09:00:00.000Z");
+  });
+
+  it("parses an ISO duration relative to the supplied clock", () => {
+    const fixed = new Date("2026-05-21T00:00:00Z");
+    const { dueAt } = resolveTaskScheduling(node({ dueDate: "PT2H" }), fixed);
+    expect(dueAt?.toISOString()).toBe("2026-05-21T02:00:00.000Z");
+  });
+
+  it("parses an ISO duration with days", () => {
+    const fixed = new Date("2026-05-21T00:00:00Z");
+    const { dueAt } = resolveTaskScheduling(node({ dueDate: "P1D" }), fixed);
+    expect(dueAt?.toISOString()).toBe("2026-05-22T00:00:00.000Z");
+  });
+
+  it("returns null dueAt for an unparseable value", () => {
+    const { dueAt } = resolveTaskScheduling(node({ dueDate: "not-a-date" }));
+    expect(dueAt).toBeNull();
+  });
+
+  it("skips dueDate when dueDateIsExpression is set (deferred to P2)", () => {
+    const { dueAt } = resolveTaskScheduling(
+      node({ dueDate: "${order.deliverBy}", dueDateIsExpression: true }),
+    );
+    expect(dueAt).toBeNull();
+  });
+
+  it("persists a numeric priority", () => {
+    expect(resolveTaskScheduling(node({ priority: 75 })).priority).toBe(75);
+  });
+
+  it("skips priority when a priorityExpression is set", () => {
+    expect(
+      resolveTaskScheduling(node({ priority: 50, priorityExpression: "${urgency}" })).priority,
+    ).toBeNull();
+  });
+
+  it("ignores a non-numeric priority", () => {
+    expect(resolveTaskScheduling(node({ priority: "high" })).priority).toBeNull();
   });
 });

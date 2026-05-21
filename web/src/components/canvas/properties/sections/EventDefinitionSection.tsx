@@ -4,6 +4,7 @@
 
 import type { EventDefinition } from "../../../../types/bpmn-node-data";
 import FeelExpressionInput from "../fields/FeelExpressionInput";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 import { configBox, inputStyle, labelStyle } from "../styles";
 
 /** Which event shape is hosting this section. Drives which definition
@@ -119,8 +120,27 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     );
   };
 
+  // P0: engine today only handles plain (`none`) start/end events.
+  // Every other event kind — timer, message, signal, error, escalation,
+  // compensation, conditional, terminate, cancel, link — silently
+  // no-ops at runtime. Surfaces matching phases:
+  //   timer / boundary timer .................. P2
+  //   message / signal / start-trigger ........ P3
+  //   intermediate catch + throw .............. P3
+  //   error / escalation / cancel ............. P4
+  //   compensation ............................ P6
+  //   terminate ............................... P4 (end-event semantics)
+  const showRuntimeBanner = definition.kind !== "none" && definition.kind !== "terminate";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {showRuntimeBanner && (
+        <DesignOnlyBanner milestone="E8">
+          Engine today doesn't react to this event — the token treats this
+          node as a pass-through. Event subscription + correlation ships in
+          P2–P4 of the engine sprint depending on event kind.
+        </DesignOnlyBanner>
+      )}
       {/* Definition type selector */}
       <div>
         <div style={labelStyle}>Event Type</div>

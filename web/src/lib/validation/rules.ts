@@ -814,6 +814,191 @@ const feelExpressionRule: ValidationRule = {
   },
 };
 
+/** P0 — silent-no-op runtime gaps. Every BPMN element below is captured
+ *  + validated + persisted by the Designer, but the engine today either
+ *  pass-throughs or fails to dispatch. Flag at design time so authors
+ *  don't ship a process that quietly does the wrong thing. Each gap
+ *  retires as its phase of the engine sprint ships (P1–P7). */
+
+const gatewayRuntimeRule = (
+  ruleId: string,
+  bpmnType: string,
+  phaseHint: string,
+): ValidationRule => ({
+  id: ruleId,
+  name: `${bpmnType} runtime`,
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== bpmnType) continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `${ruleId}:${n.id}`,
+        severity: "warning",
+        ruleId,
+        nodeId: n.id,
+        message: `${bpmnType} "${label}" — engine today takes only the first outgoing edge. ${phaseHint}`,
+      });
+    }
+    return issues;
+  },
+});
+
+const parallelGatewayRuntimeRule = gatewayRuntimeRule(
+  "parallel-gateway-runtime",
+  "parallelGateway",
+  "Parallel split/join executes in P1 of the engine sprint.",
+);
+
+const inclusiveGatewayRuntimeRule = gatewayRuntimeRule(
+  "inclusive-gateway-runtime",
+  "inclusiveGateway",
+  "Inclusive split/join executes in P1 of the engine sprint.",
+);
+
+const eventBasedGatewayRuntimeRule = gatewayRuntimeRule(
+  "event-based-gateway-runtime",
+  "eventBasedGateway",
+  "Event-based dispatch executes in P3+P6 of the engine sprint.",
+);
+
+const SUBPROCESS_VARIANTS = new Set([
+  "subProcess", "eventSubProcess", "transaction", "adHocSubProcess",
+]);
+
+const subprocessRuntimeRule: ValidationRule = {
+  id: "subprocess-runtime",
+  name: "Subprocess runtime",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (!SUBPROCESS_VARIANTS.has(n.type ?? "")) continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `subprocess-runtime:${n.id}`,
+        severity: "warning",
+        ruleId: "subprocess-runtime",
+        nodeId: n.id,
+        message: `Subprocess "${label}" — engine doesn't execute children today. Tokens hop past without entering the subprocess. Subprocess execution ships in P2 of the engine sprint.`,
+      });
+    }
+    return issues;
+  },
+};
+
+const businessRuleExpressionRuntimeRule: ValidationRule = {
+  id: "business-rule-expression-runtime",
+  name: "Business rule expression runtime",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "businessRuleTask") continue;
+      const d = n.data as Record<string, unknown> | undefined;
+      const rule = d?.rule as { binding?: string } | undefined;
+      if (rule?.binding !== "expression") continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `business-rule-expression-runtime:${n.id}`,
+        severity: "warning",
+        ruleId: "business-rule-expression-runtime",
+        nodeId: n.id,
+        message: `Business rule task "${label}" — engine doesn't evaluate FEEL expressions today. Tokens hop past without setting the result variable. Expression evaluation ships in P5 of the engine sprint.`,
+      });
+    }
+    return issues;
+  },
+};
+
+const EVENT_HOST_TYPES = new Set([
+  "startEvent", "endEvent", "intermediateCatchEvent",
+  "intermediateThrowEvent", "boundaryEvent",
+]);
+
+const eventDefinitionRuntimeRule: ValidationRule = {
+  id: "event-definition-runtime",
+  name: "Event definition runtime",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (!EVENT_HOST_TYPES.has(n.type ?? "")) continue;
+      const d = n.data as Record<string, unknown> | undefined;
+      const def = d?.eventDefinition as { kind?: string } | undefined;
+      const kind = def?.kind;
+      if (!kind || kind === "none") continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `event-definition-runtime:${n.id}`,
+        severity: "warning",
+        ruleId: "event-definition-runtime",
+        nodeId: n.id,
+        message: `${n.type} "${label}" carries a "${kind}" trigger but the engine doesn't subscribe to events today. Event subscription + correlation ships in P2–P4/P6 of the engine sprint (kind-dependent).`,
+      });
+    }
+    return issues;
+  },
+};
+
+const boundaryEventRuntimeRule: ValidationRule = {
+  id: "boundary-event-runtime",
+  name: "Boundary event runtime",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (n.type !== "boundaryEvent") continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `boundary-event-runtime:${n.id}`,
+        severity: "warning",
+        ruleId: "boundary-event-runtime",
+        nodeId: n.id,
+        message: `Boundary event "${label}" — engine doesn't register boundary subscriptions today. The host activity will never be interrupted or forked. Boundary execution ships in P2/P3/P4/P6 of the engine sprint.`,
+      });
+    }
+    return issues;
+  },
+};
+
+const SCHEDULING_HOST_TYPES = new Set([
+  "userTask", "serviceTask", "scriptTask", "sendTask", "receiveTask",
+  "manualTask", "businessRuleTask",
+]);
+
+const schedulingRuntimeRule: ValidationRule = {
+  id: "scheduling-runtime",
+  name: "Scheduling expression runtime",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const n of nodes) {
+      if (!SCHEDULING_HOST_TYPES.has(n.type ?? "")) continue;
+      const d = n.data as Record<string, unknown> | undefined;
+      const s = d?.scheduling as
+        | {
+            dueDate?: string;
+            dueDateIsExpression?: boolean;
+            followUpDate?: string;
+            followUpDateIsExpression?: boolean;
+            priorityExpression?: unknown;
+          }
+        | undefined;
+      if (!s) continue;
+      const usesExpression =
+        !!(s.dueDateIsExpression && s.dueDate) ||
+        !!(s.followUpDateIsExpression && s.followUpDate) ||
+        !!s.priorityExpression;
+      if (!usesExpression) continue;
+      const label = labelOf(n as { id: string; data: Record<string, unknown> });
+      issues.push({
+        id: `scheduling-runtime:${n.id}`,
+        severity: "info",
+        ruleId: "scheduling-runtime",
+        nodeId: n.id,
+        message: `${n.type} "${label}" uses FEEL expressions for scheduling — engine today only persists static due dates + priorities. Expression evaluation ships with the scheduler in P2.`,
+      });
+    }
+    return issues;
+  },
+};
+
 export const DEFAULT_RULES: ValidationRule[] = [
   noStartEventRule,
   noEndEventRule,
@@ -833,5 +1018,13 @@ export const DEFAULT_RULES: ValidationRule[] = [
   serviceTaskImplRule,
   unreachableNodeRule,
   callActivityRuntimeRule,
+  parallelGatewayRuntimeRule,
+  inclusiveGatewayRuntimeRule,
+  eventBasedGatewayRuntimeRule,
+  subprocessRuntimeRule,
+  businessRuleExpressionRuntimeRule,
+  eventDefinitionRuntimeRule,
+  boundaryEventRuntimeRule,
+  schedulingRuntimeRule,
   feelExpressionRule,
 ];

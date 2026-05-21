@@ -9,6 +9,7 @@
  * ──────────────────────────────────────────────────────────────────── */
 
 import type { TransactionMethod } from "../../../../types/bpmn-node-data";
+import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 import { hintStyle, inputStyle, labelStyle, sectionStack } from "../styles";
 
 type SubprocessVariant = "subProcess" | "eventSubProcess" | "transaction" | "adHocSubProcess";
@@ -23,11 +24,25 @@ export type SubprocessConfigProps = {
   onMethodChange?: (v: TransactionMethod | undefined) => void;
 };
 
+const VARIANT_RUNTIME_NOTE: Record<SubprocessVariant, string> = {
+  subProcess:
+    "Engine today doesn't execute subprocess children — a token entering this shape hops straight to the outgoing edge. Subprocess execution ships in P2 of the engine sprint.",
+  eventSubProcess:
+    "Engine today doesn't subscribe event-subprocess triggers. The subprocess won't fire on the chosen event until P2 (subprocess) + P3 (event correlation) land.",
+  transaction:
+    "Engine today doesn't execute transaction children or run compensation/cancel handlers. Full transaction semantics ship in P2 + P6 of the engine sprint.",
+  adHocSubProcess:
+    "Engine today doesn't execute ad-hoc children or honour completion conditions. Ad-hoc execution ships in P2 of the engine sprint.",
+};
+
 export default function SubprocessConfigSection(props: SubprocessConfigProps) {
   const { variant, isExpanded, onIsExpandedChange } = props;
 
   return (
     <div style={sectionStack}>
+      <DesignOnlyBanner milestone="E8">
+        {VARIANT_RUNTIME_NOTE[variant]}
+      </DesignOnlyBanner>
       <label
         style={{
           display: "flex",

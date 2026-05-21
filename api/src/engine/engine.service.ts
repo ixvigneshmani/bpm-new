@@ -556,6 +556,7 @@ export class EngineService {
               },
             });
           }
+          const { dueAt, priority } = resolveTaskScheduling(node);
           version = await this.updateTokenWithLock(
             args.tx,
             args.tokenId,
@@ -566,6 +567,8 @@ export class EngineService {
               assignedTo: assignedTo ?? null,
               candidateRole: candidateRole ?? null,
               currentNodeId: nodeId,
+              dueAt,
+              priority,
             },
           );
           await recordEvent(args.tx, {
@@ -764,6 +767,8 @@ export class EngineService {
       assignedTo?: string | null;
       candidateRole?: string | null;
       errorMessage?: string | null;
+      dueAt?: Date | null;
+      priority?: number | null;
     },
   ): Promise<number> {
     const next = expectedVersion + 1;
@@ -859,6 +864,34 @@ export class EngineService {
       // this instance started, but execution always honours the
       // versioned snapshot.
       const canvas = await this.loadCanvasForInstance(tx, instRow);
+
+      // P0 — outcome list validation. When the userTask declares
+      // outcomes, the formData must carry an `outcome` key whose value
+      // matches a declared id or label. Otherwise the routing condition
+      // `outcome == "..."` can never match and the gateway fails. Done
+      // BEFORE the task-completed audit so a rejected submission leaves
+      // no misleading trail.
+      const taskNode = canvas.nodes.find((n) => n.id === tokenRow.currentNodeId);
+      const declaredOutcomes = (taskNode?.data as { outcomes?: Array<{ id?: string; label?: string }> } | undefined)
+        ?.outcomes;
+      if (Array.isArray(declaredOutcomes) && declaredOutcomes.length > 0) {
+        const submitted = (args.formData as { outcome?: unknown } | undefined)?.outcome;
+        if (typeof submitted !== "string" || submitted.length === 0) {
+          throw new BadRequestException(
+            `Task requires one of the declared outcomes: ${declaredOutcomes
+              .map((o) => o.id || o.label)
+              .join(", ")}.`,
+          );
+        }
+        const allowed = new Set(
+          declaredOutcomes.flatMap((o) => [o.id, o.label].filter(Boolean) as string[]),
+        );
+        if (!allowed.has(submitted)) {
+          throw new BadRequestException(
+            `Outcome "${submitted}" is not declared on this task. Valid: ${[...allowed].join(", ")}.`,
+          );
+        }
+      }
 
       // 1. Audit task-completed FIRST so it acts as the user-facing
       //    anchor in any timeline replay — the variable-set rows that
@@ -1415,6 +1448,8 @@ export class EngineService {
       assignedTo: string | null;
       candidateRole: string | null;
       createdAt: string;
+      dueAt: string | null;
+      priority: number | null;
     }>
   > {
     const baseConds = [
@@ -1459,6 +1494,8 @@ export class EngineService {
         assignedTo: instanceTokens.assignedTo,
         candidateRole: instanceTokens.candidateRole,
         createdAt: instanceTokens.createdAt,
+        dueAt: instanceTokens.dueAt,
+        priority: instanceTokens.priority,
         processId: processInstances.processId,
         // Prefer the versioned canvas; fall back to the legacy inline
         // snapshot for instances created before E4.5b.
@@ -1499,6 +1536,8 @@ export class EngineService {
         assignedTo: r.assignedTo,
         candidateRole: r.candidateRole,
         createdAt: r.createdAt.toISOString(),
+        dueAt: r.dueAt ? r.dueAt.toISOString() : null,
+        priority: r.priority,
       };
     });
   }
@@ -4095,6 +4134,64 @@ export function resolveServiceTaskMaxAttempts(node: EngineNode): number | null {
     return count;
   }
   return null;
+}
+
+/** P0 — resolve a userTask node's `data.scheduling` to a concrete
+ *  due timestamp + numeric priority for the TASK row. Supports static
+ *  values only in P0: ISO 8601 datetime (`2026-05-21T10:00:00Z`) or
+ *  ISO 8601 duration relative to `now` (`PT2H`, `P1D`). FEEL expression
+ *  evaluation against the instance variable bag lands in P2 alongside
+ *  the timer scheduler. */
+const ISO_DURATION_RE =
+  /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
+
+function parseIsoDurationMs(s: string): number | null {
+  const m = ISO_DURATION_RE.exec(s.trim());
+  if (!m || s.trim() === "P" || s.trim() === "PT") return null;
+  const [, y, mo, w, d, h, mi, se] = m;
+  const days =
+    (Number(y || 0) * 365) +
+    (Number(mo || 0) * 30) +
+    (Number(w || 0) * 7) +
+    Number(d || 0);
+  const ms =
+    days * 86_400_000 +
+    Number(h || 0) * 3_600_000 +
+    Number(mi || 0) * 60_000 +
+    Number(se || 0) * 1000;
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+export function resolveTaskScheduling(
+  node: EngineNode,
+  now: Date = new Date(),
+): { dueAt: Date | null; priority: number | null } {
+  const data = node.data as Record<string, unknown> | undefined;
+  const s = data?.scheduling as
+    | {
+        dueDate?: unknown;
+        dueDateIsExpression?: unknown;
+        priority?: unknown;
+        priorityExpression?: unknown;
+      }
+    | undefined;
+  if (!s) return { dueAt: null, priority: null };
+  let dueAt: Date | null = null;
+  if (typeof s.dueDate === "string" && s.dueDate.trim().length > 0 && !s.dueDateIsExpression) {
+    const raw = s.dueDate.trim();
+    if (raw.startsWith("P")) {
+      const ms = parseIsoDurationMs(raw);
+      if (ms !== null) dueAt = new Date(now.getTime() + ms);
+    } else {
+      const t = Date.parse(raw);
+      if (!Number.isNaN(t)) dueAt = new Date(t);
+    }
+  }
+  const priority =
+    typeof s.priority === "number" && Number.isFinite(s.priority) && !s.priorityExpression
+      ? Math.trunc(s.priority)
+      : null;
+  return { dueAt, priority };
 }
 
 /** Resolve a userTask node's `data.assignment` to either a concrete
