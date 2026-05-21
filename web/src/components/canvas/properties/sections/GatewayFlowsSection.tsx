@@ -120,15 +120,10 @@ export default function GatewayFlowsSection(props: Props) {
     }
   };
 
-  // P0: engine today only branches on `exclusiveGateway`. Parallel,
-  // inclusive, and event-based gateways silently take the first outgoing
-  // edge — parity ships in P1 (parallel/inclusive) and P3+P6 (eventBased).
+  // P1 Session 3 shipped parallel + inclusive split/join end-to-end —
+  // only event-based gateways still no-op until P3.
   const runtimeNote =
-    kind === "parallel"
-      ? "Engine today takes only the first outgoing edge. Parallel split/join executes in P1 of the engine sprint."
-      : kind === "inclusive"
-      ? "Engine today takes only the first outgoing edge. Inclusive split/join executes in P1 of the engine sprint."
-      : kind === "eventBased"
+    kind === "eventBased"
       ? "Engine today doesn't race events on this gateway — the first outgoing edge wins. Event-based dispatch ships in P3."
       : null;
 

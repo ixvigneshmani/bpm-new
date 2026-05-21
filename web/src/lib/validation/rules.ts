@@ -844,17 +844,8 @@ const gatewayRuntimeRule = (
   },
 });
 
-const parallelGatewayRuntimeRule = gatewayRuntimeRule(
-  "parallel-gateway-runtime",
-  "parallelGateway",
-  "Parallel split/join executes in P1 of the engine sprint.",
-);
-
-const inclusiveGatewayRuntimeRule = gatewayRuntimeRule(
-  "inclusive-gateway-runtime",
-  "inclusiveGateway",
-  "Inclusive split/join executes in P1 of the engine sprint.",
-);
+// P1 Session 3 — parallel + inclusive gateway runtime rules retired
+// (engine ships split + join end-to-end). Event-based stays until P3.
 
 const eventBasedGatewayRuntimeRule = gatewayRuntimeRule(
   "event-based-gateway-runtime",
@@ -1018,8 +1009,6 @@ export const DEFAULT_RULES: ValidationRule[] = [
   serviceTaskImplRule,
   unreachableNodeRule,
   callActivityRuntimeRule,
-  parallelGatewayRuntimeRule,
-  inclusiveGatewayRuntimeRule,
   eventBasedGatewayRuntimeRule,
   subprocessRuntimeRule,
   businessRuleExpressionRuntimeRule,

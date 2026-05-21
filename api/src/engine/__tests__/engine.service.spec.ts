@@ -2234,6 +2234,20 @@ function makeParallelEnv(canvas: unknown) {
               if (typeof values.currentNodeId === "string") target.currentNodeId = values.currentNodeId;
               target.version = values.version;
             }
+          } else if (
+            name === "INSTANCE_TOKENS" &&
+            typeof values.version !== "number" &&
+            values.status === "completed"
+          ) {
+            // P1 Session 3 — bulk update from the JOIN-firing path
+            // marks all parked siblings completed. The fake can't read
+            // the WHERE, so it marks every `waiting` token completed.
+            // The firing token is also `waiting` at this moment, but
+            // the engine's very next UPDATE flips it back to `active`,
+            // so the over-mark is corrected immediately.
+            for (const t of tokenRows) {
+              if (t.status === "waiting") t.status = "completed";
+            }
           }
           return {
             where(_cond: unknown) {
@@ -2248,25 +2262,52 @@ function makeParallelEnv(canvas: unknown) {
         },
       };
     },
-    select(_cols?: unknown) {
+    select(cols?: Record<string, unknown>) {
       let routed: string | null = null;
+      // The JOIN parked-sibling query selects {id, version}; everything
+      // else (countLiveTokens, loadTokenForJoin) selects just {id} or
+      // {forkId, forkSize}. Use that to route the response shape.
+      const wantsVersion = !!(cols && Object.prototype.hasOwnProperty.call(cols, "version"));
       const chain = {
         from(table: unknown) {
           routed = tableName(table);
           return chain;
         },
         where(_cond: unknown) { return chain; },
-        limit() {
+        // P1 Session 3 — `.for("update")` on the PROCESS_INSTANCES lock
+        // before parking a token at a JOIN. The fake doesn't simulate
+        // actual concurrency; just return a Promise so `await` resolves.
+        for(_mode: string) {
+          return Promise.resolve([{ id: instanceRow.id }]);
+        },
+        limit(n?: number) {
           if (routed === "PROCESS_INSTANCES") return Promise.resolve([instanceRow]);
+          // loadTokenForJoin uses .limit(1) on INSTANCE_TOKENS — return
+          // the most recently inserted/updated active|waiting token.
+          // In tests, that's always the token that just arrived at the
+          // join (the engine's `args.tokenId` for this advance call).
+          if (routed === "INSTANCE_TOKENS" && (n === 1 || n === undefined)) {
+            const recent = [...tokenRows].reverse().find((t) => t.status === "active" || t.status === "waiting");
+            return Promise.resolve(recent ? [recent] : []);
+          }
           return Promise.resolve([]);
         },
         then(resolve: (v: unknown) => unknown) {
-          // countLiveTokens select uses .then (no .limit) — return
-          // tokens whose status is active|waiting.
-          if (routed === "INSTANCE_TOKENS") {
-            return resolve(tokenRows.filter((t) => t.status === "active" || t.status === "waiting"));
+          if (routed !== "INSTANCE_TOKENS") return resolve([]);
+          // JOIN parked-sibling query (select {id, version}): only
+          // tokens parked AT THE JOIN belong here. Approximate by
+          // matching the most recently UPDATED token's currentNodeId:
+          // the firing/parking sibling is the latest writer.
+          if (wantsVersion) {
+            const recent = [...tokenRows].reverse().find((t) => t.status === "waiting");
+            const joinNode = recent?.currentNodeId;
+            if (!joinNode) return resolve([]);
+            return resolve(
+              tokenRows.filter((t) => t.status === "waiting" && t.currentNodeId === joinNode),
+            );
           }
-          return resolve([]);
+          // countLiveTokens — every active|waiting token.
+          return resolve(tokenRows.filter((t) => t.status === "active" || t.status === "waiting"));
         },
       };
       return chain;
@@ -2444,5 +2485,238 @@ describe("EngineService — P1 parallel-gateway split", () => {
     expect(out.status).toBe("failed");
     const instUpdate = env.updates.find((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed");
     expect(instUpdate?.set.errorMessage).toMatch(/parallel/i);
+  });
+
+  // ─── P1 Session 3: SPLIT now stamps `forkSize` on each child ──────
+  it("split records forkSize on every spawned child (2-way)", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "pg", type: "parallelGateway" },
+        { id: "a", type: "endEvent" },
+        { id: "b", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "pg" },
+        { id: "e1", source: "pg", target: "a" },
+        { id: "e2", source: "pg", target: "b" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    const children = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS").slice(1);
+    expect(children.map((c) => c.values[0].forkSize)).toEqual([2, 2]);
+  });
+});
+
+// ─── P1 Session 3: inclusive gateway ─────────────────────────────────
+
+describe("EngineService — P1 inclusive-gateway split", () => {
+  // Three outgoing edges; conditions differ. Vars passed via startInstance.
+  const inclusiveCanvas = (variables: Record<string, unknown> = {}) => ({
+    canvas: {
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "ig", type: "inclusiveGateway", data: { defaultFlowId: "e3" } },
+        { id: "a", type: "endEvent" },
+        { id: "b", type: "endEvent" },
+        { id: "c", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "ig" },
+        { id: "e1", source: "ig", target: "a", data: { condition: "amount > 100" } },
+        { id: "e2", source: "ig", target: "b", data: { condition: "vip" } },
+        { id: "e3", source: "ig", target: "c" }, // default
+      ],
+    },
+    variables,
+  });
+
+  it("matches BOTH conditions: spawns 2 children with forkSize=2 (skip default)", async () => {
+    const { canvas } = inclusiveCanvas({ amount: 500, vip: true });
+    const env = makeParallelEnv(canvas);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({
+      processId: "p", tenantId: "t", userId: "u",
+      variables: { amount: 500, vip: true },
+    });
+    const children = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS").slice(1);
+    expect(children.length).toBe(2);
+    expect(children.map((c) => c.values[0].currentNodeId).sort()).toEqual(["a", "b"]);
+    expect(children.map((c) => c.values[0].forkSize)).toEqual([2, 2]);
+    expect(out.status).toBe("completed");
+  });
+
+  it("matches ONE condition: degenerate single-edge advance, no fork", async () => {
+    const { canvas } = inclusiveCanvas({ amount: 500, vip: false });
+    const env = makeParallelEnv(canvas);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({
+      processId: "p", tenantId: "t", userId: "u",
+      variables: { amount: 500, vip: false },
+    });
+    // Only the root token was inserted (no children).
+    expect(env.inserts.filter((i) => i.table === "INSTANCE_TOKENS").length).toBe(1);
+    expect(out.status).toBe("completed");
+  });
+
+  it("matches ZERO conditions + has default: fires default edge, no fork", async () => {
+    const { canvas } = inclusiveCanvas({ amount: 50, vip: false });
+    const env = makeParallelEnv(canvas);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({
+      processId: "p", tenantId: "t", userId: "u",
+      variables: { amount: 50, vip: false },
+    });
+    expect(env.inserts.filter((i) => i.table === "INSTANCE_TOKENS").length).toBe(1);
+    expect(out.status).toBe("completed");
+  });
+
+  it("matches ZERO conditions + NO default: fails the instance with a clear message", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "ig", type: "inclusiveGateway" }, // no defaultFlowId
+        { id: "a", type: "endEvent" },
+        { id: "b", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "ig" },
+        { id: "e1", source: "ig", target: "a", data: { condition: "amount > 1000" } },
+        { id: "e2", source: "ig", target: "b", data: { condition: "vip" } },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({
+      processId: "p", tenantId: "t", userId: "u",
+      variables: { amount: 50, vip: false },
+    });
+    expect(out.status).toBe("failed");
+    const instUpdate = env.updates.find((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed");
+    expect(instUpdate?.set.errorMessage).toMatch(/no outgoing condition matched/i);
+  });
+});
+
+// ─── P1 Session 3: parallel JOIN (diamond) ───────────────────────────
+
+describe("EngineService — P1 parallel-gateway JOIN", () => {
+  it("diamond: split → 2 branches → join → end completes the instance", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "split", type: "parallelGateway" },
+        { id: "a", type: "manualTask" },
+        { id: "b", type: "manualTask" },
+        { id: "join", type: "parallelGateway" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "split" },
+        { id: "e1", source: "split", target: "a" },
+        { id: "e2", source: "split", target: "b" },
+        { id: "e3", source: "a", target: "join" },
+        { id: "e4", source: "b", target: "join" },
+        { id: "e5", source: "join", target: "e" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect(out.status).toBe("completed");
+
+    // First arriving sibling parks at the join (token-waiting w/ join).
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0]);
+    const joinWaits = events.filter(
+      (e) => e.eventType === "token-waiting" && (e.payload as { waitingFor?: string })?.waitingFor === "join",
+    );
+    expect(joinWaits.length).toBe(1);
+
+    // The second (firing) sibling emits token-resumed via=join.
+    const joinResumes = events.filter(
+      (e) => e.eventType === "token-resumed" && (e.payload as { via?: string })?.via === "join",
+    );
+    expect(joinResumes.length).toBe(1);
+
+    // The non-firing sibling was merged: token-completed with mergedInto.
+    const merges = events.filter(
+      (e) => e.eventType === "token-completed" && (e.payload as { mergedInto?: string })?.mergedInto,
+    );
+    expect(merges.length).toBe(1);
+  });
+
+  it("3-way diamond: all 3 branches converge at the join; instance completes", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "split", type: "parallelGateway" },
+        { id: "a", type: "manualTask" },
+        { id: "b", type: "manualTask" },
+        { id: "c", type: "manualTask" },
+        { id: "join", type: "parallelGateway" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "split" },
+        { id: "e1", source: "split", target: "a" },
+        { id: "e2", source: "split", target: "b" },
+        { id: "e3", source: "split", target: "c" },
+        { id: "e4", source: "a", target: "join" },
+        { id: "e5", source: "b", target: "join" },
+        { id: "e6", source: "c", target: "join" },
+        { id: "e7", source: "join", target: "e" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect(out.status).toBe("completed");
+
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0]);
+    // First two arrivals park; third fires.
+    const joinWaits = events.filter(
+      (e) => e.eventType === "token-waiting" && (e.payload as { waitingFor?: string })?.waitingFor === "join",
+    );
+    expect(joinWaits.length).toBe(2);
+    const joinResumes = events.filter(
+      (e) => e.eventType === "token-resumed" && (e.payload as { via?: string })?.via === "join",
+    );
+    expect(joinResumes.length).toBe(1);
+  });
+
+  it("diamond with one branch suspending on userTask: instance stays running until task completes", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "split", type: "parallelGateway" },
+        { id: "u", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+        { id: "m", type: "manualTask" },
+        { id: "join", type: "parallelGateway" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "split" },
+        { id: "e1", source: "split", target: "u" },
+        { id: "e2", source: "split", target: "m" },
+        { id: "e3", source: "u", target: "join" },
+        { id: "e4", source: "m", target: "join" },
+        { id: "e5", source: "join", target: "e" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    // userTask branch is waiting, manualTask branch parked at join.
+    expect(out.status).toBe("running");
+    // No PROCESS_INSTANCES update flipped to completed.
+    expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "completed")).toBe(false);
   });
 });

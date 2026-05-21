@@ -31,7 +31,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, or } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, or } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import {
   engineJobs,
@@ -696,108 +696,261 @@ export class EngineService {
       // TODO(P1 polish): replay-from-step semantics when active siblings
       // exist are undefined; flag at the replay entrypoint.
       let next: EngineEdge | null = null;
-      if (node.type === "parallelGateway") {
+      if (node.type === "parallelGateway" || node.type === "inclusiveGateway") {
         const outgoing = args.canvas.edges.filter((e) => e.source === nodeId);
-        if (outgoing.length === 0) {
-          const message = `Parallel gateway ${nodeId} has no outgoing flow.`;
-          await this.markTokenFailed(
-            args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
-          );
-          return { tokenStatus: "failed", hops, errorMessage: message };
-        }
-        if (outgoing.length === 1) {
-          // Degenerate: 1-out parallel is just a pass-through. Take the
-          // single edge with the normal flow so we don't bother with
-          // forks. (Designer warns on this shape.)
-          next = outgoing[0];
-        } else {
-          await recordEvent(args.tx, {
-            tenantId: args.tenantId,
-            instanceId: args.instanceId,
-            tokenId: args.tokenId,
-            nodeId,
-            eventType: "node-exited",
-          });
-          // Flip the parent first so the live-token count downstream
-          // reflects "parent done, children active". One UPDATE here,
-          // then N INSERTs + N recursive advances.
-          version = await this.updateTokenWithLock(
-            args.tx,
-            args.tokenId,
-            version,
-            { status: "completed", currentNodeId: nodeId },
-          );
-          await recordEvent(args.tx, {
-            tenantId: args.tenantId,
-            instanceId: args.instanceId,
-            tokenId: args.tokenId,
-            nodeId,
-            eventType: "token-completed",
-          });
+        const incoming = args.canvas.edges.filter((e) => e.target === nodeId);
 
-          const forkId = randomUUID();
-          // Spawn children in order, advancing each before moving to
-          // the next. Sequential rather than parallel because we're in
-          // one txn and one DB connection; the engine isn't trying to
-          // model real-world concurrency, just the BPMN execution
-          // semantics. A failing child returns "failed" and short-
-          // circuits the rest — the outer caller will mark the instance
-          // failed. Orphan siblings (still active in DB) become
-          // inaccessible because the instance status check rejects
-          // operations on non-running instances.
-          let aggregateHops = hops;
-          for (const edge of outgoing) {
-            const childRows = await args.tx
-              .insert(instanceTokens)
-              .values({
+        // ─── JOIN ─────────────────────────────────────────────────────
+        // P1 Session 3 — when the token arrives at a gateway with > 1
+        // incoming edges, this is a JOIN. Park (status=waiting,
+        // waitingFor="join"). Serialize the "am I last?" decision via
+        // SELECT FOR UPDATE on the instance row so two siblings can't
+        // both decide they're firing. When the parked count for this
+        // fork matches the token's persisted `forkSize`, fire — pick
+        // the latest arriver as the firing token (deterministic by
+        // arrival order; FOR UPDATE serialization makes this stable),
+        // mark the N-1 already-parked siblings `completed`, then take
+        // the gateway's single outgoing edge.
+        //
+        // Variable merge (Decision #1): variables already merge into
+        // `instance.variables` as each sibling does its work
+        // (completeTask / completeServiceTask shallow-merge into the
+        // bag). Last-writer-wins by arrival order, matching Camunda.
+        // Nothing to do at the join itself.
+        if (incoming.length > 1) {
+          const tokRow = await this.loadTokenForJoin(args.tx, args.tokenId);
+          if (!tokRow.forkId || tokRow.forkSize == null) {
+            // Degenerate: token reached a multi-in gateway without a
+            // fork lineage. Treat as a pass-through — single token,
+            // no synchronization possible. Designer flags joins
+            // unreachable from a parallel/inclusive split.
+            // Fall through to edge selection below.
+          } else {
+            // Lock the instance row to serialize sibling arrivals at
+            // this join. Other txns at the same gateway block here.
+            await args.tx
+              .select({ id: processInstances.id })
+              .from(processInstances)
+              .where(eq(processInstances.id, args.instanceId))
+              .for("update");
+
+            // Park this token at the join.
+            version = await this.updateTokenWithLock(
+              args.tx, args.tokenId, version,
+              { status: "waiting", waitingFor: "join", currentNodeId: nodeId },
+            );
+
+            // Count siblings parked at THIS gateway with the same
+            // forkId (i.e., this fork's arrivals). Include self.
+            const parked = await args.tx
+              .select({ id: instanceTokens.id, version: instanceTokens.version })
+              .from(instanceTokens)
+              .where(
+                and(
+                  eq(instanceTokens.instanceId, args.instanceId),
+                  eq(instanceTokens.forkId, tokRow.forkId),
+                  eq(instanceTokens.currentNodeId, nodeId),
+                  eq(instanceTokens.status, "waiting"),
+                ),
+              );
+
+            if (parked.length < tokRow.forkSize) {
+              // Not last — record the wait and bail. The next sibling
+              // to arrive will re-evaluate.
+              await recordEvent(args.tx, {
                 tenantId: args.tenantId,
                 instanceId: args.instanceId,
-                currentNodeId: edge.target,
-                status: "active",
-                parentTokenId: args.tokenId,
-                forkId,
-              })
-              .returning({ id: instanceTokens.id, version: instanceTokens.version });
-            const child = childRows[0];
+                tokenId: args.tokenId,
+                nodeId,
+                eventType: "token-waiting",
+                payload: { waitingFor: "join", forkId: tokRow.forkId, parked: parked.length, expected: tokRow.forkSize },
+              });
+              return { tokenStatus: "waiting", hops };
+            }
+
+            // We're the last arriver — fire. Mark every OTHER parked
+            // sibling completed. Use a single bulk UPDATE (no per-token
+            // optimistic lock needed: the FOR UPDATE on the instance
+            // serialises sibling state until we COMMIT, and within
+            // this txn no other writer touches them). The audit row
+            // per merged sibling is still emitted individually so
+            // timeline UIs can attribute each merge.
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId, instanceId: args.instanceId,
+              tokenId: args.tokenId, nodeId, eventType: "node-exited",
+              payload: { via: "join", forkId: tokRow.forkId, mergedTokens: parked.length },
+            });
+            await args.tx
+              .update(instanceTokens)
+              .set({ status: "completed", updatedAt: new Date() })
+              .where(
+                and(
+                  eq(instanceTokens.instanceId, args.instanceId),
+                  eq(instanceTokens.forkId, tokRow.forkId),
+                  eq(instanceTokens.currentNodeId, nodeId),
+                  eq(instanceTokens.status, "waiting"),
+                  ne(instanceTokens.id, args.tokenId),
+                ),
+              );
+            for (const sib of parked) {
+              if (sib.id === args.tokenId) continue;
+              await recordEvent(args.tx, {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: sib.id,
+                nodeId,
+                eventType: "token-completed",
+                payload: { mergedInto: args.tokenId, forkId: tokRow.forkId, via: "join" },
+              });
+            }
+
+            // Reactivate self so the loop's edge-selection step can
+            // advance through the single outgoing edge.
+            version = await this.updateTokenWithLock(
+              args.tx, args.tokenId, version,
+              { status: "active", waitingFor: null },
+            );
             await recordEvent(args.tx, {
               tenantId: args.tenantId,
               instanceId: args.instanceId,
               tokenId: args.tokenId,
               nodeId,
-              eventType: "edge-taken",
-              payload: { edgeId: edge.id, target: edge.target, childTokenId: child.id, forkId },
+              eventType: "token-resumed",
+              payload: { via: "join", forkId: tokRow.forkId },
             });
-            await recordEvent(args.tx, {
-              tenantId: args.tenantId,
-              instanceId: args.instanceId,
-              tokenId: child.id,
-              nodeId: edge.target,
-              eventType: "token-created",
-              payload: { parentTokenId: args.tokenId, forkId },
-            });
-            const childResult = await this.advanceToken({
-              tx: args.tx,
-              tenantId: args.tenantId,
-              instanceId: args.instanceId,
-              tokenId: child.id,
-              tokenVersion: child.version ?? 0,
-              currentNodeId: edge.target,
-              canvas: args.canvas,
-              variables: args.variables,
-            });
-            aggregateHops += childResult.hops;
-            if (childResult.tokenStatus === "failed") {
-              return {
-                tokenStatus: "failed",
-                hops: aggregateHops,
-                errorMessage: childResult.errorMessage,
-              };
-            }
+            // Fall through to edge selection (one outgoing edge expected).
           }
-          // Parent reports completed; the outer caller's
-          // maybeCompleteInstance counts live tokens to decide whether
-          // to flip the instance.
-          return { tokenStatus: "completed", hops: aggregateHops };
+        }
+
+        // ─── SPLIT ────────────────────────────────────────────────────
+        // outgoing > 1 — spawn children. parallel = all edges fire;
+        // inclusive = only edges whose condition evaluates true (default
+        // flow fires when none match; failure when none match + no
+        // default).
+        if (outgoing.length === 0 && incoming.length <= 1) {
+          const message = `${node.type} ${nodeId} has no outgoing flow.`;
+          await this.markTokenFailed(
+            args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
+          );
+          return { tokenStatus: "failed", hops, errorMessage: message };
+        }
+
+        if (outgoing.length > 1) {
+          let firing: EngineEdge[];
+          if (node.type === "inclusiveGateway") {
+            const defaultFlowId = (node.data as { defaultFlowId?: string } | undefined)?.defaultFlowId;
+            const matched: EngineEdge[] = [];
+            for (const edge of outgoing) {
+              if (edge.id === defaultFlowId) continue;
+              const cond = (edge.data as { condition?: string } | undefined)?.condition;
+              if (typeof cond !== "string" || cond.trim().length === 0) continue;
+              let ok: boolean;
+              try {
+                ok = evalCondition(cond, args.variables);
+              } catch (e) {
+                const message = `Inclusive gateway ${nodeId}: condition eval failed on edge ${edge.id} (${(e as Error).message}).`;
+                await this.markTokenFailed(
+                  args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
+                );
+                return { tokenStatus: "failed", hops, errorMessage: message };
+              }
+              if (ok) matched.push(edge);
+            }
+            if (matched.length > 0) {
+              firing = matched;
+            } else if (defaultFlowId) {
+              const def = outgoing.find((e) => e.id === defaultFlowId);
+              if (!def) {
+                const message = `Inclusive gateway ${nodeId}: defaultFlowId references missing edge ${defaultFlowId}.`;
+                await this.markTokenFailed(
+                  args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
+                );
+                return { tokenStatus: "failed", hops, errorMessage: message };
+              }
+              firing = [def];
+            } else {
+              const message = `Inclusive gateway ${nodeId}: no outgoing condition matched and no default flow defined.`;
+              await this.markTokenFailed(
+                args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
+              );
+              return { tokenStatus: "failed", hops, errorMessage: message };
+            }
+          } else {
+            firing = outgoing;
+          }
+
+          // Degenerate: 1 firing edge means no fork needed — fall
+          // through to the regular advance.
+          if (firing.length === 1) {
+            next = firing[0];
+          } else {
+            // Multi-fire SPLIT. Parent flips completed, N children
+            // spawn carrying the shared forkId + forkSize so the join
+            // downstream knows what to wait for.
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId, instanceId: args.instanceId,
+              tokenId: args.tokenId, nodeId, eventType: "node-exited",
+            });
+            version = await this.updateTokenWithLock(
+              args.tx, args.tokenId, version,
+              { status: "completed", currentNodeId: nodeId },
+            );
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId, instanceId: args.instanceId,
+              tokenId: args.tokenId, nodeId, eventType: "token-completed",
+            });
+
+            const forkId = randomUUID();
+            const forkSize = firing.length;
+            let aggregateHops = hops;
+            for (const edge of firing) {
+              const childRows = await args.tx
+                .insert(instanceTokens)
+                .values({
+                  tenantId: args.tenantId,
+                  instanceId: args.instanceId,
+                  currentNodeId: edge.target,
+                  status: "active",
+                  parentTokenId: args.tokenId,
+                  forkId,
+                  forkSize,
+                })
+                .returning({ id: instanceTokens.id, version: instanceTokens.version });
+              const child = childRows[0];
+              await recordEvent(args.tx, {
+                tenantId: args.tenantId, instanceId: args.instanceId,
+                tokenId: args.tokenId, nodeId, eventType: "edge-taken",
+                payload: { edgeId: edge.id, target: edge.target, childTokenId: child.id, forkId, forkSize },
+              });
+              await recordEvent(args.tx, {
+                tenantId: args.tenantId, instanceId: args.instanceId,
+                tokenId: child.id, nodeId: edge.target, eventType: "token-created",
+                payload: { parentTokenId: args.tokenId, forkId, forkSize },
+              });
+              const childResult = await this.advanceToken({
+                tx: args.tx,
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: child.id,
+                tokenVersion: child.version ?? 0,
+                currentNodeId: edge.target,
+                canvas: args.canvas,
+                variables: args.variables,
+              });
+              aggregateHops += childResult.hops;
+              if (childResult.tokenStatus === "failed") {
+                return {
+                  tokenStatus: "failed",
+                  hops: aggregateHops,
+                  errorMessage: childResult.errorMessage,
+                };
+              }
+            }
+            return { tokenStatus: "completed", hops: aggregateHops };
+          }
+        } else if (outgoing.length === 1) {
+          // 1-out (post-join or degenerate split) — take the single edge.
+          next = outgoing[0];
         }
       }
 
@@ -878,6 +1031,24 @@ export class EngineService {
     }
   }
 
+  /** P1 Session 3 — load forkId + forkSize for the token at the moment
+   *  it enters a JOIN gateway. Fetched here rather than carried through
+   *  advanceToken's args because joins are rare and the args contract
+   *  stays compact. */
+  private async loadTokenForJoin(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    tokenId: string,
+  ): Promise<{ forkId: string | null; forkSize: number | null }> {
+    const rows = await tx
+      .select({ forkId: instanceTokens.forkId, forkSize: instanceTokens.forkSize })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, tokenId))
+      .limit(1);
+    if (!rows[0]) return { forkId: null, forkSize: null };
+    return { forkId: rows[0].forkId ?? null, forkSize: rows[0].forkSize ?? null };
+  }
+
   /** P1 — count tokens that are still live (active or waiting) on an
    *  instance. Called by every "is this token's completion terminal for
    *  the whole instance?" check so a parallel-split instance only flips
@@ -919,6 +1090,7 @@ export class EngineService {
       errorMessage?: string | null;
       dueAt?: Date | null;
       priority?: number | null;
+      forkSize?: number | null;
     },
   ): Promise<number> {
     const next = expectedVersion + 1;

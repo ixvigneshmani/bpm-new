@@ -1061,6 +1061,12 @@ export const instanceTokens = pgTable(
      *  null on the root token + on every non-forked token. */
     parentTokenId: uuid("PARENT_TOKEN_ID"),
     forkId: uuid("FORK_ID"),
+    /** P1 Session 3 — number of siblings spawned in this token's fork.
+     *  Set at fork time on every child (parallel = #outgoing, inclusive
+     *  = #conditions that matched). The parallel/inclusive JOIN reads
+     *  this to decide "have all expected siblings arrived?" without
+     *  reachability analysis at runtime. Null on non-forked tokens. */
+    forkSize: integer("FORK_SIZE"),
     errorMessage: text("ERROR_MESSAGE"),
     // Optimistic-locking guard. Every UPDATE bumps `version`; the
     // interpreter's update statement asserts the prior version in the
