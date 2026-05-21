@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { nanoid } from "nanoid";
 import useCanvasStore from "../../store/canvas-store";
@@ -669,17 +669,28 @@ function StepDocument() {
   const [pendingNav, setPendingNav] = useState<"details" | "canvas" | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Load templates from API
+  // Load templates from API (mount-only — independent of process state).
   useEffect(() => {
     apiGet<DocTemplate[]>("/processes/templates/list").then(setTemplates).catch(() => {});
-    // If process already has a document, load it into fields
-    if (processMeta.businessDoc) {
-      const loadedFields = jsonToFields(processMeta.businessDoc);
-      setFields(loadedFields);
-      setSource(processMeta.businessDocSource || "paste");
-      setInitialSchemaJson(JSON.stringify(fieldsToJson(loadedFields)));
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Seed the field editor from the saved businessDoc. The parent page
+  // fetches `/processes/:id` asynchronously, so on first mount this
+  // wizard renders before `processMeta.businessDoc` is populated.
+  // Watching the field here lets us seed once the doc lands — and the
+  // `seededRef` guard prevents re-seeding (and clobbering local edits)
+  // if `processMeta` updates later for any other reason.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    if (!processMeta.businessDoc) return;
+    if (typeof processMeta.businessDoc !== "object" || Object.keys(processMeta.businessDoc).length === 0) return;
+    const loadedFields = jsonToFields(processMeta.businessDoc);
+    setFields(loadedFields);
+    setSource(processMeta.businessDocSource || "paste");
+    setInitialSchemaJson(JSON.stringify(fieldsToJson(loadedFields)));
+    seededRef.current = true;
+  }, [processMeta.businessDoc, processMeta.businessDocSource]);
 
   const schemaJson = fieldsToJson(fields);
   const schemaStr = JSON.stringify(schemaJson, null, 2);
