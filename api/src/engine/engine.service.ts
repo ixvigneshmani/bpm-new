@@ -30,7 +30,7 @@ import {
   Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import {
@@ -333,11 +333,13 @@ export class EngineService {
         variables: initialVariables,
       });
 
-      // 5. Flip the instance to its terminal state (E2: one token per
-      //    instance, so token status drives instance status directly).
-      //    E3+ will count remaining active/waiting tokens before this.
+      // 5. Flip the instance to its terminal state. P1 — only flip to
+      //    `completed` when no live siblings remain; a parallel-split
+      //    process keeps the instance `running` until the last branch
+      //    drains. Failure short-circuits and flips immediately
+      //    (per-branch failure propagation lands in P4).
       let instanceStatus: "running" | "completed" | "failed" = "running";
-      if (advance.tokenStatus === "completed") {
+      if (advance.tokenStatus === "completed" && (await this.countLiveTokens(tx, inst.id)) === 0) {
         await tx
           .update(processInstances)
           .set({
@@ -678,14 +680,140 @@ export class EngineService {
         eventType: "node-exited",
       });
 
+      // P1 — parallel split. Every outgoing edge fires; one fresh child
+      // token per edge is INSERTed at the edge's target (active),
+      // carrying `parent_token_id` = this token + a shared `fork_id` so
+      // Session 3's JOIN can scope correctly. The parent token flips to
+      // `completed` — its job (entering the gateway) is done — and we
+      // recurse into advanceToken for each child synchronously inside
+      // the same txn so audit trails commit atomically. Children that
+      // suspend on a wait state stay `waiting` in the DB; children that
+      // run to an end event flip to `completed`. The outer caller's
+      // instance-flip logic uses `maybeCompleteInstance` which counts
+      // remaining live tokens, so the instance only flips when the last
+      // sibling drains.
+      //
+      // TODO(P1 polish): replay-from-step semantics when active siblings
+      // exist are undefined; flag at the replay entrypoint.
+      let next: EngineEdge | null = null;
+      if (node.type === "parallelGateway") {
+        const outgoing = args.canvas.edges.filter((e) => e.source === nodeId);
+        if (outgoing.length === 0) {
+          const message = `Parallel gateway ${nodeId} has no outgoing flow.`;
+          await this.markTokenFailed(
+            args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
+          );
+          return { tokenStatus: "failed", hops, errorMessage: message };
+        }
+        if (outgoing.length === 1) {
+          // Degenerate: 1-out parallel is just a pass-through. Take the
+          // single edge with the normal flow so we don't bother with
+          // forks. (Designer warns on this shape.)
+          next = outgoing[0];
+        } else {
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "node-exited",
+          });
+          // Flip the parent first so the live-token count downstream
+          // reflects "parent done, children active". One UPDATE here,
+          // then N INSERTs + N recursive advances.
+          version = await this.updateTokenWithLock(
+            args.tx,
+            args.tokenId,
+            version,
+            { status: "completed", currentNodeId: nodeId },
+          );
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-completed",
+          });
+
+          const forkId = randomUUID();
+          // Spawn children in order, advancing each before moving to
+          // the next. Sequential rather than parallel because we're in
+          // one txn and one DB connection; the engine isn't trying to
+          // model real-world concurrency, just the BPMN execution
+          // semantics. A failing child returns "failed" and short-
+          // circuits the rest — the outer caller will mark the instance
+          // failed. Orphan siblings (still active in DB) become
+          // inaccessible because the instance status check rejects
+          // operations on non-running instances.
+          let aggregateHops = hops;
+          for (const edge of outgoing) {
+            const childRows = await args.tx
+              .insert(instanceTokens)
+              .values({
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                currentNodeId: edge.target,
+                status: "active",
+                parentTokenId: args.tokenId,
+                forkId,
+              })
+              .returning({ id: instanceTokens.id, version: instanceTokens.version });
+            const child = childRows[0];
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              nodeId,
+              eventType: "edge-taken",
+              payload: { edgeId: edge.id, target: edge.target, childTokenId: child.id, forkId },
+            });
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: child.id,
+              nodeId: edge.target,
+              eventType: "token-created",
+              payload: { parentTokenId: args.tokenId, forkId },
+            });
+            const childResult = await this.advanceToken({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: child.id,
+              tokenVersion: child.version ?? 0,
+              currentNodeId: edge.target,
+              canvas: args.canvas,
+              variables: args.variables,
+            });
+            aggregateHops += childResult.hops;
+            if (childResult.tokenStatus === "failed") {
+              return {
+                tokenStatus: "failed",
+                hops: aggregateHops,
+                errorMessage: childResult.errorMessage,
+              };
+            }
+          }
+          // Parent reports completed; the outer caller's
+          // maybeCompleteInstance counts live tokens to decide whether
+          // to flip the instance.
+          return { tokenStatus: "completed", hops: aggregateHops };
+        }
+      }
+
       // Edge selection: exclusive gateway → first-true-condition with
       // default-flow fallback (E4). Other gateway types fall through
       // to the simple "first outgoing" picker until later phases land
       // their semantics. The picker is wrapped here so a gateway that
       // can't find any matching branch fails the instance with a
       // diagnostic message rather than silently going off-rails.
-      let next: EngineEdge | null;
-      if (node.type === "exclusiveGateway") {
+      //
+      // For a 1-out parallel gateway the branch above already assigned
+      // `next` to the sole outgoing edge; skip re-picking.
+      if (next) {
+        // already chosen by the parallelGateway branch (degenerate
+        // 1-out case)
+      } else if (node.type === "exclusiveGateway") {
         const gw = pickExclusiveGatewayEdge(
           args.canvas,
           nodeId,
@@ -748,6 +876,28 @@ export class EngineService {
       );
       nodeId = next.target;
     }
+  }
+
+  /** P1 — count tokens that are still live (active or waiting) on an
+   *  instance. Called by every "is this token's completion terminal for
+   *  the whole instance?" check so a parallel-split instance only flips
+   *  to `completed` when the LAST sibling drains. Cheap single-row
+   *  count query against the existing TOKEN_TENANT_STATUS_IDX. */
+  private async countLiveTokens(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    instanceId: string,
+  ): Promise<number> {
+    const rows = await tx
+      .select({ id: instanceTokens.id })
+      .from(instanceTokens)
+      .where(
+        and(
+          eq(instanceTokens.instanceId, instanceId),
+          inArray(instanceTokens.status, ["active", "waiting"] as const),
+        ),
+      );
+    return rows.length;
   }
 
   /** Optimistic-lock UPDATE on a token: bump VERSION, assert the prior
@@ -994,11 +1144,13 @@ export class EngineService {
         resumeFromWait: true,
       });
 
-      // 4. If this was the only token and it terminated, flip the
-      //    instance. E4+ will need a remaining-tokens count when
-      //    parallel branches exist.
+      // 4. Flip the instance to a terminal state once no live tokens
+      //    remain. P1 — parallel-split instances stay `running` until
+      //    the LAST sibling drains, so we guard the `completed` flip on
+      //    a live-token count of zero. Failure flips immediately (per-
+      //    branch failure propagation lands in P4).
       let instanceStatus: "running" | "completed" | "failed" = "running";
-      if (advance.tokenStatus === "completed") {
+      if (advance.tokenStatus === "completed" && (await this.countLiveTokens(tx, tokenRow.instanceId)) === 0) {
         await this.updateInstanceWithLock(
           tx,
           tokenRow.instanceId,
@@ -1161,8 +1313,10 @@ export class EngineService {
         resumeFromWait: true,
       });
 
+      // P1 — guard the `completed` flip on a live-token count of zero
+      // (parallel-split siblings keep the instance running).
       let instanceStatus: "running" | "completed" | "failed" = "running";
-      if (advance.tokenStatus === "completed") {
+      if (advance.tokenStatus === "completed" && (await this.countLiveTokens(tx, tokenRow.instanceId)) === 0) {
         await this.updateInstanceWithLock(
           tx,
           tokenRow.instanceId,
@@ -1922,8 +2076,10 @@ export class EngineService {
         resumeFromWait: true,
       });
 
+      // P1 — guard `completed` on a live-token count of zero (parallel
+      // siblings keep the instance running).
       let instanceStatus: "running" | "completed" | "failed" = "running";
-      if (advance.tokenStatus === "completed") {
+      if (advance.tokenStatus === "completed" && (await this.countLiveTokens(tx, tokenRow.instanceId)) === 0) {
         await this.updateInstanceWithLock(
           tx,
           tokenRow.instanceId,
@@ -3070,8 +3226,14 @@ export class EngineService {
       // by replay were missing; subscribers never learned when a
       // replayed instance completed or failed. Now parity with the
       // startInstance lifecycle.
+      //
+      // P1 — guard `completed` on a live-token count of zero. Note that
+      // replay-from-step semantics with active parallel siblings are
+      // undefined for now: starting a replay on a multi-token instance
+      // races against the existing tokens. Tracked as a TODO; surfaced
+      // here so a future polish session addresses it.
       let instanceStatus: "running" | "completed" | "failed" = "running";
-      if (advance.tokenStatus === "completed") {
+      if (advance.tokenStatus === "completed" && (await this.countLiveTokens(tx, args.instanceId)) === 0) {
         await tx
           .update(processInstances)
           .set({ status: "completed", completedAt: new Date() })

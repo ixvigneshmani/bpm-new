@@ -273,12 +273,18 @@ function makeFakeTx(canvas: unknown) {
                   return Promise.resolve([]);
                 },
                 then(resolve: (v: unknown) => unknown) {
-                  // Counts: return a row per insert observed. Coarse but
-                  // sufficient for the assertions we care about.
-                  const rows = inserts
-                    .filter((i) => i.table === "INSTANCE_TOKENS" || i.table === "INSTANCE_EVENTS")
-                    .flatMap((i) => i.values.map(() => ({ id: "x" })));
-                  return resolve(rows);
+                  // P1 countLiveTokens approximation: live = #token
+                  // inserts − #status updates to a terminal value. Other
+                  // .then() select paths in the engine all flow through
+                  // .limit() so this is the only consumer.
+                  const inserted = inserts.filter((i) => i.table === "INSTANCE_TOKENS").length;
+                  const terminal = updates.filter(
+                    (u) =>
+                      u.table === "INSTANCE_TOKENS" &&
+                      (u.set.status === "completed" || u.set.status === "failed"),
+                  ).length;
+                  const live = Math.max(0, inserted - terminal);
+                  return resolve(Array.from({ length: live }, () => ({ id: "x" })));
                 },
               };
             },
@@ -1351,6 +1357,20 @@ function makeCompleteTaskEnv(opts: {
           }
           return Promise.resolve([]);
         },
+        // P1 countLiveTokens — completeTask only has the one waiting
+        // userTask token, so 0 live tokens AFTER it transitions to
+        // active (the engine sets status=active before this query
+        // runs). We approximate by reading tokenRow.status: live when
+        // active|waiting, 0 otherwise.
+        then(resolve: (v: unknown) => unknown) {
+          if (routedTable === "INSTANCE_TOKENS") {
+            const live = tokenRow.status === "active" || tokenRow.status === "waiting"
+              ? [{ id: tokenRow.id }]
+              : [];
+            return resolve(live);
+          }
+          return resolve([]);
+        },
       };
       return chain;
     },
@@ -2135,5 +2155,294 @@ describe("resolveTaskScheduling", () => {
 
   it("ignores a non-numeric priority", () => {
     expect(resolveTaskScheduling(node({ priority: "high" })).priority).toBeNull();
+  });
+});
+
+// ─── P1: parallel-gateway split ──────────────────────────────────────
+
+/** Fake DB tailored for parallel-split tests. Differences from makeFakeTx:
+ *   • Each INSERT into INSTANCE_TOKENS allocates a fresh id (`tok-2`,
+ *     `tok-3`, …) so child tokens don't collide with the root token.
+ *   • Optimistic-lock UPDATEs always succeed (always returns 1 row) —
+ *     we don't need to simulate version contention for these tests.
+ *   • countLiveTokens runs against tracked rows: every INSERTed token
+ *     starts `active`; UPDATEs that set `status` mutate the in-memory
+ *     row. Lets us assert the instance flips only after the LAST sibling
+ *     completes. */
+function makeParallelEnv(canvas: unknown) {
+  const inserts: { table: string; values: Record<string, unknown>[] }[] = [];
+  const updates: { table: string; set: Record<string, unknown> }[] = [];
+  // Tokens start empty — the root token gets INSERTed by startInstance
+  // and our insert handler appends it (id `tok-1`). Child tokens then
+  // get `tok-2`, `tok-3`, …
+  const tokenRows: Array<Record<string, unknown> & { id: string; status: string; version: number }> = [];
+  let nextTokenSeq = 0;
+  const instanceRow = { id: "inst-1", version: 0, status: "running", variables: {} };
+
+  const tableName = (table: unknown): string => {
+    if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+      // @ts-expect-error — drizzle internal
+      return table[Symbol.for("drizzle:Name")] as string;
+    }
+    return "unknown";
+  };
+
+  const tx = {
+    insert(table: unknown) {
+      const name = tableName(table);
+      return {
+        values(rows: Record<string, unknown> | Record<string, unknown>[]) {
+          const arr = Array.isArray(rows) ? rows : [rows];
+          inserts.push({ table: name, values: arr });
+          if (name === "INSTANCE_TOKENS") {
+            const newIds = arr.map((r) => {
+              const id = `tok-${++nextTokenSeq}`;
+              tokenRows.push({
+                ...r,
+                id,
+                status: (r.status as string) ?? "active",
+                version: 0,
+              });
+              return { id, version: 0 };
+            });
+            return {
+              returning() { return Promise.resolve(newIds); },
+              then(resolve: (v: unknown) => unknown) { return resolve(undefined); },
+            };
+          }
+          return {
+            returning() { return Promise.resolve([{}]); },
+            then(resolve: (v: unknown) => unknown) { return resolve(undefined); },
+          };
+        },
+      };
+    },
+    update(table: unknown) {
+      const name = tableName(table);
+      return {
+        set(values: Record<string, unknown>) {
+          updates.push({ table: name, set: values });
+          // The updateTokenWithLock filter is (id, expectedVersion). We
+          // don't see the WHERE here, so we match by version: the
+          // engine bumps version on every UPDATE so the prior version
+          // uniquely identifies the target token in test scenarios.
+          if (name === "INSTANCE_TOKENS" && typeof values.version === "number") {
+            const expected = values.version - 1;
+            const target = [...tokenRows].reverse().find((t) => t.version === expected);
+            if (target) {
+              if (typeof values.status === "string") target.status = values.status;
+              if (typeof values.currentNodeId === "string") target.currentNodeId = values.currentNodeId;
+              target.version = values.version;
+            }
+          }
+          return {
+            where(_cond: unknown) {
+              return {
+                returning() {
+                  return Promise.resolve([{ id: name === "INSTANCE_TOKENS" ? "tok" : instanceRow.id }]);
+                },
+                then(resolve: (v: unknown) => unknown) { return resolve(undefined); },
+              };
+            },
+          };
+        },
+      };
+    },
+    select(_cols?: unknown) {
+      let routed: string | null = null;
+      const chain = {
+        from(table: unknown) {
+          routed = tableName(table);
+          return chain;
+        },
+        where(_cond: unknown) { return chain; },
+        limit() {
+          if (routed === "PROCESS_INSTANCES") return Promise.resolve([instanceRow]);
+          return Promise.resolve([]);
+        },
+        then(resolve: (v: unknown) => unknown) {
+          // countLiveTokens select uses .then (no .limit) — return
+          // tokens whose status is active|waiting.
+          if (routed === "INSTANCE_TOKENS") {
+            return resolve(tokenRows.filter((t) => t.status === "active" || t.status === "waiting"));
+          }
+          return resolve([]);
+        },
+      };
+      return chain;
+    },
+  };
+
+  let lastTable: string | null = null;
+  const db = {
+    select(_cols?: unknown) {
+      const chain = {
+        from(table: unknown) {
+          lastTable = tableName(table);
+          return chain;
+        },
+        where: () => chain,
+        orderBy: () => chain,
+        limit: () => {
+          if (lastTable === "PROCESSES") {
+            return Promise.resolve([{ canvasData: canvas, status: "ACTIVE" }]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return chain;
+    },
+    insert(table: unknown) {
+      const name = tableName(table);
+      return {
+        values(rows: Record<string, unknown> | Record<string, unknown>[]) {
+          inserts.push({ table: name, values: Array.isArray(rows) ? rows : [rows] });
+          return {
+            returning() { return Promise.resolve([{ id: "ver-1" }]); },
+          };
+        },
+      };
+    },
+    transaction<T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> {
+      return fn(tx);
+    },
+  };
+  return { db, tx, inserts, updates, tokenRows, instanceRow };
+}
+
+describe("EngineService — P1 parallel-gateway split", () => {
+  it("2-way split: inserts 2 child tokens carrying parentTokenId + a shared forkId, parent flips to completed", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "pg", type: "parallelGateway" },
+        { id: "a", type: "endEvent" },
+        { id: "b", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "pg" },
+        { id: "e1", source: "pg", target: "a" },
+        { id: "e2", source: "pg", target: "b" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+
+    // Two children inserted with parent + shared forkId.
+    const tokenInserts = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS");
+    // First insert is the root token; the next two are the children.
+    expect(tokenInserts.length).toBe(3);
+    const child1 = tokenInserts[1].values[0];
+    const child2 = tokenInserts[2].values[0];
+    expect(child1.parentTokenId).toBeDefined();
+    expect(child1.parentTokenId).toBe(child2.parentTokenId);
+    expect(child1.forkId).toBe(child2.forkId);
+    expect(typeof child1.forkId).toBe("string");
+
+    // Instance completed (both children ran to endEvent so live count = 0).
+    expect(out.status).toBe("completed");
+    expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "completed")).toBe(true);
+
+    // Audit trail carries token-created + edge-taken per child + the
+    // parent's node-exited.
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(events.filter((e) => e === "edge-taken").length).toBeGreaterThanOrEqual(3); // start→pg + pg→a + pg→b
+    expect(events.filter((e) => e === "token-created").length).toBe(3); // root + 2 children
+    expect(events.includes("instance-completed")).toBe(true);
+  });
+
+  it("3-way split: spawns 3 children, all carry the SAME forkId; instance completes after last sibling drains", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "pg", type: "parallelGateway" },
+        { id: "a", type: "endEvent" },
+        { id: "b", type: "endEvent" },
+        { id: "c", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "pg" },
+        { id: "e1", source: "pg", target: "a" },
+        { id: "e2", source: "pg", target: "b" },
+        { id: "e3", source: "pg", target: "c" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+
+    const childInserts = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS").slice(1);
+    expect(childInserts.length).toBe(3);
+    const forkIds = childInserts.map((i) => i.values[0].forkId);
+    expect(new Set(forkIds).size).toBe(1);
+    expect(out.status).toBe("completed");
+  });
+
+  it("instance stays running when one branch suspends on a userTask", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "pg", type: "parallelGateway" },
+        { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "pg" },
+        { id: "e1", source: "pg", target: "t" },
+        { id: "e2", source: "pg", target: "e" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+
+    // The userTask child is waiting → instance stays running, NOT
+    // completed.
+    expect(out.status).toBe("running");
+    expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "completed")).toBe(false);
+    // Two children inserted.
+    const childInserts = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS").slice(1);
+    expect(childInserts.length).toBe(2);
+  });
+
+  it("1-out parallel gateway is a degenerate pass-through (no children spawned, no fork)", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "pg", type: "parallelGateway" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e0", source: "s", target: "pg" },
+        { id: "e1", source: "pg", target: "e" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+
+    // No child tokens — pass-through.
+    const tokenInserts = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS");
+    expect(tokenInserts.length).toBe(1); // only the root token
+    expect(out.status).toBe("completed");
+  });
+
+  it("0-out parallel gateway fails the instance with a structural error", async () => {
+    const env = makeParallelEnv({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "pg", type: "parallelGateway" },
+      ],
+      edges: [{ id: "e0", source: "s", target: "pg" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any);
+    const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect(out.status).toBe("failed");
+    const instUpdate = env.updates.find((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed");
+    expect(instUpdate?.set.errorMessage).toMatch(/parallel/i);
   });
 });

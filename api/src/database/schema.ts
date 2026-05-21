@@ -1052,6 +1052,15 @@ export const instanceTokens = pgTable(
      *  in listTasks so the inbox can sort by due/priority. */
     dueAt: timestamp("DUE_AT", { withTimezone: true }),
     priority: integer("PRIORITY"),
+    /** P1 — fork lineage. Set only on children spawned by a parallel
+     *  (and later inclusive) gateway. `parentTokenId` points to the
+     *  token that entered the gateway; `forkId` is shared by every
+     *  sibling spawned in the same fork so Session 3's parallel JOIN
+     *  can scope its "have all siblings arrived?" query correctly even
+     *  when the same parent forks more than once sequentially. Both
+     *  null on the root token + on every non-forked token. */
+    parentTokenId: uuid("PARENT_TOKEN_ID"),
+    forkId: uuid("FORK_ID"),
     errorMessage: text("ERROR_MESSAGE"),
     // Optimistic-locking guard. Every UPDATE bumps `version`; the
     // interpreter's update statement asserts the prior version in the
