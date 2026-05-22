@@ -983,7 +983,7 @@ const schedulingRuntimeRule: ValidationRule = {
         severity: "info",
         ruleId: "scheduling-runtime",
         nodeId: n.id,
-        message: `${n.type} "${label}" uses FEEL expressions for scheduling — engine today only persists static due dates + priorities. Expression evaluation ships with the scheduler in P2.`,
+        message: `${n.type} "${label}" uses FEEL expressions for scheduling — engine today only honours static dueDate + priority. Static dueDate now fires task-due reminders (P2 Session 4); expression evaluation for dueDate / followUpDate / priority lands in a later P2 polish session.`,
       });
     }
     return issues;

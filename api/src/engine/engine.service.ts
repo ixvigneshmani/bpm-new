@@ -51,6 +51,7 @@ import { inArray } from "drizzle-orm";
 import { REST_SERVICE_TASK_TOPIC, SERVICE_TASK_TOPIC } from "./service-task-registry";
 import { CONNECTOR_TOPIC } from "../connectors/connector-registry";
 import { WorkerService } from "./worker.service";
+import { TimerSchedulerService, type ClaimedTimer } from "./timer-scheduler.service";
 import { CorrelationContext } from "../common/observability/correlation-context";
 
 /** OS4.1 / M5 — every INSTANCE_EVENTS row written by the engine flows
@@ -197,7 +198,16 @@ export class EngineService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly worker: WorkerService,
-  ) {}
+    private readonly timerScheduler?: TimerSchedulerService,
+  ) {
+    // P2 Session 4 — register the task-due-reminder dispatcher. The
+    // scheduler is optional in the constructor so unit tests that
+    // hand-construct EngineService keep working without wiring it.
+    this.timerScheduler?.registerCallback(
+      "task-due-reminder",
+      (t) => this.fireTaskDueReminder(t),
+    );
+  }
 
   /** Start a new instance: load the process, snapshot its canvas, find
    *  the start event, place a token, and advance until the token reaches
@@ -600,6 +610,48 @@ export class EngineService {
               eventType: "task-claimed",
               payload: { auto: true },
             });
+          }
+          // P2 Session 4 — schedule the task-due reminder. Already
+          // overdue? Emit task-due audit immediately and skip the
+          // scheduler (no point in queuing a "fire ASAP" row when we
+          // already know the time has passed).
+          if (dueAt && this.timerScheduler) {
+            if (dueAt.getTime() <= Date.now()) {
+              await recordEvent(args.tx, {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: args.tokenId,
+                nodeId,
+                eventType: "task-due",
+                payload: {
+                  dueAt: dueAt.toISOString(),
+                  taskLabel: (node.data as { label?: string } | undefined)?.label ?? null,
+                  assignedTo: assignedTo ?? null,
+                  candidateRole: candidateRole ?? null,
+                  fireImmediately: true,
+                },
+              });
+              await this.emitOutbox(args.tx, {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                eventType: "task-due",
+                payload: {
+                  tokenId: args.tokenId,
+                  nodeId,
+                  dueAt: dueAt.toISOString(),
+                  assignedTo: assignedTo ?? null,
+                  candidateRole: candidateRole ?? null,
+                },
+              });
+            } else {
+              await this.timerScheduler.scheduleTimer({
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: args.tokenId,
+                fireAt: dueAt,
+                kind: "task-due-reminder",
+              });
+            }
           }
           return { tokenStatus: "waiting", hops };
         }
@@ -1075,6 +1127,67 @@ export class EngineService {
     return { forkId: rows[0].forkId ?? null, forkSize: rows[0].forkSize ?? null };
   }
 
+  /** P2 Session 4 — dispatcher for the `task-due-reminder` timer kind.
+   *  Called by TimerSchedulerService when a scheduled row hits its
+   *  fire_at. Looks up the token (it may have completed in the
+   *  meantime), emits the `task-due` audit + outbox event if the task
+   *  is still waiting. If the token already moved on, drops silently
+   *  — the scheduler will DELETE the row regardless. */
+  private async fireTaskDueReminder(t: ClaimedTimer): Promise<void> {
+    if (!t.tokenId) return;
+    const rows = await this.db
+      .select({
+        status: instanceTokens.status,
+        waitingFor: instanceTokens.waitingFor,
+        currentNodeId: instanceTokens.currentNodeId,
+        assignedTo: instanceTokens.assignedTo,
+        candidateRole: instanceTokens.candidateRole,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, t.tokenId))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.status !== "waiting" || row.waitingFor !== "userTask") {
+      // Task no longer waiting — token already completed/skipped.
+      // Audit a "skipped" diagnostic so the timeline shows we saw the
+      // timer fire and elected to no-op. Stays useful for operators
+      // investigating "why didn't I get a reminder?".
+      this.logger.log({
+        event: "engine.timer.task-due.skipped",
+        tokenId: t.tokenId,
+        instanceId: t.instanceId,
+        reason: row ? `token ${row.status}/${row.waitingFor}` : "token not found",
+      });
+      return;
+    }
+    await this.db.transaction(async (tx) => {
+      await recordEvent(tx, {
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: t.tokenId,
+        nodeId: row.currentNodeId,
+        eventType: "task-due",
+        payload: {
+          dueAt: t.fireAt.toISOString(),
+          assignedTo: row.assignedTo,
+          candidateRole: row.candidateRole,
+        },
+      });
+      await this.emitOutbox(tx, {
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        eventType: "task-due",
+        payload: {
+          tokenId: t.tokenId,
+          nodeId: row.currentNodeId,
+          dueAt: t.fireAt.toISOString(),
+          assignedTo: row.assignedTo,
+          candidateRole: row.candidateRole,
+        },
+      });
+    });
+  }
+
   /** P1 — count tokens that are still live (active or waiting) on an
    *  instance. Called by every "is this token's completion terminal for
    *  the whole instance?" check so a parallel-split instance only flips
@@ -1239,6 +1352,13 @@ export class EngineService {
             `Outcome "${submitted}" is not declared on this task. Valid: ${[...allowed].join(", ")}.`,
           );
         }
+      }
+
+      // P2 Session 4 — cancel any pending task-due reminder for this
+      // token. Inside the txn so it rolls back if completion fails
+      // downstream (e.g. an advanceToken failure).
+      if (this.timerScheduler) {
+        await this.timerScheduler.cancelTimer(args.tokenId, tx);
       }
 
       // 1. Audit task-completed FIRST so it acts as the user-facing
@@ -1802,6 +1922,7 @@ export class EngineService {
       createdAt: string;
       dueAt: string | null;
       priority: number | null;
+      overdue: boolean;
     }>
   > {
     const baseConds = [
@@ -1877,6 +1998,10 @@ export class EngineService {
         nodeData && typeof nodeData === "object" && typeof (nodeData as Record<string, unknown>).label === "string"
           ? ((nodeData as Record<string, unknown>).label as string)
           : null;
+      // P2 Session 4 — `overdue` is a derived convenience for inbox
+      // rendering. Server-side computation guarantees clock parity
+      // (clients with skewed clocks would otherwise flag/unflag).
+      const dueAtMs = r.dueAt ? r.dueAt.getTime() : null;
       return {
         tokenId: r.tokenId,
         instanceId: r.instanceId,
@@ -1890,6 +2015,7 @@ export class EngineService {
         createdAt: r.createdAt.toISOString(),
         dueAt: r.dueAt ? r.dueAt.toISOString() : null,
         priority: r.priority,
+        overdue: dueAtMs !== null && dueAtMs <= Date.now(),
       };
     });
   }
@@ -2218,6 +2344,11 @@ export class EngineService {
         args.tenantId,
       );
       const canvas = await this.loadCanvasForInstance(tx, instRow);
+
+      // P2 Session 4 — cancel any pending task-due reminder.
+      if (this.timerScheduler) {
+        await this.timerScheduler.cancelTimer(args.tokenId, tx);
+      }
 
       await recordEvent(tx, {
         tenantId: args.tenantId,
@@ -2834,6 +2965,13 @@ export class EngineService {
           ),
         );
       let cancelledCount = 0;
+      // P2 Session 4 — clear all timers tied to this instance. Cheap
+      // bulk delete; the alternative is N per-token cancels in the
+      // loop below. Inside the txn so cancellation rolls back if the
+      // instance update fails.
+      if (this.timerScheduler) {
+        await this.timerScheduler.cancelTimersForInstance(args.instanceId, tx);
+      }
       for (const tok of liveTokens) {
         try {
           await this.updateTokenWithLock(tx, tok.id, tok.version, {
@@ -3321,6 +3459,13 @@ export class EngineService {
           payload: { reason: "superseded-by-replay" },
         });
         cancelledTokens += 1;
+      }
+
+      // P2 Session 4 — kill all scheduled timers on this instance.
+      // Replay supersedes every live token, and stale timers would
+      // fire on now-dead tokens.
+      if (this.timerScheduler) {
+        await this.timerScheduler.cancelTimersForInstance(args.instanceId, tx);
       }
 
       // Kill queued jobs on this instance — they would otherwise resume

@@ -51,6 +51,36 @@ function makeFakeWorker() {
   };
 }
 
+/** Stub TimerSchedulerService for engine tests — records every
+ *  scheduleTimer / cancelTimer call so we can assert without a real
+ *  DB-backed scheduler. */
+function makeFakeTimerScheduler() {
+  const scheduled: Array<Record<string, unknown>> = [];
+  const cancelled: Array<{ tokenId?: string; instanceId?: string }> = [];
+  const callbacks = new Map<string, unknown>();
+  return {
+    scheduled,
+    cancelled,
+    callbacks,
+    registerCallback(kind: string, cb: unknown) { callbacks.set(kind, cb); },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async scheduleTimer(args: any) {
+      scheduled.push(args);
+      return { id: `tmr-${scheduled.length}` };
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async cancelTimer(tokenId: string, _tx?: any) {
+      cancelled.push({ tokenId });
+      return 1;
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async cancelTimersForInstance(instanceId: string, _tx?: any) {
+      cancelled.push({ instanceId });
+      return 1;
+    },
+  };
+}
+
 // ─── Pure helpers ────────────────────────────────────────────────────
 
 describe("projectCanvas", () => {
@@ -2718,5 +2748,124 @@ describe("EngineService — P1 parallel-gateway JOIN", () => {
     expect(out.status).toBe("running");
     // No PROCESS_INSTANCES update flipped to completed.
     expect(env.updates.some((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "completed")).toBe(false);
+  });
+});
+
+// ─── P2 Session 4: timer infrastructure integration ──────────────────
+
+describe("EngineService — P2 task-due reminder scheduling", () => {
+  // Use a future dueDate so the engine schedules instead of firing
+  // immediately. ISO duration relative to "now" via resolveTaskScheduling.
+  const FUTURE_CANVAS = {
+    nodes: [
+      { id: "s", type: "startEvent" },
+      { id: "t", type: "userTask", data: {
+        assignment: { type: "directUser", value: UUID_A },
+        scheduling: { dueDate: "PT1H" },
+      } },
+      { id: "e", type: "endEvent" },
+    ],
+    edges: [
+      { id: "e1", source: "s", target: "t" },
+      { id: "e2", source: "t", target: "e" },
+    ],
+  };
+
+  it("schedules a task-due-reminder timer on userTask entry when dueAt is in the future", async () => {
+    const env = makeFakeTx(FUTURE_CANVAS);
+    const scheduler = makeFakeTimerScheduler();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+    await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect(scheduler.scheduled.length).toBe(1);
+    expect(scheduler.scheduled[0].kind).toBe("task-due-reminder");
+    expect((scheduler.scheduled[0].fireAt as Date).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("fires task-due audit immediately when dueAt is already in the past", async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const env = makeFakeTx({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "t", type: "userTask", data: {
+          assignment: { type: "directUser", value: UUID_A },
+          scheduling: { dueDate: past },
+        } },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "t" },
+        { id: "e2", source: "t", target: "e" },
+      ],
+    });
+    const scheduler = makeFakeTimerScheduler();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+    await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    // No scheduler row written.
+    expect(scheduler.scheduled.length).toBe(0);
+    // task-due audit event fired inline.
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(events).toContain("task-due");
+    const taskDue = env.inserts.find(
+      (i) => i.table === "INSTANCE_EVENTS" && i.values[0].eventType === "task-due",
+    );
+    expect((taskDue?.values[0].payload as { fireImmediately?: boolean })?.fireImmediately).toBe(true);
+  });
+
+  it("does NOT schedule a timer when the userTask has no scheduling.dueDate", async () => {
+    const env = makeFakeTx({
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "t" },
+        { id: "e2", source: "t", target: "e" },
+      ],
+    });
+    const scheduler = makeFakeTimerScheduler();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+    await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+    expect(scheduler.scheduled.length).toBe(0);
+    const events = env.inserts
+      .filter((i) => i.table === "INSTANCE_EVENTS")
+      .map((i) => i.values[0].eventType as string);
+    expect(events).not.toContain("task-due");
+  });
+
+  it("completeTask cancels the pending timer (decision: in-txn cancel)", async () => {
+    const env = makeCompleteTaskEnv({
+      tokenAssignedTo: UUID_A,
+      canvas: {
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+        ],
+      },
+    });
+    const scheduler = makeFakeTimerScheduler();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+    await service.completeTask({
+      tokenId: "tok-waiting", tenantId: "tenant-1", userId: UUID_A,
+    });
+    expect(scheduler.cancelled.some((c) => c.tokenId === "tok-waiting")).toBe(true);
+  });
+
+  it("registerCallback is wired for 'task-due-reminder' at construction time", () => {
+    const scheduler = makeFakeTimerScheduler();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    new EngineService({} as any, makeFakeWorker() as any, scheduler as any);
+    expect(scheduler.callbacks.has("task-due-reminder")).toBe(true);
   });
 });

@@ -33,6 +33,11 @@ type Task = {
   assignedTo: string | null;
   candidateRole: string | null;
   createdAt: string;
+  dueAt: string | null;
+  priority: number | null;
+  /** P2 Session 4 — server-derived flag: dueAt has passed. Drives the
+   *  red-dot indicator + tooltip in the inbox row. */
+  overdue: boolean;
 };
 
 type CompleteResponse = {
@@ -170,11 +175,29 @@ export default function TasksInboxPage() {
                 onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
               >
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: "#111827" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#111827", display: "flex", alignItems: "center", gap: 6 }}>
+                    {t.overdue && (
+                      <span
+                        title={t.dueAt ? `Overdue since ${new Date(t.dueAt).toLocaleString()}` : "Overdue"}
+                        aria-label="overdue"
+                        style={{
+                          display: "inline-block",
+                          width: 8, height: 8, borderRadius: "50%",
+                          background: "#DC2626",
+                          boxShadow: "0 0 0 2px #FEE2E2",
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
                     {t.nodeLabel ?? t.nodeId}
                   </div>
                   <div style={{ fontSize: 11, color: "#9CA3AF", fontFamily: "var(--font-mono, monospace)" }}>
                     {t.tokenId.slice(0, 8)}…
+                    {t.dueAt && (
+                      <span style={{ marginLeft: 8, color: t.overdue ? "#DC2626" : "#6B7280", fontFamily: "inherit" }}>
+                        · due {new Date(t.dueAt).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div style={{ fontSize: 13, color: "#475467", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>

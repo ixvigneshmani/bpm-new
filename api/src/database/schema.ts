@@ -1123,6 +1123,11 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "instance-suspended",
   "instance-resumed",
   "instance-modified",
+  // P2 Session 4 — emitted when a userTask's due-date timer fires
+  // (either via the scheduler or fire-immediately at task entry for
+  // already-past dates). Payload: { tokenId, nodeId, dueAt, taskLabel,
+  // assignedTo, candidateRole }.
+  "task-due",
   "error",
 ]);
 
@@ -1189,5 +1194,69 @@ export const aiInteractions = pgTable(
       t.tenantId,
       t.createdAt.desc(),
     ),
+  ],
+);
+
+// ─── SCHEDULED_TIMERS ──────────────────────────────────────────────
+// P2 Session 4 — the engine's wake-me-up-later queue. Every row is one
+// future event the engine needs to fire: a userTask due-date reminder
+// today; boundary-event timers, intermediate-catch timers, and timer
+// start events in Session 6.
+//
+// Lifecycle: scheduleTimer INSERTs `pending`. The TimerSchedulerService
+// polls every 10s with `FOR UPDATE SKIP LOCKED` for due rows; per row
+// flips `pending` → `firing` (two-phase fire — Decision #1 for crash
+// idempotency), dispatches the callback, then DELETEs. Rows stuck in
+// `firing` longer than the recovery threshold (5 min) get retried.
+
+export const scheduledTimerStatusEnum = pgEnum("SCHEDULED_TIMER_STATUS", [
+  "pending",
+  "firing",
+]);
+
+export const scheduledTimerKindEnum = pgEnum("SCHEDULED_TIMER_KIND", [
+  // Session 4 — userTask due-date reminder.
+  "task-due-reminder",
+  // Session 6 placeholders — declared now so the enum doesn't need a
+  // migration when those land. Engine doesn't dispatch these yet.
+  "boundary-timer",
+  "intermediate-catch-timer",
+  "start-event-timer",
+]);
+
+export const scheduledTimers = pgTable(
+  "SCHEDULED_TIMERS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID")
+      .notNull()
+      .references(() => processInstances.id, { onDelete: "cascade" }),
+    // Most timers belong to a single token; some kinds (start-event
+    // timers when those land) may not — keep nullable.
+    tokenId: uuid("TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    fireAt: timestamp("FIRE_AT", { withTimezone: true }).notNull(),
+    kind: scheduledTimerKindEnum("KIND").notNull(),
+    status: scheduledTimerStatusEnum("STATUS").notNull().default("pending"),
+    payload: jsonb("PAYLOAD"),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    /** Set when the scheduler flips a row to `firing`. The recovery
+     *  query — "is there a `firing` row older than 5 min?" — uses this
+     *  to detect mid-fire crashes and re-pick the row. */
+    firingStartedAt: timestamp("FIRING_STARTED_AT", { withTimezone: true }),
+  },
+  (t) => [
+    // Primary poll query: pending + due. Sorting on fire_at makes the
+    // poll FIFO-ish (earliest due fires first).
+    index("SCHEDULED_TIMER_POLL_IDX").on(t.status, t.fireAt),
+    // Bulk cancel by instance (cancelInstance) + by token (completeTask).
+    index("SCHEDULED_TIMER_INSTANCE_IDX").on(t.instanceId),
+    index("SCHEDULED_TIMER_TOKEN_IDX").on(t.tokenId),
   ],
 );

@@ -12,6 +12,7 @@ import { OutboxService } from "./outbox.service";
 import { ServiceTaskRegistry } from "./service-task-registry";
 import { ServiceTaskService } from "./service-task.service";
 import { TasksController } from "./tasks.controller";
+import { TimerSchedulerService } from "./timer-scheduler.service";
 import { WebhooksController } from "./webhooks.controller";
 import { WebhooksService } from "./webhooks.service";
 import { WorkerService } from "./worker.service";
@@ -34,7 +35,8 @@ import { WorkerService } from "./worker.service";
     WebhooksService,
     ServiceTaskRegistry,
     ServiceTaskService,
+    TimerSchedulerService,
   ],
-  exports: [EngineService, WorkerService, ServiceTaskRegistry],
+  exports: [EngineService, WorkerService, ServiceTaskRegistry, TimerSchedulerService],
 })
 export class EngineModule {}
