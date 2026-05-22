@@ -1145,6 +1145,19 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "boundary-unsubscribed",
   "boundary-fired",
   "error",
+  // P2 Session 6b — error throw lifecycle. `error-thrown` is emitted
+  // by the end-event throw before walking the scope chain. If no
+  // matching error boundary catches the throw, `error-uncaught` is
+  // emitted and the instance fails. Caught throws emit
+  // `boundary-fired` (with kind: 'error') on the host scope.
+  "error-thrown",
+  "error-uncaught",
+  // P2 Session 6b — event subprocess lifecycle. Subscribed at the
+  // parent scope's entry (root process start or subprocess entry).
+  // Fires when the trigger event arrives (today: timer). Payload:
+  // { eventSubProcessId, innerStartId, kind, interrupting }.
+  "event-subprocess-subscribed",
+  "event-subprocess-fired",
 ]);
 
 export const instanceEvents = pgTable(

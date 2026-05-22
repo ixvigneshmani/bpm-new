@@ -43,6 +43,13 @@
       "when": 1779087384116,
       "tag": "0005_i4_s2_drop_tenant_mail_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1779732000000,
+      "tag": "0006_session_6b_error_event_subprocess",
+      "breakpoints": true
     }
   ]
 }
