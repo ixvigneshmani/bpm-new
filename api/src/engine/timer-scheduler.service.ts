@@ -140,15 +140,20 @@ export class TimerSchedulerService implements OnApplicationBootstrap, OnModuleDe
   /** Insert a new timer row. Idempotency is the caller's job — the
    *  engine cancels existing timers for a token before scheduling a
    *  new one in the same context. */
-  async scheduleTimer(args: {
-    tenantId: string;
-    instanceId: string;
-    tokenId: string | null;
-    fireAt: Date;
-    kind: string;
-    payload?: unknown;
-  }): Promise<{ id: string }> {
-    const rows = await this.db
+  async scheduleTimer(
+    args: {
+      tenantId: string;
+      instanceId: string;
+      tokenId: string | null;
+      fireAt: Date;
+      kind: string;
+      payload?: unknown;
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx?: any,
+  ): Promise<{ id: string }> {
+    const exec = tx ?? this.db;
+    const rows = await exec
       .insert(scheduledTimers)
       .values({
         tenantId: args.tenantId,

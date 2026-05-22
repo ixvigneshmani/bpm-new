@@ -644,13 +644,16 @@ export class EngineService {
                 },
               });
             } else {
-              await this.timerScheduler.scheduleTimer({
-                tenantId: args.tenantId,
-                instanceId: args.instanceId,
-                tokenId: args.tokenId,
-                fireAt: dueAt,
-                kind: "task-due-reminder",
-              });
+              await this.timerScheduler.scheduleTimer(
+                {
+                  tenantId: args.tenantId,
+                  instanceId: args.instanceId,
+                  tokenId: args.tokenId,
+                  fireAt: dueAt,
+                  kind: "task-due-reminder",
+                },
+                args.tx,
+              );
             }
           }
           return { tokenStatus: "waiting", hops };
