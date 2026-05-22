@@ -1602,7 +1602,7 @@ export class EngineService {
           via: interrupting ? "boundary-interrupt" : "boundary-noninterrupt",
         },
       });
-      await this.advanceToken({
+      const adv = await this.advanceToken({
         tx,
         tenantId: t.tenantId,
         instanceId: t.instanceId,
@@ -1612,6 +1612,48 @@ export class EngineService {
         canvas,
         variables: (instRow.variables as Record<string, unknown> | null) ?? {},
       });
+
+      // P2 Session 6a — instance-completion check. The 5 main advance
+      // call sites all run this dance; fireBoundaryTimer is the 6th
+      // and was missing it (caught by live QA — boundary fired,
+      // escalation token reached an end event, but the instance
+      // stayed `running` forever).
+      if (adv.tokenStatus === "completed" && (await this.countLiveTokens(tx, t.instanceId)) === 0) {
+        await tx
+          .update(processInstances)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(processInstances.id, t.instanceId));
+        await recordEvent(tx, {
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          eventType: "instance-completed",
+          payload: { via: "boundary-timer", hops: adv.hops },
+        });
+        await this.emitOutbox(tx, {
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          eventType: "instance-completed",
+          payload: { via: "boundary-timer", hops: adv.hops },
+          redactedKeys: canvas.engineConfig?.redactedVariableKeys,
+        });
+      } else if (adv.tokenStatus === "failed") {
+        // Failure on the boundary path bubbles up; the boundary
+        // shouldn't keep an instance in a half-running state.
+        await tx
+          .update(processInstances)
+          .set({
+            status: "failed",
+            errorMessage: adv.errorMessage ?? null,
+            completedAt: new Date(),
+          })
+          .where(eq(processInstances.id, t.instanceId));
+        await recordEvent(tx, {
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          eventType: "instance-failed",
+          payload: { via: "boundary-timer", hops: adv.hops, message: adv.errorMessage },
+        });
+      }
     });
   }
 
