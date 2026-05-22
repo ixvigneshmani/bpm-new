@@ -949,6 +949,15 @@ const EVENT_HOST_TYPES = new Set([
   "intermediateThrowEvent", "boundaryEvent",
 ]);
 
+// P2 Session 6a — `timer` is now wired end-to-end on event hosts that
+// matter: boundaryEvent (subscribe + fire). Other kinds (message,
+// signal, error, escalation, conditional, link, cancel, compensation)
+// stay flagged until Sessions 6b–9 + P4/P6.
+const EVENT_KINDS_STILL_INERT = new Set([
+  "message", "signal", "error", "escalation", "conditional",
+  "link", "cancel", "compensation",
+]);
+
 const eventDefinitionRuntimeRule: ValidationRule = {
   id: "event-definition-runtime",
   name: "Event definition runtime",
@@ -960,19 +969,26 @@ const eventDefinitionRuntimeRule: ValidationRule = {
       const def = d?.eventDefinition as { kind?: string } | undefined;
       const kind = def?.kind;
       if (!kind || kind === "none") continue;
+      // Timer on boundary events is implemented (P2 Session 6a). Other
+      // host types (start/intermediate) still need the event-
+      // subscription tables (P3+). Timer on those stays flagged.
+      if (kind === "timer" && n.type === "boundaryEvent") continue;
+      if (!EVENT_KINDS_STILL_INERT.has(kind) && kind !== "timer" && kind !== "terminate") continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `event-definition-runtime:${n.id}`,
         severity: "warning",
         ruleId: "event-definition-runtime",
         nodeId: n.id,
-        message: `${n.type} "${label}" carries a "${kind}" trigger but the engine doesn't subscribe to events today. Event subscription + correlation ships in P2–P4/P6 of the engine sprint (kind-dependent).`,
+        message: `${n.type} "${label}" carries a "${kind}" trigger but the engine doesn't subscribe to events today. Event subscription + correlation ships in later P2/P3/P4/P6 sessions (kind-dependent).`,
       });
     }
     return issues;
   },
 };
 
+// P2 Session 6a — boundary events with kind `timer` now execute.
+// Other kinds still flagged until Sessions 6b–9 (per kind).
 const boundaryEventRuntimeRule: ValidationRule = {
   id: "boundary-event-runtime",
   name: "Boundary event runtime",
@@ -980,13 +996,16 @@ const boundaryEventRuntimeRule: ValidationRule = {
     const issues: ValidationIssue[] = [];
     for (const n of nodes) {
       if (n.type !== "boundaryEvent") continue;
+      const d = n.data as { eventDefinition?: { kind?: string } } | undefined;
+      const kind = d?.eventDefinition?.kind;
+      if (kind === "timer") continue; // shipped
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `boundary-event-runtime:${n.id}`,
         severity: "warning",
         ruleId: "boundary-event-runtime",
         nodeId: n.id,
-        message: `Boundary event "${label}" — engine doesn't register boundary subscriptions today. The host activity will never be interrupted or forked. Boundary execution ships in P2/P3/P4/P6 of the engine sprint.`,
+        message: `Boundary event "${label}" (kind "${kind ?? "none"}") — engine doesn't register this boundary kind today. Timer boundaries work (Session 6a); error lands in Session 6b; message/signal/etc. land later.`,
       });
     }
     return issues;

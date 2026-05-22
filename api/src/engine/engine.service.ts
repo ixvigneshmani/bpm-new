@@ -207,6 +207,10 @@ export class EngineService {
       "task-due-reminder",
       (t) => this.fireTaskDueReminder(t),
     );
+    this.timerScheduler?.registerCallback(
+      "boundary-timer",
+      (t) => this.fireBoundaryTimer(t),
+    );
   }
 
   /** Start a new instance: load the process, snapshot its canvas, find
@@ -738,6 +742,16 @@ export class EngineService {
               );
             }
           }
+          // P2 Session 6a — subscribe boundary timers (if any) on this
+          // host. Same hook used by serviceTask below; subProcess too.
+          await this.subscribeBoundaryTimers({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            hostTokenId: args.tokenId,
+            hostNodeId: nodeId,
+            canvas: args.canvas,
+          });
           return { tokenStatus: "waiting", hops };
         }
 
@@ -801,6 +815,15 @@ export class EngineService {
             },
             maxAttempts: resolveServiceTaskMaxAttempts(node) ?? 3,
           });
+          // P2 Session 6a — subscribe boundary timers.
+          await this.subscribeBoundaryTimers({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            hostTokenId: args.tokenId,
+            hostNodeId: nodeId,
+            canvas: args.canvas,
+          });
           return { tokenStatus: "waiting", hops };
         }
 
@@ -855,6 +878,17 @@ export class EngineService {
             nodeId,
             eventType: "token-waiting",
             payload: { waitingFor: "subprocess" },
+          });
+          // P2 Session 6a — boundary timers on the subprocess host
+          // subscribe here. Interrupting fire later kills the parent
+          // + all scoped descendants.
+          await this.subscribeBoundaryTimers({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            hostTokenId: args.tokenId,
+            hostNodeId: nodeId,
+            canvas: args.canvas,
           });
 
           // Spawn the inner child at the inner start. scope_token_id
@@ -1379,6 +1413,204 @@ export class EngineService {
           assignedTo: row.assignedTo,
           candidateRole: row.candidateRole,
         },
+      });
+    });
+  }
+
+  /** P2 Session 6a — subscribe one boundary-timer row per timer
+   *  boundary attached to this host. Reuses SCHEDULED_TIMERS (kind
+   *  `boundary-timer`). Payload carries the boundary node id + the
+   *  interrupting flag so the fire callback can act without re-walking
+   *  the canvas. Cancellation is implicit: cancelTimer(hostTokenId)
+   *  deletes every row keyed by token_id — including these — at host
+   *  exit, alongside the task-due reminder. */
+  private async subscribeBoundaryTimers(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    hostTokenId: string;
+    hostNodeId: string;
+    canvas: EngineCanvas;
+  }): Promise<void> {
+    if (!this.timerScheduler) return;
+    const boundaries = args.canvas.nodes.filter((n) => {
+      if (n.type !== "boundaryEvent") return false;
+      const d = n.data as
+        | { attachedToRef?: string; eventDefinition?: { kind?: string } }
+        | undefined;
+      return d?.attachedToRef === args.hostNodeId && d?.eventDefinition?.kind === "timer";
+    });
+    for (const bnd of boundaries) {
+      const d = bnd.data as {
+        eventDefinition?: { value?: string; timerType?: string };
+        cancelActivity?: boolean;
+      };
+      const fireAt = resolveTimerFireAt(d.eventDefinition);
+      if (!fireAt) {
+        this.logger.warn(
+          `Boundary timer ${bnd.id}: could not parse value "${d.eventDefinition?.value ?? ""}". Skipping.`,
+        );
+        continue;
+      }
+      const interrupting = d.cancelActivity !== false; // default true per spec
+      await this.timerScheduler.scheduleTimer(
+        {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          fireAt,
+          kind: "boundary-timer",
+          payload: { boundaryNodeId: bnd.id, hostNodeId: args.hostNodeId, interrupting },
+        },
+        args.tx,
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: args.hostTokenId,
+        nodeId: args.hostNodeId,
+        eventType: "boundary-subscribed",
+        payload: { boundaryNodeId: bnd.id, kind: "timer", interrupting, fireAt: fireAt.toISOString() },
+      });
+    }
+  }
+
+  /** P2 Session 6a — dispatcher for the `boundary-timer` kind. Loads
+   *  the host token, verifies still live, finds the boundary's
+   *  outgoing edge target, and either kills the host + spawns a
+   *  replacement at the target (interrupting) or just spawns a
+   *  sibling there (non-interrupting). Other boundary timers on the
+   *  same host cancel implicitly when the host is killed (the next
+   *  pre-fire host check sees a non-live token and bails). */
+  private async fireBoundaryTimer(t: ClaimedTimer): Promise<void> {
+    if (!t.tokenId) return;
+    const payload = t.payload as
+      | { boundaryNodeId?: string; hostNodeId?: string; interrupting?: boolean }
+      | null;
+    const boundaryNodeId = payload?.boundaryNodeId;
+    if (!boundaryNodeId) return;
+    const interrupting = payload?.interrupting !== false;
+    const hostTokenId = t.tokenId;
+
+    await this.db.transaction(async (tx) => {
+      const hostRows = await tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          status: instanceTokens.status,
+          currentNodeId: instanceTokens.currentNodeId,
+          scopeTokenId: instanceTokens.scopeTokenId,
+        })
+        .from(instanceTokens)
+        .where(eq(instanceTokens.id, hostTokenId))
+        .limit(1);
+      const host = hostRows[0];
+      if (!host || (host.status !== "active" && host.status !== "waiting")) {
+        // Host already done (completed/skipped/cancelled/interrupted by
+        // an earlier boundary). Drop silently — the scheduler will
+        // DELETE this row alongside any siblings via cancelTimer.
+        this.logger.log({
+          event: "engine.boundary.fired.skipped",
+          reason: host ? `host ${host.status}` : "host not found",
+          hostTokenId,
+          boundaryNodeId,
+        });
+        return;
+      }
+
+      const instRow = await this.loadInstanceById(tx, t.instanceId, t.tenantId);
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
+      const boundaryNode = canvas.nodes.find((n) => n.id === boundaryNodeId);
+      if (!boundaryNode) {
+        this.logger.warn(`Boundary timer: boundary node ${boundaryNodeId} not on canvas; dropping.`);
+        return;
+      }
+      const outgoing = canvas.edges.find((e) => e.source === boundaryNodeId);
+      if (!outgoing) {
+        this.logger.warn(`Boundary ${boundaryNodeId} has no outgoing flow; dropping.`);
+        return;
+      }
+
+      await recordEvent(tx, {
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: hostTokenId,
+        nodeId: host.currentNodeId,
+        eventType: "boundary-fired",
+        payload: {
+          boundaryNodeId,
+          kind: "timer",
+          interrupting,
+          target: outgoing.target,
+        },
+      });
+
+      if (interrupting) {
+        // Kill host + scoped descendants. The host's status flips to
+        // failed with a "interrupted by boundary" message so downstream
+        // ops can distinguish from a real failure.
+        await this.updateTokenWithLock(tx, host.id, host.version, {
+          status: "failed",
+          errorMessage: `Interrupted by boundary ${boundaryNodeId}.`,
+        });
+        // Cascade: any tokens scoped through the host (host as a
+        // subprocess) die too. Cheap bulk UPDATE; no per-token
+        // optimistic lock needed because we hold the txn.
+        await tx
+          .update(instanceTokens)
+          .set({
+            status: "failed",
+            errorMessage: `Interrupted by boundary ${boundaryNodeId} on host.`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(instanceTokens.scopeTokenId, host.id),
+              inArray(instanceTokens.status, ["active", "waiting"] as const),
+            ),
+          );
+        // Cancel sibling boundary timers on the host so they don't
+        // re-fire after the host is dead.
+        await this.timerScheduler?.cancelTimer(host.id, tx);
+      }
+
+      // Spawn the boundary-output token. Parent = host (audit lineage);
+      // scope = host's scope (so a non-interrupting boundary inside a
+      // subprocess still drains the subprocess correctly).
+      const childRows = await tx
+        .insert(instanceTokens)
+        .values({
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          currentNodeId: outgoing.target,
+          status: "active",
+          parentTokenId: host.id,
+          scopeTokenId: host.scopeTokenId,
+        })
+        .returning({ id: instanceTokens.id, version: instanceTokens.version });
+      const child = childRows[0];
+      await recordEvent(tx, {
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: child.id,
+        nodeId: outgoing.target,
+        eventType: "token-created",
+        payload: {
+          parentTokenId: host.id,
+          scopeTokenId: host.scopeTokenId,
+          via: interrupting ? "boundary-interrupt" : "boundary-noninterrupt",
+        },
+      });
+      await this.advanceToken({
+        tx,
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: child.id,
+        tokenVersion: child.version ?? 0,
+        currentNodeId: outgoing.target,
+        canvas,
+        variables: (instRow.variables as Record<string, unknown> | null) ?? {},
       });
     });
   }
@@ -4882,6 +5114,38 @@ function parseIsoDurationMs(s: string): number | null {
     Number(mi || 0) * 60_000 +
     Number(se || 0) * 1000;
   return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+/** P2 Session 6a — parse a timer event-definition's value into a
+ *  concrete fire-at Date. Supports BPMN's three timerType variants
+ *  (date, duration, cycle); for Session 6a the engine only fires once
+ *  per subscription, so cycle is parsed to the FIRST iteration only.
+ *  Returns null when the value is empty or unparseable. */
+export function resolveTimerFireAt(
+  def: { value?: string; timerType?: string } | undefined,
+  now: Date = new Date(),
+): Date | null {
+  if (!def || typeof def.value !== "string" || def.value.trim().length === 0) return null;
+  const raw = def.value.trim();
+  // ISO 8601 date: "2026-12-01T09:00:00Z"
+  if (def.timerType === "date" || (!def.timerType && !raw.startsWith("P") && !raw.startsWith("R"))) {
+    const t = Date.parse(raw);
+    return Number.isNaN(t) ? null : new Date(t);
+  }
+  // ISO 8601 cycle "R<n>/P..." — first iteration only.
+  if (def.timerType === "cycle" || raw.startsWith("R")) {
+    const match = /^R\d*\/(P.+)$/.exec(raw);
+    const durStr = match?.[1];
+    if (!durStr) return null;
+    const ms = parseIsoDurationMs(durStr);
+    return ms !== null ? new Date(now.getTime() + ms) : null;
+  }
+  // ISO 8601 duration: "PT2H", "P1D"
+  if (raw.startsWith("P")) {
+    const ms = parseIsoDurationMs(raw);
+    return ms !== null ? new Date(now.getTime() + ms) : null;
+  }
+  return null;
 }
 
 export function resolveTaskScheduling(

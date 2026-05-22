@@ -120,17 +120,20 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     );
   };
 
-  // P0: engine today only handles plain (`none`) start/end events.
-  // Every other event kind — timer, message, signal, error, escalation,
-  // compensation, conditional, terminate, cancel, link — silently
-  // no-ops at runtime. Surfaces matching phases:
-  //   timer / boundary timer .................. P2
+  // P0–P2 Session 6a — what's wired so far:
+  //   timer on boundaryEvent .................. ✅ Session 6a
+  //   error on boundaryEvent .................. ⏳ Session 6b
   //   message / signal / start-trigger ........ P3
   //   intermediate catch + throw .............. P3
-  //   error / escalation / cancel ............. P4
+  //   escalation / cancel ..................... P4
   //   compensation ............................ P6
   //   terminate ............................... P4 (end-event semantics)
-  const showRuntimeBanner = definition.kind !== "none" && definition.kind !== "terminate";
+  const timerBoundaryWired =
+    variant === "boundary" && definition.kind === "timer";
+  const showRuntimeBanner =
+    definition.kind !== "none" &&
+    definition.kind !== "terminate" &&
+    !timerBoundaryWired;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

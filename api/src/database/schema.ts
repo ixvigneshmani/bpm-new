@@ -1137,6 +1137,13 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   // already-past dates). Payload: { tokenId, nodeId, dueAt, taskLabel,
   // assignedTo, candidateRole }.
   "task-due",
+  // P2 Session 6a — boundary event lifecycle. Subscribed at
+  // host-activity-enter, unsubscribed at host-activity-exit, fired
+  // when the timer fires. Payload: { boundaryNodeId, kind,
+  // interrupting }.
+  "boundary-subscribed",
+  "boundary-unsubscribed",
+  "boundary-fired",
   "error",
 ]);
 

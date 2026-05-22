@@ -19,6 +19,7 @@ import {
   projectCanvas,
   resolveDirectUserAssignee,
   resolveTaskScheduling,
+  resolveTimerFireAt,
   type EngineCanvas,
   type EngineNode,
 } from "../engine.service";
@@ -3109,6 +3110,125 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
       const childCreated = events.find((e) => e.eventType === "token-created" && (e.payload as { via?: string })?.via === "subprocess");
       expect(childCreated).toBeTruthy();
       expect((childCreated?.payload as { scopeTokenId?: string })?.scopeTokenId).toBeDefined();
+    });
+  });
+
+  // ─── P2 Session 6a: timer boundary subscription on host entry ─────
+  describe("timer boundary subscription", () => {
+    it("schedules a boundary-timer when a userTask host has an attached timer boundary", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+          { id: "bnd", type: "boundaryEvent", data: {
+              attachedToRef: "t",
+              cancelActivity: true,
+              eventDefinition: { kind: "timer", timerType: "duration", value: "PT5M" },
+          } },
+          { id: "esc", type: "endEvent" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+          { id: "eb", source: "bnd", target: "esc" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      // Two timers scheduled? No — only the boundary timer (no due
+      // date on the task). Confirm: one boundary-timer, no task-due.
+      const boundaries = scheduler.scheduled.filter((s) => s.kind === "boundary-timer");
+      expect(boundaries.length).toBe(1);
+      expect((boundaries[0].payload as { boundaryNodeId?: string }).boundaryNodeId).toBe("bnd");
+      expect((boundaries[0].payload as { interrupting?: boolean }).interrupting).toBe(true);
+    });
+
+    it("uses non-interrupting (interrupting=false) when boundary cancelActivity=false", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+          { id: "bnd", type: "boundaryEvent", data: {
+              attachedToRef: "t",
+              cancelActivity: false,
+              eventDefinition: { kind: "timer", timerType: "duration", value: "PT5M" },
+          } },
+          { id: "esc", type: "endEvent" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+          { id: "eb", source: "bnd", target: "esc" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      const b = scheduler.scheduled.find((s) => s.kind === "boundary-timer");
+      expect((b?.payload as { interrupting?: boolean }).interrupting).toBe(false);
+    });
+
+    it("skips boundaries with non-timer event definitions (message/error/etc.)", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+          { id: "bnd", type: "boundaryEvent", data: {
+              attachedToRef: "t",
+              eventDefinition: { kind: "message", messageName: "Cancel" },
+          } },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(scheduler.scheduled.filter((s) => s.kind === "boundary-timer").length).toBe(0);
+    });
+
+    it("registers the boundary-timer dispatcher at construction time", () => {
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      new EngineService({} as any, makeFakeWorker() as any, scheduler as any);
+      expect(scheduler.callbacks.has("boundary-timer")).toBe(true);
+      expect(scheduler.callbacks.has("task-due-reminder")).toBe(true);
+    });
+  });
+
+  // ─── P2 Session 6a: resolveTimerFireAt ───────────────────────────
+  describe("resolveTimerFireAt", () => {
+    it("parses a static ISO datetime", () => {
+      const out = resolveTimerFireAt({ value: "2026-12-01T09:00:00Z", timerType: "date" });
+      expect(out?.toISOString()).toBe("2026-12-01T09:00:00.000Z");
+    });
+
+    it("parses an ISO duration relative to the supplied clock", () => {
+      const now = new Date("2026-05-22T00:00:00Z");
+      const out = resolveTimerFireAt({ value: "PT2H", timerType: "duration" }, now);
+      expect(out?.toISOString()).toBe("2026-05-22T02:00:00.000Z");
+    });
+
+    it("parses an R-cycle's first iteration", () => {
+      const now = new Date("2026-05-22T00:00:00Z");
+      const out = resolveTimerFireAt({ value: "R3/PT15M", timerType: "cycle" }, now);
+      expect(out?.toISOString()).toBe("2026-05-22T00:15:00.000Z");
+    });
+
+    it("returns null for missing or unparseable values", () => {
+      expect(resolveTimerFireAt(undefined)).toBeNull();
+      expect(resolveTimerFireAt({ value: "" })).toBeNull();
+      expect(resolveTimerFireAt({ value: "not-a-date" })).toBeNull();
+      expect(resolveTimerFireAt({ value: "P", timerType: "duration" })).toBeNull();
     });
   });
 });
