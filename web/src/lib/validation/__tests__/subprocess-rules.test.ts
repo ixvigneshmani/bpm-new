@@ -190,7 +190,7 @@ describe("P5 scope-aware validation", () => {
     expect(hits).toHaveLength(0);
   });
 
-  it("subprocess-runtime still fires for eventSubProcess (Session 6 work)", () => {
+  it("subprocess-runtime still fires for eventSubProcess with non-timer inner start (Sessions 7+ work)", () => {
     const nodes: Node[] = [
       mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
       mkNode({ id: "ESP", type: "eventSubProcess", data: { label: "ESP", bpmnType: "eventSubProcess" } }),
@@ -200,6 +200,75 @@ describe("P5 scope-aware validation", () => {
     const issues = runValidation(nodes, []);
     const hit = issues.find((i) => i.ruleId === "subprocess-runtime" && i.nodeId === "ESP");
     expect(hit).toBeTruthy();
-    expect(hit!.message).toMatch(/Session 6/);
+  });
+
+  // ─── P2 Session 6b: timer-triggered event subprocesses ship ─────────
+  it("subprocess-runtime does NOT fire for a timer-triggered eventSubProcess (Session 6b)", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "ESP", type: "eventSubProcess", data: { label: "ESP", bpmnType: "eventSubProcess" } }),
+      mkNode({ id: "is", type: "startEvent", parentId: "ESP", data: { label: "Trig", eventDefinition: { kind: "timer", timerType: "duration", value: "PT30S" } } }),
+      mkNode({ id: "ie", type: "endEvent", parentId: "ESP", data: { label: "End" } }),
+    ];
+    const issues = runValidation(nodes, []);
+    const espHit = issues.find((i) => i.ruleId === "subprocess-runtime" && i.nodeId === "ESP");
+    expect(espHit).toBeFalsy();
+    // The inner timer-start also shouldn't be flagged by
+    // event-definition-runtime (P2 Session 6b ships the dispatcher).
+    const innerHit = issues.find(
+      (i) => i.ruleId === "event-definition-runtime" && i.nodeId === "is",
+    );
+    expect(innerHit).toBeFalsy();
+  });
+
+  it("boundary-event-runtime + event-definition-runtime no longer flag an error boundary (Session 6b)", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "sp", type: "subProcess", data: { label: "SP", bpmnType: "subProcess" } }),
+      mkNode({ id: "is", type: "startEvent", parentId: "sp", data: { label: "S", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "ie", type: "endEvent", parentId: "sp", data: { label: "End" } }),
+      mkNode({
+        id: "errBnd",
+        type: "boundaryEvent",
+        data: {
+          label: "On error",
+          bpmnType: "boundaryEvent",
+          attachedToRef: "sp",
+          cancelActivity: true,
+          eventDefinition: { kind: "error", errorCode: "BOOM" },
+        },
+      }),
+      mkNode({ id: "esc", type: "endEvent", data: { label: "Esc" } }),
+      mkNode({ id: "end", type: "endEvent", data: { label: "End" } }),
+    ];
+    const issues = runValidation(nodes, []);
+    const beRule = issues.find(
+      (i) => i.ruleId === "boundary-event-runtime" && i.nodeId === "errBnd",
+    );
+    expect(beRule).toBeFalsy();
+    const edRule = issues.find(
+      (i) => i.ruleId === "event-definition-runtime" && i.nodeId === "errBnd",
+    );
+    expect(edRule).toBeFalsy();
+  });
+
+  it("event-definition-runtime no longer flags an error end event (Session 6b)", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({
+        id: "errEnd",
+        type: "endEvent",
+        data: {
+          label: "Throw",
+          bpmnType: "endEvent",
+          eventDefinition: { kind: "error", errorCode: "BOOM" },
+        },
+      }),
+    ];
+    const issues = runValidation(nodes, []);
+    const hit = issues.find(
+      (i) => i.ruleId === "event-definition-runtime" && i.nodeId === "errEnd",
+    );
+    expect(hit).toBeFalsy();
   });
 });

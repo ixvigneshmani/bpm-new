@@ -3331,4 +3331,165 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
       expect(resolveTimerFireAt({ value: "P", timerType: "duration" })).toBeNull();
     });
   });
+
+  // ─── P2 Session 6b: error throw + timer event subprocess ──────────
+  describe("error throw at end event (Session 6b)", () => {
+    it("error end event with no enclosing error boundary fails the instance as uncaught", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          // The error end event throws "BOOM"; nothing in scope catches.
+          { id: "errEnd", type: "endEvent", data: { eventDefinition: { kind: "error", errorCode: "BOOM" } } },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "errEnd" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("failed");
+      const failedUpd = env.updates.find(
+        (u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed",
+      );
+      expect(failedUpd?.set.errorMessage).toMatch(/Uncaught error "BOOM"/);
+    });
+
+    it("emits an `error-thrown` audit row when an error end event fires", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "errEnd", type: "endEvent", data: { eventDefinition: { kind: "error", errorCode: "BOOM" } } },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "errEnd" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      const thrown = events.find((e) => e.eventType === "error-thrown");
+      expect(thrown).toBeTruthy();
+      expect((thrown?.payload as { errorCode?: string })?.errorCode).toBe("BOOM");
+      const uncaught = events.find((e) => e.eventType === "error-uncaught");
+      expect(uncaught).toBeTruthy();
+    });
+
+    it("non-error end events still take the normal terminal path (regression guard)", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("completed");
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      expect(events.find((e) => e.eventType === "error-thrown")).toBeFalsy();
+    });
+  });
+
+  describe("event-subprocess timer subscription (Session 6b)", () => {
+    it("schedules a `start-event-timer` at the root scope when a top-level eventSubProcess has a timer-start", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "e", type: "endEvent" },
+          // Top-level event subprocess (no parentId) with a timer start.
+          { id: "ESP", type: "eventSubProcess" },
+          { id: "espStart", type: "startEvent", parentId: "ESP", data: { eventDefinition: { kind: "timer", timerType: "duration", value: "PT5M" } } },
+          { id: "espEnd", type: "endEvent", parentId: "ESP" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "e" },
+          { id: "espE", source: "espStart", target: "espEnd" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      const starters = scheduler.scheduled.filter((s) => s.kind === "start-event-timer");
+      expect(starters.length).toBe(1);
+      const payload = starters[0].payload as {
+        eventSubProcessId?: string; innerStartId?: string; interrupting?: boolean; parentScopeNodeId?: string | null;
+      };
+      expect(payload.eventSubProcessId).toBe("ESP");
+      expect(payload.innerStartId).toBe("espStart");
+      expect(payload.interrupting).toBe(true); // BPMN default
+      expect(payload.parentScopeNodeId).toBeNull();
+    });
+
+    it("schedules a `start-event-timer` inside a subprocess when an eventSubProcess child has a timer-start", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "sp", type: "subProcess" },
+          { id: "is", type: "startEvent", parentId: "sp", data: { eventDefinition: { kind: "none" } } },
+          { id: "it", type: "userTask", parentId: "sp", data: { assignment: { type: "directUser", value: UUID_A } } },
+          { id: "ie", type: "endEvent", parentId: "sp" },
+          { id: "e", type: "endEvent" },
+          // EventSubProcess nested in sp.
+          { id: "ESP", type: "eventSubProcess", parentId: "sp" },
+          { id: "espStart", type: "startEvent", parentId: "ESP", data: { eventDefinition: { kind: "timer", timerType: "duration", value: "PT10M" } } },
+          { id: "espEnd", type: "endEvent", parentId: "ESP" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "sp" },
+          { id: "e2", source: "sp", target: "e" },
+          { id: "ei1", source: "is", target: "it" },
+          { id: "ei2", source: "it", target: "ie" },
+          { id: "espE", source: "espStart", target: "espEnd" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      const starters = scheduler.scheduled.filter((s) => s.kind === "start-event-timer");
+      expect(starters.length).toBe(1);
+      const payload = starters[0].payload as { eventSubProcessId?: string; parentScopeNodeId?: string | null };
+      expect(payload.eventSubProcessId).toBe("ESP");
+      expect(payload.parentScopeNodeId).toBe("sp");
+    });
+
+    it("does NOT schedule a start-event-timer for an eventSubProcess with a non-timer inner start", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "e", type: "endEvent" },
+          { id: "ESP", type: "eventSubProcess" },
+          // Message start — still inert until P3 ships subscription.
+          { id: "espStart", type: "startEvent", parentId: "ESP", data: { eventDefinition: { kind: "message", messageName: "Foo" } } },
+          { id: "espEnd", type: "endEvent", parentId: "ESP" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "e" },
+          { id: "espE", source: "espStart", target: "espEnd" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(scheduler.scheduled.filter((s) => s.kind === "start-event-timer").length).toBe(0);
+    });
+
+    it("registers the start-event-timer dispatcher at construction time", () => {
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      new EngineService({} as any, makeFakeWorker() as any, scheduler as any);
+      expect(scheduler.callbacks.has("start-event-timer")).toBe(true);
+    });
+  });
 });

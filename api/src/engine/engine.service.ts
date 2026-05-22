@@ -211,6 +211,11 @@ export class EngineService {
       "boundary-timer",
       (t) => this.fireBoundaryTimer(t),
     );
+    // P2 Session 6b — event-subprocess timer-start dispatcher.
+    this.timerScheduler?.registerCallback(
+      "start-event-timer",
+      (t) => this.fireEventSubProcessStart(t),
+    );
   }
 
   /** Start a new instance: load the process, snapshot its canvas, find
@@ -326,6 +331,20 @@ export class EngineService {
         tokenId: token.id,
         nodeId: startNode.id,
         eventType: "token-created",
+      });
+
+      // P2 Session 6b — subscribe event-subprocess timer-starts at the
+      // ROOT scope (eventSubProcess nodes with no parentId). Cancelled
+      // implicitly when the root token's children drain (timer fire
+      // callback bails on non-live host) or via cancelTimersForInstance
+      // on cancelInstance.
+      await this.subscribeEventSubProcessTimers({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: inst.id,
+        parentScopeNodeId: null,
+        parentScopeTokenId: token.id,
+        canvas,
       });
 
       // 4. Drive the token through the graph until it hits a wait state
@@ -529,6 +548,30 @@ export class EngineService {
         // here, mark themselves done, and exit; only the last arrival
         // triggers the parent resume.
         if (node.type === "endEvent") {
+          // P2 Session 6b — error end event: throw + walk scope chain
+          // for a matching error boundary. If caught, the host scope is
+          // interrupted and execution continues on the boundary's
+          // outgoing edge; uncaught errors fail the instance with a
+          // clear message. Falls back to the normal terminal logic
+          // below when the end event is not an error throw.
+          const endDef = (node.data as
+            | { eventDefinition?: { kind?: string; errorCode?: string } }
+            | undefined)?.eventDefinition;
+          if (endDef?.kind === "error") {
+            const thrown = await this.throwErrorFromEnd({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              throwingTokenId: args.tokenId,
+              throwingTokenVersion: version,
+              errorCode: endDef.errorCode ?? "",
+              throwNodeId: nodeId,
+              canvas: args.canvas,
+              variables: args.variables,
+              hops,
+            });
+            return thrown;
+          }
           await recordEvent(args.tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
@@ -888,6 +931,20 @@ export class EngineService {
             instanceId: args.instanceId,
             hostTokenId: args.tokenId,
             hostNodeId: nodeId,
+            canvas: args.canvas,
+          });
+          // P2 Session 6b — event-subprocess timer-starts that sit
+          // inside this subprocess (children with parentId = nodeId
+          // and type = eventSubProcess) subscribe here. Timer fire
+          // spawns a child token at the eventSubProcess's inner start
+          // with scope = the parent subprocess token; interrupting
+          // variant kills scope siblings.
+          await this.subscribeEventSubProcessTimers({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            parentScopeNodeId: nodeId,
+            parentScopeTokenId: args.tokenId,
             canvas: args.canvas,
           });
 
@@ -1652,6 +1709,573 @@ export class EngineService {
           instanceId: t.instanceId,
           eventType: "instance-failed",
           payload: { via: "boundary-timer", hops: adv.hops, message: adv.errorMessage },
+        });
+      }
+    });
+  }
+
+  /** P2 Session 6b — throw an error from an end event with
+   *  eventDefinition.kind === 'error'. Walks the scope chain (via
+   *  scopeTokenId) looking for an error boundary attached to a parent
+   *  scope activity. Match policy (Camunda-style): empty/null errorCode
+   *  on the boundary catches any code; a specific code requires exact
+   *  string match. Multiple matching boundaries on one host fire in
+   *  canvas/node order (first match wins).
+   *
+   *  Caught → mark the host scope token failed, bulk-kill the host's
+   *  scope siblings, cancel timers on the host (sibling boundaries +
+   *  event-subprocess starters), spawn a new token at the boundary's
+   *  outgoing target inheriting the host's parent scope, and recurse
+   *  advanceToken from there. Returns the resulting tokenStatus so the
+   *  caller's instance-completion gate runs normally.
+   *
+   *  Uncaught (chain exhausted, no match) → fails the throwing token +
+   *  bubbles up. The startInstance / completeTask / boundary-timer
+   *  outer wrappers flip the instance to failed with the same message. */
+  private async throwErrorFromEnd(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    throwingTokenId: string;
+    throwingTokenVersion: number;
+    errorCode: string;
+    throwNodeId: string;
+    canvas: EngineCanvas;
+    variables: Record<string, unknown>;
+    hops: number;
+  }): Promise<{
+    tokenStatus: "completed" | "waiting" | "failed";
+    hops: number;
+    errorMessage?: string;
+  }> {
+    // Emit the throw audit before we touch anything. Operators see the
+    // throw row even if no catcher matches (uncaught path also fails).
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "error-thrown",
+      payload: { errorCode: args.errorCode },
+    });
+
+    // Mark the throwing token completed (it has done its job). We do
+    // this BEFORE the scope walk so a cascading kill at the host scope
+    // doesn't double-update this row (and so the audit reads "thrower
+    // completed → host failed → boundary fired", in order).
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "node-exited",
+    });
+    await this.updateTokenWithLock(
+      args.tx,
+      args.throwingTokenId,
+      args.throwingTokenVersion,
+      { status: "completed", currentNodeId: args.throwNodeId },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "token-completed",
+      payload: { via: "error-throw" },
+    });
+
+    // Walk up: starting at the throwing token's scope, examine each
+    // scope token's currentNodeId for an attached error boundary that
+    // matches our code. Bail when scopeTokenId becomes null (chain end
+    // = uncaught).
+    const startRows = await args.tx
+      .select({ scopeTokenId: instanceTokens.scopeTokenId })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.throwingTokenId))
+      .limit(1);
+    let cursor: string | null = (startRows[0]?.scopeTokenId as string | null) ?? null;
+    // Track the chain of intermediate scopes we passed through; we kill
+    // them (and their siblings) when we find the host so the whole
+    // sub-tree is torn down, matching Camunda's interrupting semantics.
+    const chain: Array<{
+      id: string;
+      nodeId: string;
+      version: number;
+      scopeTokenId: string | null;
+      status: string;
+    }> = [];
+
+    while (cursor !== null) {
+      const rows = await args.tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          currentNodeId: instanceTokens.currentNodeId,
+          scopeTokenId: instanceTokens.scopeTokenId,
+          status: instanceTokens.status,
+        })
+        .from(instanceTokens)
+        .where(eq(instanceTokens.id, cursor))
+        .limit(1);
+      const scopeTok = rows[0];
+      if (!scopeTok) break;
+
+      // Look on canvas for error boundary(ies) attached to this scope's
+      // current node. First match in canvas-node order wins.
+      const hostNodeId: string = scopeTok.currentNodeId as string;
+      const boundary = args.canvas.nodes.find((n) => {
+        if (n.type !== "boundaryEvent") return false;
+        const d = n.data as
+          | { attachedToRef?: string; eventDefinition?: { kind?: string; errorCode?: string } }
+          | undefined;
+        if (d?.attachedToRef !== hostNodeId) return false;
+        if (d?.eventDefinition?.kind !== "error") return false;
+        const wanted = d.eventDefinition.errorCode ?? "";
+        // Camunda-style: empty/null on boundary = catch-all.
+        return wanted === "" || wanted === args.errorCode;
+      });
+
+      if (boundary) {
+        // Found a catcher. host = scopeTok (the activity carrying the
+        // boundary). The boundary's outgoing edge target gets a fresh
+        // token inheriting host's parent scope.
+        const outgoing = args.canvas.edges.find((e) => e.source === boundary.id);
+        if (!outgoing) {
+          const message = `Error boundary ${boundary.id} has no outgoing flow; can't continue.`;
+          this.logger.warn(message);
+          return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+        }
+
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: scopeTok.id as string,
+          nodeId: hostNodeId,
+          eventType: "boundary-fired",
+          payload: {
+            boundaryNodeId: boundary.id,
+            kind: "error",
+            errorCode: args.errorCode,
+            interrupting: true,
+            target: outgoing.target,
+          },
+        });
+
+        // Kill the intermediate scope tokens we walked through (each
+        // one was parked at a subprocess; the error throw bypasses
+        // their normal end-of-scope drain) + their direct scope
+        // siblings.
+        for (const intermediate of chain) {
+          if (intermediate.status === "waiting" || intermediate.status === "active") {
+            await this.updateTokenWithLock(
+              args.tx, intermediate.id, intermediate.version,
+              {
+                status: "failed",
+                errorMessage: `Cancelled by error boundary ${boundary.id} (code "${args.errorCode}").`,
+              },
+            );
+          }
+          // Direct siblings of this intermediate (same scopeTokenId,
+          // different id). Bulk update; no per-row lock needed inside
+          // the same txn.
+          if (intermediate.scopeTokenId) {
+            await args.tx
+              .update(instanceTokens)
+              .set({
+                status: "failed",
+                errorMessage: `Cancelled by error boundary ${boundary.id} on enclosing scope.`,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(instanceTokens.scopeTokenId, intermediate.scopeTokenId),
+                  ne(instanceTokens.id, intermediate.id),
+                  inArray(instanceTokens.status, ["active", "waiting"] as const),
+                ),
+              );
+          }
+        }
+
+        // Mark the host scope token failed (interrupted by boundary).
+        await this.updateTokenWithLock(
+          args.tx, scopeTok.id as string, scopeTok.version as number,
+          {
+            status: "failed",
+            errorMessage: `Interrupted by error boundary ${boundary.id} (code "${args.errorCode}").`,
+          },
+        );
+        // Bulk-kill host's direct scope children (same kill shape as
+        // fireBoundaryTimer's shallow cascade — covers the common case).
+        await args.tx
+          .update(instanceTokens)
+          .set({
+            status: "failed",
+            errorMessage: `Cancelled by error boundary ${boundary.id} on enclosing host.`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(instanceTokens.scopeTokenId, scopeTok.id as string),
+              inArray(instanceTokens.status, ["active", "waiting"] as const),
+            ),
+          );
+
+        // Cancel sibling boundary timers + event-subprocess timers
+        // hanging off the host so they don't fire post-interrupt.
+        await this.timerScheduler?.cancelTimer(scopeTok.id as string, args.tx);
+
+        // Spawn the boundary-output token at the boundary's edge
+        // target, inheriting host's PARENT scope (so the recovery
+        // path runs at the right scope level).
+        const childRows = await args.tx
+          .insert(instanceTokens)
+          .values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            currentNodeId: outgoing.target,
+            status: "active",
+            parentTokenId: scopeTok.id as string,
+            scopeTokenId: scopeTok.scopeTokenId as string | null,
+          })
+          .returning({ id: instanceTokens.id, version: instanceTokens.version });
+        const child = childRows[0];
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          nodeId: outgoing.target,
+          eventType: "token-created",
+          payload: {
+            parentTokenId: scopeTok.id,
+            scopeTokenId: scopeTok.scopeTokenId,
+            via: "error-boundary",
+          },
+        });
+        const adv = await this.advanceToken({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          tokenVersion: child.version ?? 0,
+          currentNodeId: outgoing.target,
+          canvas: args.canvas,
+          variables: args.variables,
+        });
+        return {
+          tokenStatus: adv.tokenStatus,
+          hops: args.hops + adv.hops,
+          errorMessage: adv.errorMessage,
+        };
+      }
+
+      // No match at this scope — push into the chain so a deeper
+      // catcher can tear us down too, then walk up.
+      chain.push({
+        id: scopeTok.id as string,
+        nodeId: hostNodeId,
+        version: scopeTok.version as number,
+        scopeTokenId: (scopeTok.scopeTokenId as string | null) ?? null,
+        status: scopeTok.status as string,
+      });
+      cursor = (scopeTok.scopeTokenId as string | null) ?? null;
+    }
+
+    // Uncaught — chain exhausted. Fail.
+    const message = `Uncaught error "${args.errorCode}" thrown at ${args.throwNodeId} — no matching error boundary in scope chain.`;
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "error-uncaught",
+      payload: { errorCode: args.errorCode },
+    });
+    return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+  }
+
+  /** P2 Session 6b — at scope entry (root process start OR subprocess
+   *  entry), find eventSubProcess children of the scope whose inner
+   *  start event carries a timer eventDefinition, and schedule a
+   *  `start-event-timer` row per match.
+   *
+   *  `parentScopeNodeId === null` means root-process scope: we match
+   *  eventSubProcess nodes with no parentId. Otherwise we match
+   *  eventSubProcess nodes whose parentId === parentScopeNodeId.
+   *
+   *  Timer rows are keyed on the parent scope token so cancelTimer
+   *  (used by boundary fires, error boundaries, completeTask in the
+   *  subprocess parent's case) bulk-deletes them at scope exit. */
+  private async subscribeEventSubProcessTimers(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    parentScopeNodeId: string | null;
+    parentScopeTokenId: string;
+    canvas: EngineCanvas;
+  }): Promise<void> {
+    if (!this.timerScheduler) return;
+    const eventSubProcesses = args.canvas.nodes.filter((n) => {
+      if (n.type !== "eventSubProcess") return false;
+      const parentId = (n as { parentId?: string }).parentId ?? null;
+      return parentId === args.parentScopeNodeId;
+    });
+    for (const esp of eventSubProcesses) {
+      // Find the inner start event with a timer definition. There's
+      // canonically exactly one start event inside an event subprocess;
+      // if multiple timer-starts exist we take the first.
+      const innerStart = args.canvas.nodes.find((n) => {
+        if (n.type !== "startEvent") return false;
+        if ((n as { parentId?: string }).parentId !== esp.id) return false;
+        const d = (n.data as { eventDefinition?: { kind?: string } } | undefined)?.eventDefinition;
+        return d?.kind === "timer";
+      });
+      if (!innerStart) continue;
+      const d = innerStart.data as {
+        eventDefinition?: { value?: string; timerType?: string };
+      };
+      const fireAt = resolveTimerFireAt(d.eventDefinition);
+      if (!fireAt) {
+        this.logger.warn(
+          `Event-subprocess timer ${esp.id} (start ${innerStart.id}): could not parse value "${d.eventDefinition?.value ?? ""}". Skipping.`,
+        );
+        continue;
+      }
+      // Interrupting flag: read off the eventSubProcess data
+      // (`interrupting`) or the inner start's `isInterrupting`; default
+      // true per BPMN 2.0. Designer doesn't yet expose this — current
+      // default matches Camunda.
+      const espData = esp.data as { interrupting?: boolean } | undefined;
+      const startData = innerStart.data as { isInterrupting?: boolean } | undefined;
+      const interrupting =
+        espData?.interrupting !== false && startData?.isInterrupting !== false;
+      await this.timerScheduler.scheduleTimer(
+        {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.parentScopeTokenId,
+          fireAt,
+          kind: "start-event-timer",
+          payload: {
+            eventSubProcessId: esp.id,
+            innerStartId: innerStart.id,
+            parentScopeNodeId: args.parentScopeNodeId,
+            parentScopeTokenId: args.parentScopeTokenId,
+            interrupting,
+          },
+        },
+        args.tx,
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: args.parentScopeTokenId,
+        nodeId: esp.id,
+        eventType: "event-subprocess-subscribed",
+        payload: {
+          eventSubProcessId: esp.id,
+          innerStartId: innerStart.id,
+          kind: "timer",
+          interrupting,
+          fireAt: fireAt.toISOString(),
+        },
+      });
+    }
+  }
+
+  /** P2 Session 6b — fire callback for `start-event-timer`. When the
+   *  parent scope is still alive, spawns a child token at the
+   *  eventSubProcess's inner start. Interrupting variant bulk-kills
+   *  scope siblings before the spawn (root scope = the whole instance;
+   *  subprocess scope = direct scope children). Non-interrupting just
+   *  spawns alongside running siblings. */
+  private async fireEventSubProcessStart(t: ClaimedTimer): Promise<void> {
+    if (!t.tokenId) return;
+    const payload = t.payload as
+      | {
+          eventSubProcessId?: string;
+          innerStartId?: string;
+          parentScopeNodeId?: string | null;
+          parentScopeTokenId?: string;
+          interrupting?: boolean;
+        }
+      | null;
+    const innerStartId = payload?.innerStartId;
+    const eventSubProcessId = payload?.eventSubProcessId;
+    const parentScopeTokenId = payload?.parentScopeTokenId ?? t.tokenId;
+    if (!innerStartId || !eventSubProcessId) return;
+    const interrupting = payload?.interrupting !== false;
+
+    await this.db.transaction(async (tx) => {
+      // Reload parent scope token. If it's no longer live, the scope
+      // is gone (completed / cancelled / interrupted) and this timer
+      // is a stale fire. Drop silently.
+      const scopeRows = await tx
+        .select({
+          id: instanceTokens.id,
+          status: instanceTokens.status,
+          scopeTokenId: instanceTokens.scopeTokenId,
+        })
+        .from(instanceTokens)
+        .where(eq(instanceTokens.id, parentScopeTokenId))
+        .limit(1);
+      const scope = scopeRows[0];
+      if (!scope || (scope.status !== "active" && scope.status !== "waiting")) {
+        this.logger.log({
+          event: "engine.eventSubProcess.fired.skipped",
+          reason: scope ? `scope ${scope.status}` : "scope not found",
+          parentScopeTokenId,
+          eventSubProcessId,
+        });
+        return;
+      }
+
+      const instRow = await this.loadInstanceById(tx, t.instanceId, t.tenantId);
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
+      const innerStart = canvas.nodes.find((n) => n.id === innerStartId);
+      if (!innerStart) {
+        this.logger.warn(`Event-subprocess timer: inner start ${innerStartId} not on canvas; dropping.`);
+        return;
+      }
+
+      await recordEvent(tx, {
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: parentScopeTokenId,
+        nodeId: eventSubProcessId,
+        eventType: "event-subprocess-fired",
+        payload: {
+          eventSubProcessId,
+          innerStartId,
+          kind: "timer",
+          interrupting,
+        },
+      });
+
+      if (interrupting) {
+        // Kill the scope siblings. Root scope (scopeTokenId IS NULL on
+        // the parent scope token, AND parentScopeNodeId === null on
+        // the timer payload) → kill all (active|waiting) tokens in the
+        // instance EXCEPT the new child (not yet inserted, so just
+        // bulk-kill before insert). Subprocess scope → kill tokens
+        // whose scopeTokenId = parentScopeTokenId; leave the parent
+        // scope token itself in `waiting` so the scope-drain logic
+        // resumes it normally when the event-subprocess inner-end
+        // fires.
+        const isRootScope = payload?.parentScopeNodeId == null && scope.scopeTokenId == null;
+        if (isRootScope) {
+          await tx
+            .update(instanceTokens)
+            .set({
+              status: "failed",
+              errorMessage: `Interrupted by event subprocess ${eventSubProcessId}.`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(instanceTokens.instanceId, t.instanceId),
+                inArray(instanceTokens.status, ["active", "waiting"] as const),
+              ),
+            );
+        } else {
+          await tx
+            .update(instanceTokens)
+            .set({
+              status: "failed",
+              errorMessage: `Interrupted by event subprocess ${eventSubProcessId}.`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(instanceTokens.scopeTokenId, parentScopeTokenId),
+                inArray(instanceTokens.status, ["active", "waiting"] as const),
+              ),
+            );
+        }
+        // Cancel sibling event-subprocess timers + boundary timers on
+        // this scope so they don't double-fire after the interrupt.
+        await this.timerScheduler?.cancelTimer(parentScopeTokenId, tx);
+      }
+
+      // Spawn child at inner start. Scope:
+      //  - root: scopeTokenId = null (matches root tokens; inner end
+      //    triggers terminal completion + instance flip)
+      //  - subprocess: scopeTokenId = parentScopeTokenId (matches
+      //    a normal subprocess child; inner end fires the scope-drain
+      //    + parent-resume path)
+      const isRootScope = payload?.parentScopeNodeId == null && scope.scopeTokenId == null;
+      const childScopeTokenId = isRootScope ? null : parentScopeTokenId;
+      const childRows = await tx
+        .insert(instanceTokens)
+        .values({
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          currentNodeId: innerStartId,
+          status: "active",
+          parentTokenId: parentScopeTokenId,
+          scopeTokenId: childScopeTokenId,
+        })
+        .returning({ id: instanceTokens.id, version: instanceTokens.version });
+      const child = childRows[0];
+      await recordEvent(tx, {
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: child.id,
+        nodeId: innerStartId,
+        eventType: "token-created",
+        payload: {
+          parentTokenId: parentScopeTokenId,
+          scopeTokenId: childScopeTokenId,
+          via: interrupting ? "event-subprocess-interrupt" : "event-subprocess-noninterrupt",
+        },
+      });
+
+      const adv = await this.advanceToken({
+        tx,
+        tenantId: t.tenantId,
+        instanceId: t.instanceId,
+        tokenId: child.id,
+        tokenVersion: child.version ?? 0,
+        currentNodeId: innerStartId,
+        canvas,
+        variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+      });
+
+      // Same instance-completion gate as fireBoundaryTimer (6a fix).
+      if (adv.tokenStatus === "completed" && (await this.countLiveTokens(tx, t.instanceId)) === 0) {
+        await tx
+          .update(processInstances)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(processInstances.id, t.instanceId));
+        await recordEvent(tx, {
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          eventType: "instance-completed",
+          payload: { via: "event-subprocess-timer", hops: adv.hops },
+        });
+        await this.emitOutbox(tx, {
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          eventType: "instance-completed",
+          payload: { via: "event-subprocess-timer", hops: adv.hops },
+          redactedKeys: canvas.engineConfig?.redactedVariableKeys,
+        });
+      } else if (adv.tokenStatus === "failed") {
+        await tx
+          .update(processInstances)
+          .set({
+            status: "failed",
+            errorMessage: adv.errorMessage ?? null,
+            completedAt: new Date(),
+          })
+          .where(eq(processInstances.id, t.instanceId));
+        await recordEvent(tx, {
+          tenantId: t.tenantId,
+          instanceId: t.instanceId,
+          eventType: "instance-failed",
+          payload: { via: "event-subprocess-timer", hops: adv.hops, message: adv.errorMessage },
         });
       }
     });

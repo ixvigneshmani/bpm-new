@@ -898,9 +898,11 @@ const subprocessInnerStartRule: ValidationRule = {
   },
 };
 
-// P2 Session 5 narrowed scope: subProcess + transaction +
-// adHocSubProcess now execute. eventSubProcess still inert until
-// Session 6 (event subscription).
+// P2 Session 6b narrowed scope: an eventSubProcess whose inner start
+// is a timer fires end-to-end (subscribe at parent-scope-enter + fire
+// spawns inner-start child token; interrupting variant kills scope
+// siblings). Other inner-start kinds (message/signal/error/etc.) stay
+// inert until Sessions 7–9 + P4.
 const subprocessRuntimeRule: ValidationRule = {
   id: "subprocess-runtime",
   name: "Subprocess runtime",
@@ -908,13 +910,22 @@ const subprocessRuntimeRule: ValidationRule = {
     const issues: ValidationIssue[] = [];
     for (const n of nodes) {
       if (n.type !== "eventSubProcess") continue;
+      // Look up the inner start event; if it's a timer, the engine
+      // now subscribes + fires it. Skip the flag for that case.
+      const innerStart = nodes.find((c) => {
+        if (c.type !== "startEvent") return false;
+        return (c as { parentId?: string }).parentId === n.id;
+      });
+      const innerKind =
+        (innerStart?.data as { eventDefinition?: { kind?: string } } | undefined)?.eventDefinition?.kind;
+      if (innerKind === "timer") continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `subprocess-runtime:${n.id}`,
         severity: "warning",
         ruleId: "subprocess-runtime",
         nodeId: n.id,
-        message: `Event subprocess "${label}" — engine doesn't subscribe to its trigger event today. Won't fire until Session 6 of the engine sprint (boundary events + event subscription).`,
+        message: `Event subprocess "${label}" — engine doesn't subscribe to its trigger kind (${innerKind ?? "none"}) today. Timer-triggered event subprocesses work (Session 6b); message/signal/error/escalation land in later sessions.`,
       });
     }
     return issues;
@@ -949,12 +960,14 @@ const EVENT_HOST_TYPES = new Set([
   "intermediateThrowEvent", "boundaryEvent",
 ]);
 
-// P2 Session 6a — `timer` is now wired end-to-end on event hosts that
-// matter: boundaryEvent (subscribe + fire). Other kinds (message,
-// signal, error, escalation, conditional, link, cancel, compensation)
-// stay flagged until Sessions 6b–9 + P4/P6.
+// P2 Session 6b — `timer` is wired end-to-end on boundary events
+// (subscribe + fire) AND on event-subprocess inner start events (timer
+// fires the event-subprocess, interrupting / non-interrupting). `error`
+// is now caught at boundary events (Session 6b). Remaining inert kinds
+// (message, signal, escalation, conditional, link, cancel, compensation)
+// stay flagged until Sessions 7–9 + P4/P6.
 const EVENT_KINDS_STILL_INERT = new Set([
-  "message", "signal", "error", "escalation", "conditional",
+  "message", "signal", "escalation", "conditional",
   "link", "cancel", "compensation",
 ]);
 
@@ -969,10 +982,21 @@ const eventDefinitionRuntimeRule: ValidationRule = {
       const def = d?.eventDefinition as { kind?: string } | undefined;
       const kind = def?.kind;
       if (!kind || kind === "none") continue;
-      // Timer on boundary events is implemented (P2 Session 6a). Other
-      // host types (start/intermediate) still need the event-
-      // subscription tables (P3+). Timer on those stays flagged.
+      // Timer on boundary events is implemented (P2 Session 6a). Timer
+      // on an event-subprocess inner start ships in Session 6b — also
+      // not flagged. Other start/intermediate hosts still need the
+      // event-subscription tables (P3+); timer there stays flagged.
       if (kind === "timer" && n.type === "boundaryEvent") continue;
+      if (kind === "timer" && n.type === "startEvent") {
+        const parentId = (n as { parentId?: string }).parentId;
+        const parent = parentId
+          ? nodes.find((p) => p.id === parentId)
+          : undefined;
+        if (parent?.type === "eventSubProcess") continue;
+      }
+      // Error end events (kind 'error' on endEvent) throw + walk scope
+      // chain to a matching error boundary as of Session 6b. Don't flag.
+      if (kind === "error" && n.type === "endEvent") continue;
       if (!EVENT_KINDS_STILL_INERT.has(kind) && kind !== "timer" && kind !== "terminate") continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
@@ -987,8 +1011,9 @@ const eventDefinitionRuntimeRule: ValidationRule = {
   },
 };
 
-// P2 Session 6a — boundary events with kind `timer` now execute.
-// Other kinds still flagged until Sessions 6b–9 (per kind).
+// P2 Session 6b — boundary events with kind `timer` (Session 6a) AND
+// kind `error` (Session 6b) now execute. Other kinds still flagged
+// until Sessions 7–9 (per kind).
 const boundaryEventRuntimeRule: ValidationRule = {
   id: "boundary-event-runtime",
   name: "Boundary event runtime",
@@ -998,14 +1023,14 @@ const boundaryEventRuntimeRule: ValidationRule = {
       if (n.type !== "boundaryEvent") continue;
       const d = n.data as { eventDefinition?: { kind?: string } } | undefined;
       const kind = d?.eventDefinition?.kind;
-      if (kind === "timer") continue; // shipped
+      if (kind === "timer" || kind === "error") continue; // shipped
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `boundary-event-runtime:${n.id}`,
         severity: "warning",
         ruleId: "boundary-event-runtime",
         nodeId: n.id,
-        message: `Boundary event "${label}" (kind "${kind ?? "none"}") — engine doesn't register this boundary kind today. Timer boundaries work (Session 6a); error lands in Session 6b; message/signal/etc. land later.`,
+        message: `Boundary event "${label}" (kind "${kind ?? "none"}") — engine doesn't register this boundary kind today. Timer (6a) + error (6b) work; message/signal/escalation/compensation land in P3/P4/P6.`,
       });
     }
     return issues;
