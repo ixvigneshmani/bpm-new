@@ -24,25 +24,31 @@ export type SubprocessConfigProps = {
   onMethodChange?: (v: TransactionMethod | undefined) => void;
 };
 
-const VARIANT_RUNTIME_NOTE: Record<SubprocessVariant, string> = {
-  subProcess:
-    "Engine today doesn't execute subprocess children — a token entering this shape hops straight to the outgoing edge. Subprocess execution ships in P2 of the engine sprint.",
+// P2 Session 5 shipped subprocess + transaction + adHocSubProcess
+// execution end-to-end. eventSubProcess still inert (needs the event
+// subscription model from Session 6). The transaction-specific
+// compensation/cancel behaviour and ad-hoc completion conditions
+// also remain inert and land in P6.
+const VARIANT_RUNTIME_NOTE: Partial<Record<SubprocessVariant, string>> = {
   eventSubProcess:
-    "Engine today doesn't subscribe event-subprocess triggers. The subprocess won't fire on the chosen event until P2 (subprocess) + P3 (event correlation) land.",
+    "Engine today doesn't subscribe event-subprocess triggers. The subprocess won't fire on the chosen event until Session 6 (boundary events + event subscriptions) lands.",
   transaction:
-    "Engine today doesn't execute transaction children or run compensation/cancel handlers. Full transaction semantics ship in P2 + P6 of the engine sprint.",
+    "Subprocess body executes (P2 Session 5), but transaction-specific compensation + cancel handlers still inert — those ship in P6 of the engine sprint.",
   adHocSubProcess:
-    "Engine today doesn't execute ad-hoc children or honour completion conditions. Ad-hoc execution ships in P2 of the engine sprint.",
+    "Subprocess body executes (P2 Session 5), but ad-hoc completion conditions are still ignored — engine fires the inner end-event whenever the inner flow reaches it. Completion-condition evaluation ships in P6.",
 };
 
 export default function SubprocessConfigSection(props: SubprocessConfigProps) {
   const { variant, isExpanded, onIsExpandedChange } = props;
+  const runtimeNote = VARIANT_RUNTIME_NOTE[variant];
 
   return (
     <div style={sectionStack}>
-      <DesignOnlyBanner milestone="E8">
-        {VARIANT_RUNTIME_NOTE[variant]}
-      </DesignOnlyBanner>
+      {runtimeNote && (
+        <DesignOnlyBanner milestone="E8">
+          {runtimeNote}
+        </DesignOnlyBanner>
+      )}
       <label
         style={{
           display: "flex",

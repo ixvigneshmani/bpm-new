@@ -1067,6 +1067,13 @@ export const instanceTokens = pgTable(
      *  this to decide "have all expected siblings arrived?" without
      *  reachability analysis at runtime. Null on non-forked tokens. */
     forkSize: integer("FORK_SIZE"),
+    /** P2 Session 5 — subprocess scope. Set on every token spawned
+     *  INSIDE a subprocess: the inner start-event child + every
+     *  descendant from inner forks. Points to the parent token that
+     *  opened the subprocess. The inner end-event uses this to decide
+     *  "are all scope tokens done?" before resuming the parent. Null
+     *  on root-scope tokens. Self-FK so token cascade-delete works. */
+    scopeTokenId: uuid("SCOPE_TOKEN_ID"),
     errorMessage: text("ERROR_MESSAGE"),
     // Optimistic-locking guard. Every UPDATE bumps `version`; the
     // interpreter's update statement asserts the prior version in the
@@ -1084,6 +1091,8 @@ export const instanceTokens = pgTable(
     index("TOKEN_INSTANCE_IDX").on(t.instanceId),
     index("TOKEN_TENANT_STATUS_IDX").on(t.tenantId, t.status),
     index("TOKEN_ASSIGNED_IDX").on(t.assignedTo, t.status),
+    // P2 Session 5 — covers countLiveScopeTokens at inner-end firing.
+    index("TOKEN_SCOPE_STATUS_IDX").on(t.scopeTokenId, t.status),
   ],
 );
 

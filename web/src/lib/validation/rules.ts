@@ -853,24 +853,68 @@ const eventBasedGatewayRuntimeRule = gatewayRuntimeRule(
   "Event-based dispatch executes in P3+P6 of the engine sprint.",
 );
 
-const SUBPROCESS_VARIANTS = new Set([
-  "subProcess", "eventSubProcess", "transaction", "adHocSubProcess",
+// P2 Session 5 — subprocess execution requires exactly one `none`-type
+// inner start event. Zero → engine fails the instance at entry;
+// multiple → engine picks the first by canvas order + logs a warning.
+// Flag both at design time so authors notice before running.
+const SUBPROCESS_EXEC_VARIANTS = new Set([
+  "subProcess", "transaction", "adHocSubProcess",
 ]);
 
+const subprocessInnerStartRule: ValidationRule = {
+  id: "subprocess-inner-start",
+  name: "Subprocess inner start event",
+  run: (nodes) => {
+    const issues: ValidationIssue[] = [];
+    for (const sp of nodes) {
+      if (!SUBPROCESS_EXEC_VARIANTS.has(sp.type ?? "")) continue;
+      const inner = nodes.filter((n) => (n as { parentId?: string }).parentId === sp.id);
+      if (inner.length === 0) continue; // empty subprocess — no-start-event rule handles
+      const noneStarts = inner.filter((n) => {
+        if (n.type !== "startEvent") return false;
+        const def = (n.data as { eventDefinition?: { kind?: string } } | undefined)?.eventDefinition;
+        return !def || !def.kind || def.kind === "none";
+      });
+      const label = labelOf(sp as { id: string; data: Record<string, unknown> });
+      if (noneStarts.length === 0) {
+        issues.push({
+          id: `subprocess-inner-start:${sp.id}`,
+          severity: "error",
+          ruleId: "subprocess-inner-start",
+          nodeId: sp.id,
+          message: `Subprocess "${label}" has no \`none\`-type inner start event. The engine can't enter it — add a plain start event inside.`,
+        });
+      } else if (noneStarts.length > 1) {
+        issues.push({
+          id: `subprocess-inner-start:${sp.id}`,
+          severity: "info",
+          ruleId: "subprocess-inner-start",
+          nodeId: sp.id,
+          message: `Subprocess "${label}" has ${noneStarts.length} \`none\`-type inner start events. The engine picks the first by canvas order — collapse to a single start to avoid ambiguity.`,
+        });
+      }
+    }
+    return issues;
+  },
+};
+
+// P2 Session 5 narrowed scope: subProcess + transaction +
+// adHocSubProcess now execute. eventSubProcess still inert until
+// Session 6 (event subscription).
 const subprocessRuntimeRule: ValidationRule = {
   id: "subprocess-runtime",
   name: "Subprocess runtime",
   run: (nodes) => {
     const issues: ValidationIssue[] = [];
     for (const n of nodes) {
-      if (!SUBPROCESS_VARIANTS.has(n.type ?? "")) continue;
+      if (n.type !== "eventSubProcess") continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `subprocess-runtime:${n.id}`,
         severity: "warning",
         ruleId: "subprocess-runtime",
         nodeId: n.id,
-        message: `Subprocess "${label}" — engine doesn't execute children today. Tokens hop past without entering the subprocess. Subprocess execution ships in P2 of the engine sprint.`,
+        message: `Event subprocess "${label}" — engine doesn't subscribe to its trigger event today. Won't fire until Session 6 of the engine sprint (boundary events + event subscription).`,
       });
     }
     return issues;
@@ -1011,6 +1055,7 @@ export const DEFAULT_RULES: ValidationRule[] = [
   callActivityRuntimeRule,
   eventBasedGatewayRuntimeRule,
   subprocessRuntimeRule,
+  subprocessInnerStartRule,
   businessRuleExpressionRuntimeRule,
   eventDefinitionRuntimeRule,
   boundaryEventRuntimeRule,

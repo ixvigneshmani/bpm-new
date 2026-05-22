@@ -516,6 +516,14 @@ export class EngineService {
         });
 
         // Terminal: end event drains the token.
+        // P2 Session 5 — if the token has a `scope_token_id` (i.e.,
+        // it's inside a subprocess), the end event doesn't terminate
+        // the instance — it terminates the SCOPE. When this is the
+        // LAST live token in the scope, we resume the parent token
+        // and continue advancing through the subprocess's outgoing
+        // edge. Other scope siblings completing first just drop in
+        // here, mark themselves done, and exit; only the last arrival
+        // triggers the parent resume.
         if (node.type === "endEvent") {
           await recordEvent(args.tx, {
             tenantId: args.tenantId,
@@ -537,7 +545,81 @@ export class EngineService {
             nodeId,
             eventType: "token-completed",
           });
-          return { tokenStatus: "completed", hops };
+          // Load scope info on this token (no @args.scopeTokenId, fresh
+          // read since updateTokenWithLock doesn't return the row).
+          const scopeRows = await args.tx
+            .select({ scopeTokenId: instanceTokens.scopeTokenId })
+            .from(instanceTokens)
+            .where(eq(instanceTokens.id, args.tokenId))
+            .limit(1);
+          const scopeTokenId = scopeRows[0]?.scopeTokenId ?? null;
+          if (!scopeTokenId) {
+            return { tokenStatus: "completed", hops };
+          }
+          // Inside a subprocess. Are any siblings still live?
+          const liveInScope = await this.countLiveScopeTokens(args.tx, scopeTokenId);
+          if (liveInScope > 0) {
+            // Other inner branches still running. Just exit; whichever
+            // sibling arrives last will fire the parent resume.
+            return { tokenStatus: "completed", hops };
+          }
+          // Last in scope — resume the parent token. Re-enter the loop
+          // with nodeId = subprocess node, the parent's currentNodeId.
+          const parentRows = await args.tx
+            .select({
+              id: instanceTokens.id,
+              version: instanceTokens.version,
+              currentNodeId: instanceTokens.currentNodeId,
+              status: instanceTokens.status,
+            })
+            .from(instanceTokens)
+            .where(eq(instanceTokens.id, scopeTokenId))
+            .limit(1);
+          const parent = parentRows[0];
+          if (!parent) {
+            // Parent vanished (cancel happened concurrently). Treat
+            // as terminal completion of this token; the cancel txn
+            // is responsible for cleanup.
+            return { tokenStatus: "completed", hops };
+          }
+          if (parent.status !== "waiting") {
+            // Parent already resumed by another path. Idempotent skip.
+            return { tokenStatus: "completed", hops };
+          }
+          // Flip parent back to active + emit resume audit. Continue
+          // advancing through the subprocess's outgoing edge by re-
+          // entering the loop on the parent's currentNodeId.
+          const parentNewVersion = await this.updateTokenWithLock(
+            args.tx, parent.id, parent.version,
+            { status: "active", waitingFor: null },
+          );
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: parent.id,
+            nodeId: parent.currentNodeId,
+            eventType: "token-resumed",
+            payload: { via: "subprocess", scopeTokenId },
+          });
+          // Recurse into advanceToken so the parent's continuation
+          // commits within this same txn. resumeFromWait=true skips
+          // the entered-execute reprise on the subprocess node.
+          const cont = await this.advanceToken({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: parent.id,
+            tokenVersion: parentNewVersion,
+            currentNodeId: parent.currentNodeId,
+            canvas: args.canvas,
+            variables: args.variables,
+            resumeFromWait: true,
+          });
+          return {
+            tokenStatus: cont.tokenStatus,
+            hops: hops + cont.hops,
+            errorMessage: cont.errorMessage,
+          };
         }
 
         // Wait state: user task suspends the token until completeTask
@@ -720,6 +802,105 @@ export class EngineService {
             maxAttempts: resolveServiceTaskMaxAttempts(node) ?? 3,
           });
           return { tokenStatus: "waiting", hops };
+        }
+
+        // P2 Session 5 — subprocess execution. Three variants
+        // (subProcess + transaction + adHocSubProcess) share the same
+        // entry semantics. eventSubProcess is NOT triggered by an
+        // incoming sequence flow (it fires on an event subscription —
+        // Session 6 work) and is intentionally NOT in this branch.
+        if (
+          node.type === "subProcess" ||
+          node.type === "transaction" ||
+          node.type === "adHocSubProcess"
+        ) {
+          // Locate inner nodes by React-Flow parentId. The canvas
+          // schema stores subprocess membership there (set by the
+          // Designer drag-into-frame UX).
+          const innerNodes = args.canvas.nodes.filter(
+            (n) => (n as { parentId?: string }).parentId === nodeId,
+          );
+          // Decision #2: pick the first `none`-type start event. Zero
+          // → fail. Multiple `none` → use the first; design-time
+          // validation rule warns separately.
+          const innerStarts = innerNodes.filter((n) => {
+            if (n.type !== "startEvent") return false;
+            const def = (n.data as { eventDefinition?: { kind?: string } } | undefined)?.eventDefinition;
+            return !def || !def.kind || def.kind === "none";
+          });
+          if (innerStarts.length === 0) {
+            const message = `Subprocess ${nodeId} has no \`none\`-type inner start event — engine can't enter it.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId, version, nodeId, message,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: message };
+          }
+          if (innerStarts.length > 1) {
+            this.logger.warn(
+              `Subprocess ${nodeId}: multiple \`none\`-type inner start events found; using "${innerStarts[0].id}" by canvas order.`,
+            );
+          }
+          const innerStart = innerStarts[0];
+
+          // Park the parent token at the subprocess node so the inner
+          // end-event handler can find it via scope_token_id.
+          version = await this.updateTokenWithLock(
+            args.tx, args.tokenId, version,
+            { status: "waiting", waitingFor: "subprocess", currentNodeId: nodeId },
+          );
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-waiting",
+            payload: { waitingFor: "subprocess" },
+          });
+
+          // Spawn the inner child at the inner start. scope_token_id
+          // = self; descendants from inner forks inherit it.
+          const childRows = await args.tx
+            .insert(instanceTokens)
+            .values({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              currentNodeId: innerStart.id,
+              status: "active",
+              parentTokenId: args.tokenId,
+              scopeTokenId: args.tokenId,
+            })
+            .returning({ id: instanceTokens.id, version: instanceTokens.version });
+          const child = childRows[0];
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: child.id,
+            nodeId: innerStart.id,
+            eventType: "token-created",
+            payload: { parentTokenId: args.tokenId, scopeTokenId: args.tokenId, via: "subprocess" },
+          });
+
+          // Recurse into the inner flow. When the LAST inner sibling
+          // hits an end event, the endEvent scope-drain logic resumes
+          // the parent + advances it through this subprocess's
+          // outgoing edge in the same recursion. The childResult's
+          // tokenStatus therefore reflects the PARENT's effective
+          // final state.
+          const childResult = await this.advanceToken({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: child.id,
+            tokenVersion: child.version ?? 0,
+            currentNodeId: innerStart.id,
+            canvas: args.canvas,
+            variables: args.variables,
+          });
+          return {
+            tokenStatus: childResult.tokenStatus,
+            hops: hops + childResult.hops,
+            errorMessage: childResult.errorMessage,
+          };
         }
       }
       isResuming = false;
@@ -972,6 +1153,16 @@ export class EngineService {
 
             const forkId = randomUUID();
             const forkSize = firing.length;
+            // P2 Session 5 — children spawned inside a subprocess
+            // inherit the parent's scope. Without this, the inner
+            // end-event's countLiveScopeTokens query misses them and
+            // the parent resumes too early (or not at all).
+            const parentScopeRows = await args.tx
+              .select({ scopeTokenId: instanceTokens.scopeTokenId })
+              .from(instanceTokens)
+              .where(eq(instanceTokens.id, args.tokenId))
+              .limit(1);
+            const parentScopeTokenId = parentScopeRows[0]?.scopeTokenId ?? null;
             let aggregateHops = hops;
             for (const edge of firing) {
               const childRows = await args.tx
@@ -984,6 +1175,7 @@ export class EngineService {
                   parentTokenId: args.tokenId,
                   forkId,
                   forkSize,
+                  scopeTokenId: parentScopeTokenId,
                 })
                 .returning({ id: instanceTokens.id, version: instanceTokens.version });
               const child = childRows[0];
@@ -1191,6 +1383,27 @@ export class EngineService {
     });
   }
 
+  /** P2 Session 5 — count active+waiting tokens whose `scope_token_id`
+   *  matches. Called by the inner-end-event handler to decide whether
+   *  the current sibling is the LAST one in the subprocess scope; only
+   *  the last triggers parent resume. */
+  private async countLiveScopeTokens(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    scopeTokenId: string,
+  ): Promise<number> {
+    const rows = await tx
+      .select({ id: instanceTokens.id })
+      .from(instanceTokens)
+      .where(
+        and(
+          eq(instanceTokens.scopeTokenId, scopeTokenId),
+          inArray(instanceTokens.status, ["active", "waiting"] as const),
+        ),
+      );
+    return rows.length;
+  }
+
   /** P1 — count tokens that are still live (active or waiting) on an
    *  instance. Called by every "is this token's completion terminal for
    *  the whole instance?" check so a parallel-split instance only flips
@@ -1233,6 +1446,7 @@ export class EngineService {
       dueAt?: Date | null;
       priority?: number | null;
       forkSize?: number | null;
+      scopeTokenId?: string | null;
     },
   ): Promise<number> {
     const next = expectedVersion + 1;

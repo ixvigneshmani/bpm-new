@@ -117,4 +117,89 @@ describe("P5 scope-aware validation", () => {
     const hit = issues.find((i) => i.ruleId === "disconnected-node" && i.nodeId === "SP");
     expect(hit).toBeFalsy();
   });
+
+  // ─── P2 Session 5: subprocess-inner-start rule ───────────────────
+  it("flags an error when a subprocess has no `none`-type inner start event", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "end", type: "endEvent", data: { label: "End" } }),
+      mkNode({ id: "SP", type: "subProcess", data: { label: "SP", bpmnType: "subProcess" } }),
+      // Inner timer start — NOT a `none` start, so engine can't enter.
+      mkNode({ id: "is", type: "startEvent", parentId: "SP", data: { label: "Timer in", eventDefinition: { kind: "timer", timerType: "duration", value: "PT5M" } } }),
+      mkNode({ id: "ie", type: "endEvent", parentId: "SP", data: { label: "Inner end" } }),
+    ];
+    const edges: Edge[] = [
+      { id: "e1", source: "start", target: "SP" } as Edge,
+      { id: "e2", source: "SP", target: "end" } as Edge,
+      { id: "ei", source: "is", target: "ie" } as Edge,
+    ];
+    const issues = runValidation(nodes, edges);
+    const hit = issues.find((i) => i.ruleId === "subprocess-inner-start" && i.nodeId === "SP");
+    expect(hit).toBeTruthy();
+    expect(hit!.severity).toBe("error");
+    expect(hit!.message).toMatch(/no `none`-type inner start/i);
+  });
+
+  it("flags info when a subprocess has multiple `none`-type inner start events", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "SP", type: "subProcess", data: { label: "SP", bpmnType: "subProcess" } }),
+      mkNode({ id: "is1", type: "startEvent", parentId: "SP", data: { label: "Start 1", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "is2", type: "startEvent", parentId: "SP", data: { label: "Start 2", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "ie", type: "endEvent", parentId: "SP", data: { label: "Inner end" } }),
+    ];
+    const edges: Edge[] = [
+      { id: "e1", source: "start", target: "SP" } as Edge,
+    ];
+    const issues = runValidation(nodes, edges);
+    const hit = issues.find((i) => i.ruleId === "subprocess-inner-start" && i.nodeId === "SP");
+    expect(hit).toBeTruthy();
+    expect(hit!.severity).toBe("info");
+    expect(hit!.message).toMatch(/multiple|2|first by canvas order/i);
+  });
+
+  it("does NOT flag a subprocess with exactly one `none` inner start event", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "SP", type: "subProcess", data: { label: "SP", bpmnType: "subProcess" } }),
+      mkNode({ id: "is", type: "startEvent", parentId: "SP", data: { label: "Inner start", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "ie", type: "endEvent", parentId: "SP", data: { label: "Inner end" } }),
+    ];
+    const edges: Edge[] = [
+      { id: "e1", source: "start", target: "SP" } as Edge,
+      { id: "ei", source: "is", target: "ie" } as Edge,
+    ];
+    const issues = runValidation(nodes, edges);
+    const hit = issues.find((i) => i.ruleId === "subprocess-inner-start" && i.nodeId === "SP");
+    expect(hit).toBeFalsy();
+  });
+
+  // ─── P2 Session 5: subprocess-runtime rule narrowed to eventSubProcess ──
+  it("subprocess-runtime no longer fires for subProcess/transaction/adHocSubProcess after Session 5", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "SP", type: "subProcess", data: { label: "SP", bpmnType: "subProcess" } }),
+      mkNode({ id: "TX", type: "transaction", data: { label: "TX", bpmnType: "transaction" } }),
+      mkNode({ id: "AD", type: "adHocSubProcess", data: { label: "AD", bpmnType: "adHocSubProcess" } }),
+      mkNode({ id: "is1", type: "startEvent", parentId: "SP", data: { label: "S", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "is2", type: "startEvent", parentId: "TX", data: { label: "S", eventDefinition: { kind: "none" } } }),
+      mkNode({ id: "is3", type: "startEvent", parentId: "AD", data: { label: "S", eventDefinition: { kind: "none" } } }),
+    ];
+    const issues = runValidation(nodes, []);
+    const hits = issues.filter((i) => i.ruleId === "subprocess-runtime");
+    expect(hits).toHaveLength(0);
+  });
+
+  it("subprocess-runtime still fires for eventSubProcess (Session 6 work)", () => {
+    const nodes: Node[] = [
+      mkNode({ id: "start", type: "startEvent", data: { label: "Start" } }),
+      mkNode({ id: "ESP", type: "eventSubProcess", data: { label: "ESP", bpmnType: "eventSubProcess" } }),
+      mkNode({ id: "is", type: "startEvent", parentId: "ESP", data: { label: "Trig", eventDefinition: { kind: "message", messageName: "Foo" } } }),
+      mkNode({ id: "ie", type: "endEvent", parentId: "ESP", data: { label: "End" } }),
+    ];
+    const issues = runValidation(nodes, []);
+    const hit = issues.find((i) => i.ruleId === "subprocess-runtime" && i.nodeId === "ESP");
+    expect(hit).toBeTruthy();
+    expect(hit!.message).toMatch(/Session 6/);
+  });
 });

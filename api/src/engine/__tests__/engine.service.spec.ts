@@ -3032,4 +3032,83 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
       expect(rows[0].dueAt).toBeNull();
     });
   });
+
+  // ─── P2 Session 5: subprocess entry semantics ─────────────────────
+  describe("subprocess entry", () => {
+    it("fails the instance with a clear message when a subprocess has zero `none` inner starts", async () => {
+      // Inner has a timer start only — no `none`-type start.
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "sp", type: "subProcess" },
+          { id: "is", type: "startEvent", parentId: "sp", data: { eventDefinition: { kind: "timer", timerType: "duration", value: "PT5M" } } },
+          { id: "ie", type: "endEvent", parentId: "sp" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "sp" },
+          { id: "ei", source: "is", target: "ie" },
+          { id: "e2", source: "sp", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("failed");
+      const failed = env.updates.find((u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed");
+      expect(failed?.set.errorMessage).toMatch(/no `none`-type inner start/);
+    });
+
+    it("spawns the inner child with scopeTokenId = parent token id and parks parent as waitingFor=subprocess", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "sp", type: "subProcess" },
+          // Inner has a userTask that suspends so the child doesn't immediately complete.
+          { id: "is", type: "startEvent", parentId: "sp", data: { eventDefinition: { kind: "none" } } },
+          { id: "it", type: "userTask", parentId: "sp", data: { assignment: { type: "directUser", value: UUID_A } } },
+          { id: "ie", type: "endEvent", parentId: "sp" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "sp" },
+          { id: "ei1", source: "is", target: "it" },
+          { id: "ei2", source: "it", target: "ie" },
+          { id: "e2", source: "sp", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("running"); // inner userTask is waiting
+
+      // Find the inner child INSTANCE_TOKENS insert — should carry
+      // scopeTokenId pointing to the parent.
+      const tokenInserts = env.inserts.filter((i) => i.table === "INSTANCE_TOKENS");
+      // First insert is the root token (no scopeTokenId). The second
+      // is the inner child.
+      expect(tokenInserts.length).toBeGreaterThanOrEqual(2);
+      const child = tokenInserts[1].values[0];
+      expect(child.scopeTokenId).toBeDefined();
+      expect(child.scopeTokenId).toBe(tokenInserts[0].values[0]?.id ?? "tok-1");
+      expect(child.currentNodeId).toBe("is"); // started at inner start
+
+      // Parent token was UPDATEd to waiting + waitingFor=subprocess.
+      const parentPark = env.updates.find(
+        (u) => u.table === "INSTANCE_TOKENS" && u.set.status === "waiting" && u.set.waitingFor === "subprocess",
+      );
+      expect(parentPark).toBeTruthy();
+
+      // Audit trail includes `token-waiting(waitingFor=subprocess)` +
+      // `token-created` with the scopeTokenId payload.
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      const parkEvt = events.find((e) => e.eventType === "token-waiting" && (e.payload as { waitingFor?: string })?.waitingFor === "subprocess");
+      expect(parkEvt).toBeTruthy();
+      const childCreated = events.find((e) => e.eventType === "token-created" && (e.payload as { via?: string })?.via === "subprocess");
+      expect(childCreated).toBeTruthy();
+      expect((childCreated?.payload as { scopeTokenId?: string })?.scopeTokenId).toBeDefined();
+    });
+  });
 });
