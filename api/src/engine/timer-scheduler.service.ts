@@ -264,7 +264,13 @@ export class TimerSchedulerService implements OnApplicationBootstrap, OnModuleDe
       tenantId: r.TENANT_ID as string,
       instanceId: r.INSTANCE_ID as string,
       tokenId: (r.TOKEN_ID as string | null) ?? null,
-      fireAt: r.FIRE_AT as Date,
+      // node-postgres returns timestamps as Date when the column type
+      // is registered with the parser, BUT drizzle's `sql.execute()`
+      // bypasses drizzle's coercion and pg's default for TIMESTAMPTZ
+      // can come through as string or Date depending on the pg-types
+      // version. Normalize at the boundary so dispatchers can safely
+      // treat fireAt as a Date.
+      fireAt: r.FIRE_AT instanceof Date ? r.FIRE_AT : new Date(r.FIRE_AT as string),
       kind: r.KIND as string,
       payload: r.PAYLOAD,
     }));
