@@ -2868,4 +2868,168 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
     new EngineService({} as any, makeFakeWorker() as any, scheduler as any);
     expect(scheduler.callbacks.has("task-due-reminder")).toBe(true);
   });
+
+  // ─── Cancel paths (Gap 3) ───────────────────────────────────────
+  describe("cancel paths", () => {
+    const simpleCanvas = {
+      nodes: [
+        { id: "s", type: "startEvent" },
+        { id: "t", type: "userTask" },
+        { id: "e", type: "endEvent" },
+      ],
+      edges: [
+        { id: "e1", source: "s", target: "t" },
+        { id: "e2", source: "t", target: "e" },
+      ],
+    };
+
+    it("skipTask cancels the pending timer", async () => {
+      const env = makeCompleteTaskEnv({ tokenAssignedTo: UUID_A, canvas: simpleCanvas });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      // skipTask expects an admin caller; the fake doesn't enforce
+      // that. Caller userId differs from assignee.
+      await service.skipTask({
+        tokenId: "tok-waiting", tenantId: "tenant-1", userId: UUID_B, reason: "manual",
+      });
+      expect(scheduler.cancelled.some((c) => c.tokenId === "tok-waiting")).toBe(true);
+    });
+
+    it("cancelInstance cancels every timer for the instance (bulk)", async () => {
+      // Use the dedicated cancel env with a live token + canvas.
+      const inst = { id: "inst-1", status: "running", version: 0 };
+      const liveTokens: Array<{ id: string; version: number; currentNodeId: string; status: string }> = [
+        { id: "tok-1", version: 0, currentNodeId: "t", status: "waiting" },
+      ];
+      const tableName = (table: unknown): string => {
+        if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+          // @ts-expect-error — drizzle internal
+          return table[Symbol.for("drizzle:Name")] as string;
+        }
+        return "unknown";
+      };
+      const tx = {
+        insert: (_t: unknown) => ({
+          values: () => ({
+            returning: () => Promise.resolve([{}]),
+            then: (r: (v: unknown) => unknown) => r(undefined),
+          }),
+        }),
+        update: (table: unknown) => {
+          const name = tableName(table);
+          return {
+            set: (values: Record<string, unknown>) => ({
+              where: () => ({
+                returning: () => {
+                  if (name === "ENGINE_JOBS") return Promise.resolve([]);
+                  if (name === "INSTANCE_TOKENS" && typeof values.version === "number") {
+                    const tok = liveTokens.find((t) => t.version === (values.version as number) - 1);
+                    if (tok) { tok.version = values.version as number; tok.status = (values.status as string) ?? tok.status; }
+                  }
+                  return Promise.resolve([{ id: name === "INSTANCE_TOKENS" ? liveTokens[0]?.id : inst.id }]);
+                },
+              }),
+            }),
+          };
+        },
+        select: () => {
+          let routed: string | null = null;
+          const chain = {
+            from: (table: unknown) => { routed = tableName(table); return chain; },
+            where: () => chain,
+            orderBy: () => chain,
+            limit: () => {
+              if (routed === "PROCESS_INSTANCES") return Promise.resolve([inst]);
+              return Promise.resolve([]);
+            },
+            then: (r: (v: unknown) => unknown) => {
+              if (routed === "INSTANCE_TOKENS") return r(liveTokens.filter((t) => t.status === "waiting" || t.status === "active"));
+              return r([]);
+            },
+          };
+          return chain;
+        },
+      };
+      const db = { transaction<T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> { return fn(tx); } };
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(db as any, makeFakeWorker() as any, scheduler as any);
+      await service.cancelInstance({ instanceId: "inst-1", tenantId: "tenant-1", userId: UUID_A, reason: "test" });
+      expect(scheduler.cancelled.some((c) => c.instanceId === "inst-1")).toBe(true);
+    });
+  });
+
+  // ─── Gap 4 — listTasks.overdue flag ────────────────────────────
+  describe("listTasks overdue flag", () => {
+    function makeListTasksEnv(tokens: Array<{ id: string; dueAt: Date | null; priority: number | null }>) {
+      const tableName = (table: unknown): string => {
+        if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+          // @ts-expect-error — drizzle internal
+          return table[Symbol.for("drizzle:Name")] as string;
+        }
+        return "unknown";
+      };
+      const db = {
+        select: () => {
+          let routedTable: string | null = null;
+          const chain = {
+            from: (table: unknown) => { routedTable = tableName(table); return chain; },
+            innerJoin: () => chain,
+            leftJoin: () => chain,
+            where: () => chain,
+            orderBy: () => chain,
+            limit: () => {
+              if (routedTable === "INSTANCE_TOKENS") {
+                return Promise.resolve(tokens.map((t) => ({
+                  tokenId: t.id,
+                  instanceId: "inst-1",
+                  currentNodeId: "t",
+                  assignedTo: null,
+                  candidateRole: "manager",
+                  createdAt: new Date(),
+                  dueAt: t.dueAt,
+                  priority: t.priority,
+                  processId: "proc-1",
+                  versionedCanvas: { nodes: [{ id: "t", data: { label: "Task" } }], edges: [] },
+                  legacySnapshot: null,
+                  processName: "Proc",
+                })));
+              }
+              return Promise.resolve([]);
+            },
+          };
+          return chain;
+        },
+      };
+      return db;
+    }
+
+    it("flags overdue=true when dueAt is in the past", async () => {
+      const db = makeListTasksEnv([{ id: "tk-1", dueAt: new Date(Date.now() - 60_000), priority: 75 }]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(db as any, makeFakeWorker() as any);
+      const rows = await service.listTasks({ tenantId: "tenant-1" });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].overdue).toBe(true);
+      expect(rows[0].dueAt).toBeTruthy();
+    });
+
+    it("flags overdue=false when dueAt is in the future", async () => {
+      const db = makeListTasksEnv([{ id: "tk-1", dueAt: new Date(Date.now() + 60_000), priority: null }]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(db as any, makeFakeWorker() as any);
+      const rows = await service.listTasks({ tenantId: "tenant-1" });
+      expect(rows[0].overdue).toBe(false);
+    });
+
+    it("flags overdue=false when dueAt is null", async () => {
+      const db = makeListTasksEnv([{ id: "tk-1", dueAt: null, priority: null }]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(db as any, makeFakeWorker() as any);
+      const rows = await service.listTasks({ tenantId: "tenant-1" });
+      expect(rows[0].overdue).toBe(false);
+      expect(rows[0].dueAt).toBeNull();
+    });
+  });
 });
