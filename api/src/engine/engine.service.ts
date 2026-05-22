@@ -669,16 +669,21 @@ export class EngineService {
       }
       isResuming = false;
 
-      // Pass-through node-exited. Gateways still emit a single
-      // node-exited; the difference is in *which* outgoing edge gets
-      // picked below.
-      await recordEvent(args.tx, {
-        tenantId: args.tenantId,
-        instanceId: args.instanceId,
-        tokenId: args.tokenId,
-        nodeId,
-        eventType: "node-exited",
-      });
+      // Pass-through node-exited for every node EXCEPT parallel/
+      // inclusive gateways — those emit their own node-exited
+      // explicitly inside the SPLIT / JOIN-fire paths, and a token that
+      // PARKS at a join doesn't truly exit the gateway. Emitting it
+      // here would put a misleading "exited" row in the audit trail
+      // ahead of token-waiting(join).
+      if (node.type !== "parallelGateway" && node.type !== "inclusiveGateway") {
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.tokenId,
+          nodeId,
+          eventType: "node-exited",
+        });
+      }
 
       // P1 — parallel split. Every outgoing edge fires; one fresh child
       // token per edge is INSERTed at the edge's target (active),
@@ -696,6 +701,14 @@ export class EngineService {
       // TODO(P1 polish): replay-from-step semantics when active siblings
       // exist are undefined; flag at the replay entrypoint.
       let next: EngineEdge | null = null;
+      // P1 Session 3 — for parallel/inclusive gateways we skip the
+      // pass-through `node-exited` at the top of the loop so a token
+      // that PARKS at a JOIN doesn't leave a misleading "exited" row in
+      // the audit. The flag below tracks whether one of the exit paths
+      // (SPLIT multi-fire / JOIN fire) has already emitted node-exited,
+      // so we don't double-emit when the flow falls through to the
+      // 1-out advance.
+      let gatewayNodeExitedEmitted = false;
       if (node.type === "parallelGateway" || node.type === "inclusiveGateway") {
         const outgoing = args.canvas.edges.filter((e) => e.source === nodeId);
         const incoming = args.canvas.edges.filter((e) => e.target === nodeId);
@@ -780,6 +793,7 @@ export class EngineService {
               tokenId: args.tokenId, nodeId, eventType: "node-exited",
               payload: { via: "join", forkId: tokRow.forkId, mergedTokens: parked.length },
             });
+            gatewayNodeExitedEmitted = true;
             await args.tx
               .update(instanceTokens)
               .set({ status: "completed", updatedAt: new Date() })
@@ -891,6 +905,7 @@ export class EngineService {
               tenantId: args.tenantId, instanceId: args.instanceId,
               tokenId: args.tokenId, nodeId, eventType: "node-exited",
             });
+            gatewayNodeExitedEmitted = true;
             version = await this.updateTokenWithLock(
               args.tx, args.tokenId, version,
               { status: "completed", currentNodeId: nodeId },
@@ -951,6 +966,17 @@ export class EngineService {
         } else if (outgoing.length === 1) {
           // 1-out (post-join or degenerate split) — take the single edge.
           next = outgoing[0];
+        }
+
+        // Emit node-exited if the token actually leaves the gateway
+        // via a single outgoing edge and we haven't already emitted
+        // (JOIN-fire and SPLIT multi-fire flag this). JOIN-park returns
+        // before this line so its emit-suppression stands.
+        if (next && !gatewayNodeExitedEmitted) {
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId, instanceId: args.instanceId,
+            tokenId: args.tokenId, nodeId, eventType: "node-exited",
+          });
         }
       }
 
