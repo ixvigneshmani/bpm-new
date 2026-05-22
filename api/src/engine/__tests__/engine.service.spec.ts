@@ -3203,6 +3203,106 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
       expect(scheduler.callbacks.has("boundary-timer")).toBe(true);
       expect(scheduler.callbacks.has("task-due-reminder")).toBe(true);
     });
+
+    it("schedules ONE boundary timer per attached boundary when multiple exist on the same host", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "t", type: "userTask", data: { assignment: { type: "directUser", value: UUID_A } } },
+          { id: "b1", type: "boundaryEvent", data: {
+              attachedToRef: "t", cancelActivity: true,
+              eventDefinition: { kind: "timer", timerType: "duration", value: "PT5M" },
+          } },
+          { id: "b2", type: "boundaryEvent", data: {
+              attachedToRef: "t", cancelActivity: false,
+              eventDefinition: { kind: "timer", timerType: "duration", value: "PT2M" },
+          } },
+          { id: "esc1", type: "endEvent" },
+          { id: "esc2", type: "endEvent" },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "t" },
+          { id: "e2", source: "t", target: "e" },
+          { id: "eb1", source: "b1", target: "esc1" },
+          { id: "eb2", source: "b2", target: "esc2" },
+        ],
+      });
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any, scheduler as any);
+      await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      const boundaries = scheduler.scheduled.filter((s) => s.kind === "boundary-timer");
+      expect(boundaries.length).toBe(2);
+      const ids = boundaries.map((b) => (b.payload as { boundaryNodeId: string }).boundaryNodeId).sort();
+      expect(ids).toEqual(["b1", "b2"]);
+      const flags = boundaries.map((b) => (b.payload as { interrupting: boolean }).interrupting);
+      expect(flags).toContain(true);
+      expect(flags).toContain(false);
+    });
+
+    it("cancelInstance bulk-deletes boundary timers via cancelTimersForInstance", async () => {
+      // Use a simpler env: a single live token + a fake scheduler that
+      // records cancelTimersForInstance calls.
+      const inst = { id: "inst-1", status: "running", version: 0 };
+      const liveTokens = [
+        { id: "tok-1", version: 0, currentNodeId: "t", status: "waiting" },
+      ];
+      const tableName = (table: unknown): string => {
+        if (table && typeof table === "object" && Symbol.for("drizzle:Name") in table) {
+          // @ts-expect-error — drizzle internal
+          return table[Symbol.for("drizzle:Name")] as string;
+        }
+        return "unknown";
+      };
+      const tx = {
+        insert: (_t: unknown) => ({
+          values: () => ({
+            returning: () => Promise.resolve([{}]),
+            then: (r: (v: unknown) => unknown) => r(undefined),
+          }),
+        }),
+        update: (table: unknown) => {
+          const name = tableName(table);
+          return {
+            set: (_v: Record<string, unknown>) => ({
+              where: () => ({
+                returning: () => {
+                  if (name === "ENGINE_JOBS") return Promise.resolve([]);
+                  return Promise.resolve([{ id: name === "INSTANCE_TOKENS" ? "tok-1" : inst.id }]);
+                },
+              }),
+            }),
+          };
+        },
+        select: () => {
+          let routed: string | null = null;
+          const chain = {
+            from: (table: unknown) => { routed = tableName(table); return chain; },
+            where: () => chain,
+            orderBy: () => chain,
+            limit: () => {
+              if (routed === "PROCESS_INSTANCES") return Promise.resolve([inst]);
+              return Promise.resolve([]);
+            },
+            then: (r: (v: unknown) => unknown) => {
+              if (routed === "INSTANCE_TOKENS") return r(liveTokens);
+              return r([]);
+            },
+          };
+          return chain;
+        },
+      };
+      const db = { transaction<T>(fn: (tx: typeof tx) => Promise<T>): Promise<T> { return fn(tx); } };
+      const scheduler = makeFakeTimerScheduler();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(db as any, makeFakeWorker() as any, scheduler as any);
+      await service.cancelInstance({ instanceId: "inst-1", tenantId: "tenant-1", userId: UUID_A, reason: "test" });
+      // cancelTimersForInstance must have been called — that deletes
+      // every kind of timer for the instance, including boundary
+      // timers. (No per-kind filter in the delete query.)
+      expect(scheduler.cancelled.some((c) => c.instanceId === "inst-1")).toBe(true);
+    });
   });
 
   // ─── P2 Session 6a: resolveTimerFireAt ───────────────────────────
