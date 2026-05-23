@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { formatRelativeTime } from "../../lib/utils";
+import RelativeTime from "../RelativeTime";
 import type { DashInstance } from "../../pages/DashboardPage";
 
 type Props = {
@@ -226,7 +226,7 @@ export default function ActivityFeed({ instances }: Props) {
                     marginTop: 2,
                   }}
                 >
-                  {formatRelativeTime(a.ts)}
+                  <RelativeTime iso={a.ts} />
                 </div>
               </div>
             </div>

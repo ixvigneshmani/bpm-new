@@ -1,7 +1,9 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiGet } from "../lib/api";
 import { STATUS_DISPLAY, STATUS_COLORS } from "../lib/constants";
+import { useVisiblePoll } from "../lib/use-visible-poll";
+import RelativeTime from "../components/RelativeTime";
 
 type ViewMode = "card" | "list";
 type SortKey = "updated" | "name" | "tasks";
@@ -23,21 +25,29 @@ export default function ProcessListPage() {
   type ApiProcess = { id: string; name: string; description: string | null; status: string; version: string; step: string; createdBy: string; createdAt: string; updatedAt: string; isRestrictedForCaller?: boolean };
   const [apiProcesses, setApiProcesses] = useState<ApiProcess[]>([]);
 
-  useEffect(() => {
-    apiGet<ApiProcess[]>("/processes").then(setApiProcesses).catch((e) => console.warn("Failed to load processes:", e.message));
+  const refresh = useCallback(async () => {
+    try {
+      const rows = await apiGet<ApiProcess[]>("/processes");
+      setApiProcesses(rows);
+    } catch (e) {
+      console.warn("Failed to load processes:", (e as Error).message);
+    }
   }, []);
+  // 30s poll + refetch when the tab becomes visible again, so a save in
+  // another tab / browser shows up here without a manual reload.
+  useVisiblePoll(refresh, 30_000);
 
-  // Merge API processes into the display format
+  // Merge API processes into the display format. The relative-time label
+  // is rendered live via <RelativeTime/> in the JSX (uses useNow()), so we
+  // only carry the raw ISO + a numeric sort key through this memo.
   const allProcesses = useMemo(() => {
     const fromApi = apiProcesses.map((p) => {
-      const timeDiff = Date.now() - new Date(p.updatedAt).getTime();
-      const updated = timeDiff < 60000 ? "Just now" : timeDiff < 3600000 ? `${Math.floor(timeDiff / 60000)}m ago` : timeDiff < 86400000 ? `${Math.floor(timeDiff / 3600000)}h ago` : `${Math.floor(timeDiff / 86400000)}d ago`;
       const statusMap = STATUS_DISPLAY;
       return {
         id: p.id, name: p.name, description: p.description || "",
         status: statusMap[p.status] || p.status,
         owner: "You", ownerInitials: "VM", ownerColor: "#6366F1",
-        updated, updatedSort: new Date(p.updatedAt).getTime(),
+        updatedAt: p.updatedAt, updatedSort: new Date(p.updatedAt).getTime(),
         version: p.version || "v1.0", tasks: 0, runs: 0,
         step: p.step, isReal: true,
         isRestricted: !!p.isRestrictedForCaller,
@@ -506,7 +516,7 @@ export default function ProcessListPage() {
                     <span style={{
                       padding: "3px 8px", borderRadius: 5, fontSize: 11, fontWeight: 500,
                       background: "#F9FAFB", color: "#475467", border: "1px solid #F2F4F7",
-                    }}>Updated {proc.updated}</span>
+                    }}>Updated <RelativeTime iso={proc.updatedAt} /></span>
                   </div>
 
                   {/* Footer: owner + chevron */}
@@ -607,7 +617,7 @@ export default function ProcessListPage() {
                 </div>
 
                 {/* Updated */}
-                <span style={{ fontSize: 12, color: "#9CA3AF" }}>{proc.updated}</span>
+                <span style={{ fontSize: 12, color: "#9CA3AF" }}><RelativeTime iso={proc.updatedAt} /></span>
 
                 {/* Chevron */}
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>

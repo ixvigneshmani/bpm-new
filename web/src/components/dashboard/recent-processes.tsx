@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { formatRelativeTime } from "../../lib/utils";
+import RelativeTime from "../RelativeTime";
 import { STATUS_DISPLAY, STATUS_COLORS } from "../../lib/constants";
 import type { DashProcess } from "../../pages/DashboardPage";
 
@@ -135,7 +135,7 @@ export default function RecentProcesses({ processes }: Props) {
                       color: "#98A2B3",
                     }}
                   >
-                    {formatRelativeTime(p.updatedAt)}
+                    <RelativeTime iso={p.updatedAt} />
                   </td>
                 </tr>
               );

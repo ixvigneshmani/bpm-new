@@ -6,6 +6,7 @@ import { apiPost } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { STATUS_COLORS, STATUS_DISPLAY } from "../../lib/constants";
 import { formatRelativeTime } from "../../lib/utils";
+import RelativeTime from "../RelativeTime";
 
 export default function ProcessSubheader({
   dirty = false,
@@ -199,7 +200,7 @@ export default function ProcessSubheader({
 
         {processMeta.updatedAt && (
           <span style={{ fontSize: 11, color: "#9CA3AF" }}>
-            Edited {formatRelativeTime(processMeta.updatedAt)}
+            Edited <RelativeTime iso={processMeta.updatedAt} />
           </span>
         )}
 
