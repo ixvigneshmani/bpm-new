@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
+import { useNow } from "../lib/utils";
 import InstanceCanvas from "./console/InstanceCanvas";
 import StepSnapshot from "./console/StepSnapshot";
 import EditVariablesDialog from "./console/EditVariablesDialog";
@@ -114,7 +115,10 @@ export default function InstanceDetailPage() {
   const [busyAction, setBusyAction] = useState<null | "suspend" | "resume" | "edit" | "replay">(null);
   const [activeTab, setActiveTab] = useState<TabKey>("activity");
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(Date.now());
-  const [, setNowTick] = useState(0);
+  // Browser-clock ticker so "Updated Ns ago" stays current without
+  // depending on the data-refresh cycle (which stops polling when the
+  // instance reaches a terminal state). Shared with the rest of the app.
+  const now = useNow(1000);
   const { user } = useAuth();
   const isAdmin = user?.systemRole === "owner" || user?.systemRole === "admin";
   const pageActingFor = useActingForSnapshot();
@@ -158,11 +162,6 @@ export default function InstanceDetailPage() {
     document.addEventListener("visibilitychange", onVis);
     return () => { stop(); document.removeEventListener("visibilitychange", onVis); };
   }, [detail, refresh]);
-
-  useEffect(() => {
-    const t = window.setInterval(() => setNowTick((n) => n + 1), 1000);
-    return () => window.clearInterval(t);
-  }, []);
 
   useEffect(() => { writeNodeToHash(selectedNodeId); }, [selectedNodeId]);
   useEffect(() => {
@@ -385,7 +384,7 @@ export default function InstanceDetailPage() {
               {isRunning && (
                 <>
                   <Dot />
-                  <span style={{ color: "#98A2B3" }}>Updated {formatAgo(lastRefreshedAt)}</span>
+                  <span style={{ color: "#98A2B3" }}>Updated {formatAgo(lastRefreshedAt, now)}</span>
                 </>
               )}
             </div>
@@ -1691,8 +1690,8 @@ function formatDuration(startedAt: string, completedAt: string | null): string {
   return `${h}h ${m % 60}m`;
 }
 
-function formatAgo(ts: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+function formatAgo(ts: number, now: number = Date.now()): string {
+  const s = Math.max(0, Math.floor((now - ts) / 1000));
   if (s < 2) return "just now";
   if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
