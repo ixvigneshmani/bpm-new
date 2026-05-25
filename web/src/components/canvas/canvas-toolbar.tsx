@@ -75,7 +75,10 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
     setStartDialogOpen(true);
   };
 
-  const submitStartInstance = async (variables: Record<string, unknown>) => {
+  const submitStartInstance = async (
+    variables: Record<string, unknown>,
+    businessKey: string | undefined,
+  ) => {
     if (!processId || busy) return;
     setBusy("start");
     // Fresh idempotency key per click so a double-click can't create
@@ -88,9 +91,17 @@ export default function CanvasToolbar({ onOpenAi, processId }: Props = {}) {
       // work whether or not the process has been published yet.
       // Real (non-test) starts go through the Tasks/Running flows
       // which don't pass this flag.
+      //
+      // businessKey is forwarded to the engine so intermediate
+      // message-catch events have something to correlate on (P3
+      // Session 7). Sent only when non-empty.
+      const body: { variables: Record<string, unknown>; businessKey?: string } = {
+        variables,
+      };
+      if (businessKey) body.businessKey = businessKey;
       const out = await apiPost<{ instanceId: string; status: string }>(
         `/processes/${processId}/instances?testRun=true`,
-        { variables },
+        body,
         { headers: { "Idempotency-Key": idempotencyKey }, signal: controller.signal },
       );
       if (mountedRef.current) {

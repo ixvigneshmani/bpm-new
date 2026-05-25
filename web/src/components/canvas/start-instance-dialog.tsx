@@ -23,7 +23,15 @@ export default function StartInstanceDialog({
 }: {
   schema: BusinessDocSchema;
   onCancel: () => void;
-  onSubmit: (variables: Record<string, unknown>) => void;
+  /** Receives both the variable bag AND the optional businessKey. The
+   *  businessKey is what the engine uses to correlate inbound messages
+   *  (P3 Session 7) — without it, any intermediate message-catch in the
+   *  process fails immediately with "no correlation key". This field
+   *  was added 2026-05-25 to close OBS-S7-A. */
+  onSubmit: (
+    variables: Record<string, unknown>,
+    businessKey: string | undefined,
+  ) => void;
   submitting: boolean;
 }) {
   const hasSchema = useMemo(
@@ -31,12 +39,14 @@ export default function StartInstanceDialog({
     [schema],
   );
 
+  const [businessKey, setBusinessKey] = useState<string>("");
   const [values, setValues] = useState<Record<string, string>>({});
   const [rawJson, setRawJson] = useState<string>("{}");
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [mode, setMode] = useState<"form" | "raw">(hasSchema ? "form" : "raw");
 
   const submit = () => {
+    const bk = businessKey.trim() || undefined;
     if (mode === "raw") {
       try {
         const parsed = JSON.parse(rawJson || "{}");
@@ -45,13 +55,13 @@ export default function StartInstanceDialog({
           return;
         }
         setJsonError(null);
-        onSubmit(parsed as Record<string, unknown>);
+        onSubmit(parsed as Record<string, unknown>, bk);
       } catch (e) {
         setJsonError((e as Error).message);
       }
       return;
     }
-    onSubmit(coerceBusinessDocValues(schema, values));
+    onSubmit(coerceBusinessDocValues(schema, values), bk);
   };
 
   // Portal to document.body so the fixed-positioned overlay escapes
@@ -98,6 +108,42 @@ export default function StartInstanceDialog({
         </header>
 
         <div style={{ padding: "16px 24px", overflowY: "auto", maxHeight: "70vh" }}>
+          {/* Business key — optional in general, REQUIRED if the process
+              has an intermediate message-catch event correlating on
+              businessKey. Without it, P3 Session 7 fails the token loud
+              with "no correlation key". Caller passes it as the second
+              arg to onSubmit; empty string → undefined → engine treats
+              it as not set. */}
+          <div style={{ marginBottom: 14 }}>
+            <label
+              htmlFor="start-business-key"
+              style={{
+                display: "block", fontSize: 12, fontWeight: 600,
+                color: "#374151", marginBottom: 4, fontFamily: "inherit",
+              }}
+            >
+              Business key <span style={{ fontWeight: 400, color: "#9CA3AF" }}>(optional)</span>
+            </label>
+            <input
+              id="start-business-key"
+              type="text"
+              value={businessKey}
+              onChange={(e) => setBusinessKey(e.target.value)}
+              disabled={submitting}
+              spellCheck={false}
+              placeholder="e.g. ORD-1234, leave-req-2026-0142"
+              style={{
+                width: "100%", padding: "8px 10px",
+                border: "1px solid #E5E7EB", borderRadius: 8,
+                fontSize: 13, color: "#111827", outline: "none",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              }}
+            />
+            <div style={{ marginTop: 4, fontSize: 11, color: "#9CA3AF" }}>
+              Host-app correlation id. Required if this process catches messages by businessKey.
+            </div>
+          </div>
+
           {hasSchema && (
             <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
               <ModeChip active={mode === "form"} onClick={() => setMode("form")} label="Form" />
