@@ -52,6 +52,7 @@ import { REST_SERVICE_TASK_TOPIC, SERVICE_TASK_TOPIC } from "./service-task-regi
 import { CONNECTOR_TOPIC } from "../connectors/connector-registry";
 import { WorkerService } from "./worker.service";
 import { TimerSchedulerService, type ClaimedTimer } from "./timer-scheduler.service";
+import { MessageSubscriptionService } from "./message-subscription.service";
 import { CorrelationContext } from "../common/observability/correlation-context";
 
 /** OS4.1 / M5 — every INSTANCE_EVENTS row written by the engine flows
@@ -199,6 +200,12 @@ export class EngineService {
     @Inject(DATABASE) private readonly db: Database,
     private readonly worker: WorkerService,
     private readonly timerScheduler?: TimerSchedulerService,
+    // P3 Session 7 — optional like timerScheduler so unit tests that
+    // hand-construct EngineService keep compiling. The
+    // intermediateCatchEvent branch falls back to a no-op subscribe
+    // when this is undefined (tests can still exercise the engine path
+    // without standing the service up).
+    private readonly messageSubscriptions?: MessageSubscriptionService,
   ) {
     // P2 Session 4 — register the task-due-reminder dispatcher. The
     // scheduler is optional in the constructor so unit tests that
@@ -798,6 +805,108 @@ export class EngineService {
           return { tokenStatus: "waiting", hops };
         }
 
+        // P3 Session 7 — intermediate message-catch event.
+        //
+        // First entry only (this branch lives inside `if (!isResuming)`):
+        // park the token + INSERT a MESSAGE_SUBSCRIPTIONS row keyed on
+        // (tenant, messageName, correlationKey). The row sits until:
+        //   - POST /api/messages delivers a matching message → resumes
+        //     the token (re-entering advanceToken with isResuming=true,
+        //     which falls through to the outgoing-edge pick below), or
+        //   - cancelInstance / replay-cancel / scope-drain wipes it.
+        //
+        // Correlation key resolves to (in order):
+        //   1. eventDefinition.correlationKey literal on the node (lets
+        //      a process wait for a key that ISN'T businessKey — e.g.
+        //      a sub-document id).
+        //   2. instance.businessKey.
+        // If neither is set we fail the token loud rather than create
+        // an un-deliverable subscription.
+        if (
+          node.type === "intermediateCatchEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "message")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            messageName?: string;
+            correlationKey?: string;
+          };
+          const messageName = (def.messageName ?? "").trim();
+          if (!messageName) {
+            const m = `intermediateCatchEvent ${nodeId}: kind=message but no messageName configured.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          let correlationKey = (def.correlationKey ?? "").trim();
+          if (!correlationKey) {
+            const bkRows = await args.tx
+              .select({ businessKey: processInstances.businessKey })
+              .from(processInstances)
+              .where(eq(processInstances.id, args.instanceId))
+              .limit(1);
+            correlationKey = (bkRows[0]?.businessKey ?? "").trim();
+          }
+          if (!correlationKey) {
+            const m =
+              `intermediateCatchEvent ${nodeId}: no correlation key — ` +
+              `set instance.businessKey on startInstance or ` +
+              `eventDefinition.correlationKey on the node.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          // Read the token's existing scope (subprocess containment).
+          // Stored on the subscription row so scope-drain can clean up.
+          const scopeRows = await args.tx
+            .select({ scopeTokenId: instanceTokens.scopeTokenId })
+            .from(instanceTokens)
+            .where(eq(instanceTokens.id, args.tokenId))
+            .limit(1);
+          const scopeTokenId = scopeRows[0]?.scopeTokenId ?? null;
+          version = await this.updateTokenWithLock(
+            args.tx, args.tokenId, version,
+            {
+              status: "waiting",
+              waitingFor: "message",
+              currentNodeId: nodeId,
+            },
+          );
+          if (this.messageSubscriptions) {
+            await this.messageSubscriptions.subscribe({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              scopeTokenId,
+              messageName,
+              correlationKey,
+              tx: args.tx,
+            });
+          }
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "message-subscribed",
+            payload: { messageName, correlationKey, scopeTokenId },
+          });
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-waiting",
+            payload: { waitingFor: "message", messageName, correlationKey },
+          });
+          return { tokenStatus: "waiting", hops };
+        }
+
         // Wait state: service task suspends the token until the
         // worker handler completes the job and calls back into
         // completeServiceTask. Topic resolution: the canvas's
@@ -1356,6 +1465,10 @@ export class EngineService {
           return { tokenStatus: "failed", hops, errorMessage: message };
         }
       } else {
+        // Default: read the lone outgoing edge. message-catch lands
+        // here on resume — its first-entry park lives in the
+        // `if (!isResuming)` block above (where userTask + serviceTask
+        // park too), so resume just needs the outgoing-edge pick.
         next = pickNextEdge(args.canvas, nodeId, this.logger, node.type);
       }
       if (!next) {
@@ -2631,6 +2744,225 @@ export class EngineService {
       });
 
       return {
+        instanceId: tokenRow.instanceId,
+        instanceStatus,
+        tokenStatus: advance.tokenStatus,
+      };
+    });
+  }
+
+  /** P3 Session 7 — deliver an external message to a parked
+   *  intermediate-message-catch token.
+   *
+   *  Looks up the subscription via (tenantId, messageName, correlationKey)
+   *  with FOR UPDATE SKIP LOCKED so two concurrent deliveries for the
+   *  same tuple don't both wake the same token (only the first claim
+   *  wins; the second sees no row and returns `no-subscription`).
+   *
+   *  On success: merges payload into instance.variables, deletes the
+   *  subscription row, audits message-received, resumes the token, and
+   *  re-runs advanceToken from the catch node. Returns
+   *  `{ outcome: "delivered", instanceId, instanceStatus, tokenStatus }`.
+   *
+   *  On no match: returns `{ outcome: "no-subscription" }` so the
+   *  controller can answer with a 404 + a useful body. Camunda answer.
+   *
+   *  Idempotency is handled by the controller (in-memory 10-min cache);
+   *  this method is the inner transactional half. */
+  async deliverMessage(args: {
+    tenantId: string;
+    messageName: string;
+    correlationKey: string;
+    payload?: Record<string, unknown>;
+  }): Promise<
+    | {
+        outcome: "delivered";
+        instanceId: string;
+        instanceStatus: "running" | "completed" | "failed";
+        tokenStatus: "completed" | "waiting" | "failed";
+      }
+    | { outcome: "no-subscription" }
+  > {
+    if (!this.messageSubscriptions) {
+      // Defensive: tests that hand-construct without the service wired
+      // shouldn't be calling this anyway, but a clear error beats a
+      // confusing crash.
+      throw new Error(
+        "MessageSubscriptionService not wired into EngineService — cannot deliver messages.",
+      );
+    }
+    return this.db.transaction(async (tx) => {
+      const sub = await this.messageSubscriptions!.findAndLock(
+        args.tenantId,
+        args.messageName,
+        args.correlationKey,
+        tx,
+      );
+      if (!sub) {
+        return { outcome: "no-subscription" as const };
+      }
+
+      // Load the parked token + instance. The subscription FK guarantees
+      // both exist; if either is gone we treat that as no-subscription
+      // (stale row from a partially-rolled-back txn — exotic but cheap
+      // to handle).
+      const tokenRows = await tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          instanceId: instanceTokens.instanceId,
+          currentNodeId: instanceTokens.currentNodeId,
+          status: instanceTokens.status,
+          waitingFor: instanceTokens.waitingFor,
+        })
+        .from(instanceTokens)
+        .where(eq(instanceTokens.id, sub.tokenId))
+        .limit(1);
+      const tokenRow = tokenRows[0];
+      if (
+        !tokenRow ||
+        tokenRow.status !== "waiting" ||
+        tokenRow.waitingFor !== "message"
+      ) {
+        // Stale subscription row pointing at a token that's already
+        // moved on. Delete + report no-subscription.
+        await this.messageSubscriptions!.unsubscribe(sub.tokenId, tx);
+        return { outcome: "no-subscription" as const };
+      }
+      const instRow = await this.loadInstanceById(
+        tx,
+        tokenRow.instanceId,
+        args.tenantId,
+      );
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
+
+      // Merge payload into instance.variables. Shallow merge — same
+      // contract as completeTask.formData. Empty/undefined payload =
+      // no variable mutation, no variable-set audit rows.
+      let instanceVersion = instRow.version;
+      const mergedVariables = {
+        ...(instRow.variables as Record<string, unknown> | null ?? {}),
+        ...(args.payload ?? {}),
+      };
+      if (args.payload && Object.keys(args.payload).length > 0) {
+        instanceVersion = await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instanceVersion,
+          { variables: mergedVariables },
+        );
+        const redactedKeys = new Set(
+          canvas.engineConfig?.redactedVariableKeys ?? [],
+        );
+        for (const key of Object.keys(args.payload)) {
+          await recordEvent(tx, {
+            tenantId: args.tenantId,
+            instanceId: tokenRow.instanceId,
+            tokenId: tokenRow.id,
+            eventType: "variable-set",
+            payload: redactedKeys.has(key)
+              ? { key, value: "<redacted>", redacted: true, via: "message" }
+              : { key, value: args.payload[key], via: "message" },
+          });
+        }
+      }
+
+      // Audit the delivery. We log KEYS only, not values — the
+      // variable-set rows above carry per-key values (with redaction).
+      // That keeps message-received as a stable "what arrived" anchor
+      // even when payloads are large or sensitive.
+      await recordEvent(tx, {
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: tokenRow.id,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "message-received",
+        payload: {
+          messageName: args.messageName,
+          correlationKey: args.correlationKey,
+          payloadKeys: Object.keys(args.payload ?? {}),
+        },
+      });
+
+      // Delete the subscription row in the same txn so a retry can't
+      // double-fire even if the resume below fails downstream and
+      // rolls everything back (the row comes back on rollback — that's
+      // correct: the message wasn't actually delivered).
+      await this.messageSubscriptions!.unsubscribe(tokenRow.id, tx);
+
+      // Resume + advance — same shape as completeTask.
+      const tokenVersion = await this.updateTokenWithLock(
+        tx,
+        tokenRow.id,
+        tokenRow.version,
+        { status: "active", waitingFor: null },
+      );
+      await recordEvent(tx, {
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: tokenRow.id,
+        nodeId: tokenRow.currentNodeId,
+        eventType: "token-resumed",
+        payload: { via: "message", messageName: args.messageName },
+      });
+
+      const advance = await this.advanceToken({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        tokenId: tokenRow.id,
+        tokenVersion,
+        currentNodeId: tokenRow.currentNodeId,
+        canvas,
+        variables: mergedVariables,
+        resumeFromWait: true,
+      });
+
+      // Flip the instance to terminal once tokens drain. Same shape as
+      // completeTask's step 4 — replicated inline rather than extracted
+      // because the live-token count short-circuit is the only branch
+      // we care about, and extracting it without touching completeTask
+      // is a bigger blast radius than this method warrants.
+      let instanceStatus: "running" | "completed" | "failed" = "running";
+      if (
+        advance.tokenStatus === "completed" &&
+        (await this.countLiveTokens(tx, tokenRow.instanceId)) === 0
+      ) {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instanceVersion,
+          { status: "completed", completedAt: new Date() },
+        );
+        await recordEvent(tx, {
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-completed",
+          payload: { via: "message", hops: advance.hops },
+        });
+        instanceStatus = "completed";
+      } else if (advance.tokenStatus === "failed") {
+        await this.updateInstanceWithLock(
+          tx,
+          tokenRow.instanceId,
+          instanceVersion,
+          {
+            status: "failed",
+            errorMessage: advance.errorMessage ?? null,
+            completedAt: new Date(),
+          },
+        );
+        await recordEvent(tx, {
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          eventType: "instance-failed",
+          payload: { via: "message", hops: advance.hops, message: advance.errorMessage },
+        });
+        instanceStatus = "failed";
+      }
+
+      return {
+        outcome: "delivered" as const,
         instanceId: tokenRow.instanceId,
         instanceStatus,
         tokenStatus: advance.tokenStatus,
@@ -4087,6 +4419,12 @@ export class EngineService {
       if (this.timerScheduler) {
         await this.timerScheduler.cancelTimersForInstance(args.instanceId, tx);
       }
+      // P3 Session 7 — same shape for message subscriptions. Without
+      // this, a cancelled instance would leave a stale row that a
+      // later POST /api/messages could try to deliver to a dead token.
+      if (this.messageSubscriptions) {
+        await this.messageSubscriptions.cancelForInstance(args.instanceId, tx);
+      }
       for (const tok of liveTokens) {
         try {
           await this.updateTokenWithLock(tx, tok.id, tok.version, {
@@ -4581,6 +4919,12 @@ export class EngineService {
       // fire on now-dead tokens.
       if (this.timerScheduler) {
         await this.timerScheduler.cancelTimersForInstance(args.instanceId, tx);
+      }
+      // P3 Session 7 — same for message subscriptions. Replay rewrites
+      // the active token set; any old subscription row would resume a
+      // token that no longer exists.
+      if (this.messageSubscriptions) {
+        await this.messageSubscriptions.cancelForInstance(args.instanceId, tx);
       }
 
       // Kill queued jobs on this instance — they would otherwise resume

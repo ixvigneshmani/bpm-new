@@ -120,20 +120,27 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     );
   };
 
-  // P0–P2 Session 6a — what's wired so far:
+  // P0–P3 Session 7 — what's wired so far:
   //   timer on boundaryEvent .................. ✅ Session 6a
-  //   error on boundaryEvent .................. ⏳ Session 6b
-  //   message / signal / start-trigger ........ P3
-  //   intermediate catch + throw .............. P3
+  //   error on boundaryEvent .................. ✅ Session 6b
+  //   message on intermediateCatchEvent ....... ✅ Session 7
+  //   signal / message-start / timer-start .... P3 Sessions 8–9
+  //   intermediate throw ....................... P3 Session 9
   //   escalation / cancel ..................... P4
   //   compensation ............................ P6
   //   terminate ............................... P4 (end-event semantics)
   const timerBoundaryWired =
     variant === "boundary" && definition.kind === "timer";
+  const errorBoundaryWired =
+    variant === "boundary" && definition.kind === "error";
+  const messageIntermediateCatchWired =
+    variant === "intermediateCatch" && definition.kind === "message";
   const showRuntimeBanner =
     definition.kind !== "none" &&
     definition.kind !== "terminate" &&
-    !timerBoundaryWired;
+    !timerBoundaryWired &&
+    !errorBoundaryWired &&
+    !messageIntermediateCatchWired;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

@@ -8,6 +8,8 @@ import { EngineService } from "./engine.service";
 import { HealthController } from "./health.controller";
 import { IdempotencyService } from "./idempotency.service";
 import { InstancesController } from "./instances.controller";
+import { MessageSubscriptionService } from "./message-subscription.service";
+import { MessagesController } from "./messages.controller";
 import { OutboxService } from "./outbox.service";
 import { ServiceTaskRegistry } from "./service-task-registry";
 import { ServiceTaskService } from "./service-task.service";
@@ -23,6 +25,7 @@ import { WorkerService } from "./worker.service";
     EngineController,
     HealthController,
     InstancesController,
+    MessagesController,
     TasksController,
     WebhooksController,
   ],
@@ -36,7 +39,8 @@ import { WorkerService } from "./worker.service";
     ServiceTaskRegistry,
     ServiceTaskService,
     TimerSchedulerService,
+    MessageSubscriptionService,
   ],
-  exports: [EngineService, WorkerService, ServiceTaskRegistry, TimerSchedulerService],
+  exports: [EngineService, WorkerService, ServiceTaskRegistry, TimerSchedulerService, MessageSubscriptionService],
 })
 export class EngineModule {}

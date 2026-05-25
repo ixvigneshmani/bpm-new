@@ -1158,6 +1158,22 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   // { eventSubProcessId, innerStartId, kind, interrupting }.
   "event-subprocess-subscribed",
   "event-subprocess-fired",
+  // P3 Session 7 — intermediate message-catch event lifecycle.
+  // `message-subscribed`: emitted when a token parks at an intermediate
+  // catch and the MESSAGE_SUBSCRIPTIONS row is written. Payload carries
+  // { messageName, correlationKey, scopeTokenId }.
+  // `message-received`: emitted by POST /api/messages on a successful
+  // delivery, just before the token resumes. Payload carries
+  // { messageName, correlationKey, payloadKeys } (we do NOT log the full
+  // payload to avoid leaking customer data into the audit trail; keys
+  // only). The variable-set events that follow capture per-variable
+  // values via the existing variable-write audit path.
+  // `message-unsubscribed`: emitted on cancel paths
+  // (cancelInstance / scope-drain / token-cancelled) before the row
+  // is deleted. Helpful for "why didn't my message land?" debugging.
+  "message-subscribed",
+  "message-received",
+  "message-unsubscribed",
 ]);
 
 export const instanceEvents = pgTable(
@@ -1287,5 +1303,61 @@ export const scheduledTimers = pgTable(
     // Bulk cancel by instance (cancelInstance) + by token (completeTask).
     index("SCHEDULED_TIMER_INSTANCE_IDX").on(t.instanceId),
     index("SCHEDULED_TIMER_TOKEN_IDX").on(t.tokenId),
+  ],
+);
+
+/* ─── MESSAGE_SUBSCRIPTIONS ──────────────────────────────────────────
+ *
+ * P3 Session 7. Backs the intermediate message-catch event runtime.
+ * When a token enters an `intermediateCatchEvent` with `kind: "message"`,
+ * the engine parks it (`status=waiting, waiting_for=message`) and writes
+ * one row here. Lookup happens via POST /api/messages: the controller
+ * does a `SELECT ... FOR UPDATE` on
+ * `(tenant_id, message_name, correlation_key)`, merges the payload into
+ * variables, resumes the token, and deletes the row in the same txn.
+ *
+ * Schema mirrors SCHEDULED_TIMERS deliberately so the cancel paths
+ * (cancelInstance, scope-drain, replay-cancel) can call
+ * `cancelSubscriptionsForInstance(instanceId, tx)` with the same shape.
+ *
+ * `correlation_key` is resolved at park time (instance.businessKey by
+ * default; overridden by `eventDefinition.correlationKey` literal on the
+ * catch node). Stored as a string so the lookup is a simple index hit;
+ * no FEEL eval per inbound message.
+ * ──────────────────────────────────────────────────────────────────── */
+export const messageSubscriptions = pgTable(
+  "MESSAGE_SUBSCRIPTIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID")
+      .notNull()
+      .references(() => processInstances.id, { onDelete: "cascade" }),
+    tokenId: uuid("TOKEN_ID")
+      .notNull()
+      .references(() => instanceTokens.id, { onDelete: "cascade" }),
+    // For subprocess-scoped catches: the scope token that contains the
+    // catch event. Lets `cancelSubscriptionsForScope(scopeTokenId)` clean
+    // up when the scope drains via an end event or boundary interrupt.
+    scopeTokenId: uuid("SCOPE_TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    messageName: varchar("MESSAGE_NAME", { length: 255 }).notNull(),
+    correlationKey: varchar("CORRELATION_KEY", { length: 255 }).notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // Primary delivery path: SELECT FOR UPDATE on the correlation tuple.
+    index("MESSAGE_SUBSCRIPTION_LOOKUP_IDX").on(
+      t.tenantId,
+      t.messageName,
+      t.correlationKey,
+    ),
+    index("MESSAGE_SUBSCRIPTION_INSTANCE_IDX").on(t.instanceId),
+    index("MESSAGE_SUBSCRIPTION_TOKEN_IDX").on(t.tokenId),
   ],
 );
