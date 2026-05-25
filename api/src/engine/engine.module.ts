@@ -11,6 +11,8 @@ import { InstancesController } from "./instances.controller";
 import { MessageSubscriptionService } from "./message-subscription.service";
 import { MessagesController } from "./messages.controller";
 import { OutboxService } from "./outbox.service";
+import { SignalsController } from "./signals.controller";
+import { SignalSubscriptionService } from "./signal-subscription.service";
 import { ServiceTaskRegistry } from "./service-task-registry";
 import { ServiceTaskService } from "./service-task.service";
 import { TasksController } from "./tasks.controller";
@@ -26,6 +28,7 @@ import { WorkerService } from "./worker.service";
     HealthController,
     InstancesController,
     MessagesController,
+    SignalsController,
     TasksController,
     WebhooksController,
   ],
@@ -40,7 +43,15 @@ import { WorkerService } from "./worker.service";
     ServiceTaskService,
     TimerSchedulerService,
     MessageSubscriptionService,
+    SignalSubscriptionService,
   ],
-  exports: [EngineService, WorkerService, ServiceTaskRegistry, TimerSchedulerService, MessageSubscriptionService],
+  exports: [
+    EngineService,
+    WorkerService,
+    ServiceTaskRegistry,
+    TimerSchedulerService,
+    MessageSubscriptionService,
+    SignalSubscriptionService,
+  ],
 })
 export class EngineModule {}

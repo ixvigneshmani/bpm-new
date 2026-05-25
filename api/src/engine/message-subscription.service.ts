@@ -24,7 +24,10 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { and, eq, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
-import { messageSubscriptions } from "../database/schema";
+import {
+  messageStartSubscriptions,
+  messageSubscriptions,
+} from "../database/schema";
 
 export interface SubscribeArgs {
   tenantId: string;
@@ -153,6 +156,77 @@ export class MessageSubscriptionService {
       .delete(messageSubscriptions)
       .where(eq(messageSubscriptions.scopeTokenId, scopeTokenId))
       .returning({ id: messageSubscriptions.id });
+    return rows.length;
+  }
+
+  /* ─── Message-start subscriptions (P3 Session 8) ────────────────────
+   * Process-level. Registered at publishProcess; not tied to a token. */
+
+  /** Register a start subscription for an ACTIVE process. Called from
+   *  publishProcess for every startEvent whose eventDefinition.kind
+   *  === "message". The unique constraint catches duplicates (two
+   *  start events with the same message name on the same process). */
+  async registerStart(args: {
+    tenantId: string;
+    processId: string;
+    messageName: string;
+    startNodeId: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx?: any;
+  }): Promise<void> {
+    const exec = args.tx ?? this.db;
+    await exec
+      .insert(messageStartSubscriptions)
+      .values({
+        tenantId: args.tenantId,
+        processId: args.processId,
+        messageName: args.messageName,
+        startNodeId: args.startNodeId,
+      });
+  }
+
+  /** Lookup on POST /api/messages fallback path. Returns the matching
+   *  (tenantId, messageName) row, or null. No row-lock — we only need
+   *  enough info to call startInstance; startInstance handles its own
+   *  concurrency. */
+  async findStart(
+    tenantId: string,
+    messageName: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+  ): Promise<{
+    processId: string;
+    startNodeId: string;
+  } | null> {
+    const rows = await tx
+      .select({
+        processId: messageStartSubscriptions.processId,
+        startNodeId: messageStartSubscriptions.startNodeId,
+      })
+      .from(messageStartSubscriptions)
+      .where(
+        and(
+          eq(messageStartSubscriptions.tenantId, tenantId),
+          eq(messageStartSubscriptions.messageName, messageName),
+        ),
+      )
+      .limit(1);
+    return (rows[0] as { processId: string; startNodeId: string }) ?? null;
+  }
+
+  /** Wipe ALL start rows for a process. Called inside publishProcess
+   *  before re-registering, so the latest publish is always the source
+   *  of truth (no orphan starts from a prior version). */
+  async unregisterStartsForProcess(
+    processId: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx?: any,
+  ): Promise<number> {
+    const exec = tx ?? this.db;
+    const rows = await exec
+      .delete(messageStartSubscriptions)
+      .where(eq(messageStartSubscriptions.processId, processId))
+      .returning({ id: messageStartSubscriptions.id });
     return rows.length;
   }
 }

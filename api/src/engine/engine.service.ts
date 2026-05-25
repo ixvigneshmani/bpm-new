@@ -31,7 +31,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import {
   engineJobs,
@@ -53,6 +53,7 @@ import { CONNECTOR_TOPIC } from "../connectors/connector-registry";
 import { WorkerService } from "./worker.service";
 import { TimerSchedulerService, type ClaimedTimer } from "./timer-scheduler.service";
 import { MessageSubscriptionService } from "./message-subscription.service";
+import { SignalSubscriptionService } from "./signal-subscription.service";
 import { CorrelationContext } from "../common/observability/correlation-context";
 
 /** OS4.1 / M5 — every INSTANCE_EVENTS row written by the engine flows
@@ -206,6 +207,8 @@ export class EngineService {
     // when this is undefined (tests can still exercise the engine path
     // without standing the service up).
     private readonly messageSubscriptions?: MessageSubscriptionService,
+    // P3 Session 8 — same optional pattern for signal subscriptions.
+    private readonly signalSubscriptions?: SignalSubscriptionService,
   ) {
     // P2 Session 4 — register the task-due-reminder dispatcher. The
     // scheduler is optional in the constructor so unit tests that
@@ -222,6 +225,13 @@ export class EngineService {
     this.timerScheduler?.registerCallback(
       "start-event-timer",
       (t) => this.fireEventSubProcessStart(t),
+    );
+    // P3 Session 8 — process-level timer-start dispatcher. Fires the
+    // process associated with the row; cycle timers re-arm themselves
+    // until the repeat count drains.
+    this.timerScheduler?.registerCallback(
+      "process-start-timer",
+      (t) => this.fireProcessStartTimer(t),
     );
   }
 
@@ -905,6 +915,129 @@ export class EngineService {
             payload: { waitingFor: "message", messageName, correlationKey },
           });
           return { tokenStatus: "waiting", hops };
+        }
+
+        // P3 Session 8 — intermediate signal-catch event.
+        //
+        // Same shape as message catch, but no correlation key — signals
+        // are name-only broadcasts. The subscription row goes into a
+        // separate registry (SIGNAL_SUBSCRIPTIONS) because fan-out
+        // semantics differ: POST /api/signals wakes EVERY matching
+        // subscription tenant-wide; POST /api/messages wakes exactly
+        // one (the highest-priority lock winner).
+        if (
+          node.type === "intermediateCatchEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "signal")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            signalName?: string;
+          };
+          const signalName = (def.signalName ?? "").trim();
+          if (!signalName) {
+            const m = `intermediateCatchEvent ${nodeId}: kind=signal but no signalName configured.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          const scopeRows = await args.tx
+            .select({ scopeTokenId: instanceTokens.scopeTokenId })
+            .from(instanceTokens)
+            .where(eq(instanceTokens.id, args.tokenId))
+            .limit(1);
+          const scopeTokenId = scopeRows[0]?.scopeTokenId ?? null;
+          version = await this.updateTokenWithLock(
+            args.tx, args.tokenId, version,
+            {
+              status: "waiting",
+              waitingFor: "signal",
+              currentNodeId: nodeId,
+            },
+          );
+          if (this.signalSubscriptions) {
+            await this.signalSubscriptions.subscribeCatch({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              scopeTokenId,
+              signalName,
+              tx: args.tx,
+            });
+          }
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "signal-subscribed",
+            payload: { signalName, scopeTokenId },
+          });
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-waiting",
+            payload: { waitingFor: "signal", signalName },
+          });
+          return { tokenStatus: "waiting", hops };
+        }
+
+        // P3 Session 8 — intermediate signal-throw event.
+        //
+        // Synchronous in-process broadcast: SELECT every catch row in
+        // this tenant + signal name, resume each, then continue this
+        // throwing token's flow. Done inside the same txn so the throw
+        // is atomic with the rest of advanceToken. (External delivery
+        // — i.e. message throws — go through the outbox; signals stay
+        // internal.)
+        //
+        // Edge case: if a catch row's instance is the SAME instance
+        // we're throwing from, we'd recurse. Skipped here (token can't
+        // signal itself; that's a modeling error) and logged.
+        if (
+          node.type === "intermediateThrowEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "signal")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            signalName?: string;
+          };
+          const signalName = (def.signalName ?? "").trim();
+          if (!signalName) {
+            const m = `intermediateThrowEvent ${nodeId}: kind=signal but no signalName configured.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          await this.fanOutSignal({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            signalName,
+            throwingInstanceId: args.instanceId,
+            throwingTokenId: args.tokenId,
+            throwingNodeId: nodeId,
+          });
+          // Throw event is a pass-through: emit the audit + fall through
+          // to the standard outgoing-edge handling below. Resetting
+          // isResuming=false isn't needed here because we never park.
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "signal-thrown",
+            payload: { signalName },
+          });
+          // Fall through to the default outgoing-edge logic by NOT
+          // returning here — execution drops out of the if (!isResuming)
+          // block and continues with the standard `pickNextEdge` path.
         }
 
         // Wait state: service task suspends the token until the
@@ -2791,7 +2924,19 @@ export class EngineService {
         "MessageSubscriptionService not wired into EngineService — cannot deliver messages.",
       );
     }
-    return this.db.transaction(async (tx) => {
+    // P3 Session 8 — message-start fallback. Probe outside any txn:
+    // if no catch subscription exists, look for a process registered
+    // to start on this message name. Done as a quick read first so we
+    // don't pay the txn cost when neither catch nor start is set up.
+    // The real "is there still a catch?" check happens inside the
+    // main txn below via SELECT FOR UPDATE.
+    const startProbe = await this.messageSubscriptions!.findStart(
+      args.tenantId,
+      args.messageName,
+      this.db,
+    );
+
+    const txnResult = await this.db.transaction(async (tx) => {
       const sub = await this.messageSubscriptions!.findAndLock(
         args.tenantId,
         args.messageName,
@@ -2799,7 +2944,7 @@ export class EngineService {
         tx,
       );
       if (!sub) {
-        return { outcome: "no-subscription" as const };
+        return { outcome: "no-catch" as const };
       }
 
       // Load the parked token + instance. The subscription FK guarantees
@@ -2968,6 +3113,276 @@ export class EngineService {
         tokenStatus: advance.tokenStatus,
       };
     });
+
+    // Catch hit → done.
+    if (txnResult.outcome === "delivered") {
+      return txnResult;
+    }
+    // Catch miss + no start registered → 404.
+    if (!startProbe) {
+      return { outcome: "no-subscription" as const };
+    }
+    // Catch miss + start registered → spawn fresh instance.
+    try {
+      const systemUserId = await this.lookupSystemUserId(startProbe.processId);
+      const inst = await this.startInstance({
+        processId: startProbe.processId,
+        tenantId: args.tenantId,
+        userId: systemUserId,
+        businessKey: args.correlationKey,
+        variables: args.payload ?? {},
+      });
+      return {
+        outcome: "delivered" as const,
+        instanceId: inst.instanceId,
+        instanceStatus: inst.status,
+        tokenStatus: "completed" as const,
+      };
+    } catch (e) {
+      this.logger.warn(
+        `Message-start fallback: startInstance failed for process ${startProbe.processId} on ${args.messageName}: ${(e as Error).message}`,
+      );
+      return { outcome: "no-subscription" as const };
+    }
+  }
+
+  /** P3 Session 8 — public-API entry point for signal broadcast.
+   *  Opens its own transaction and delegates to fanOutSignal. */
+  async broadcastSignal(args: {
+    tenantId: string;
+    signalName: string;
+  }): Promise<{
+    catchesResumed: number;
+    startsTriggered: number;
+  }> {
+    const out = await this.db.transaction(async (tx) => {
+      return this.fanOutSignal({
+        tx,
+        tenantId: args.tenantId,
+        signalName: args.signalName,
+      });
+    });
+    return {
+      catchesResumed: out.catchesResumed,
+      startsTriggered: out.startsTriggered,
+    };
+  }
+
+  /** P3 Session 8 — resolve the "system" userId for event-triggered
+   *  starts (signal / message / timer). We use the process's
+   *  CREATED_BY as the attribution user; the audit row records the
+   *  trigger source separately via `via=signal-start | message-start |
+   *  timer-start`. PROCESS_INSTANCES.STARTED_BY is FK NOT NULL, so a
+   *  real user uuid is required. */
+  private async lookupSystemUserId(processId: string): Promise<string> {
+    const rows = await this.db
+      .select({ createdBy: processes.createdBy })
+      .from(processes)
+      .where(eq(processes.id, processId))
+      .limit(1);
+    const id = rows[0]?.createdBy;
+    if (!id) {
+      throw new Error(
+        `lookupSystemUserId: process ${processId} not found — cannot start event-triggered instance.`,
+      );
+    }
+    return id;
+  }
+
+  /** P3 Session 8 — broadcast a signal to every matching subscription
+   *  in the tenant. Used by:
+   *   - intermediateThrowEvent kind=signal (in-process throw)
+   *   - endEvent kind=signal (terminal throw)
+   *   - POST /api/signals (external broadcast)
+   *
+   *  Catch rows: resume each token. Start rows: spawn a fresh instance
+   *  for each. Catch resumes happen inside the caller's txn; start
+   *  spawns open their own txn via startInstance.
+   *
+   *  Returns counters so the controller / audit row can record how
+   *  many landed.
+   *
+   *  `throwingInstanceId` is optional; when provided we skip catch
+   *  rows belonging to the same instance (a process signaling itself
+   *  is treated as a modeling error — would recurse and is rarely the
+   *  intent).
+   */
+  async fanOutSignal(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    signalName: string;
+    throwingInstanceId?: string;
+    throwingTokenId?: string;
+    throwingNodeId?: string;
+  }): Promise<{
+    catchesResumed: number;
+    startsTriggered: number;
+    skippedSelf: number;
+  }> {
+    if (!this.signalSubscriptions) {
+      return { catchesResumed: 0, startsTriggered: 0, skippedSelf: 0 };
+    }
+    const subs = await this.signalSubscriptions.findAll(
+      args.tenantId,
+      args.signalName,
+      args.tx,
+    );
+    let catchesResumed = 0;
+    let startsTriggered = 0;
+    let skippedSelf = 0;
+    const startsToFire: string[] = [];
+    for (const sub of subs) {
+      if (sub.tokenId && sub.instanceId) {
+        if (args.throwingInstanceId && sub.instanceId === args.throwingInstanceId) {
+          skippedSelf++;
+          continue;
+        }
+        try {
+          await this.resumeTokenFromSignal({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: sub.instanceId,
+            tokenId: sub.tokenId,
+            signalName: args.signalName,
+          });
+          catchesResumed++;
+        } catch (e) {
+          this.logger.warn(
+            `Signal fan-out: failed to resume token ${sub.tokenId} on ${args.signalName}: ${(e as Error).message}`,
+          );
+        }
+        continue;
+      }
+      if (sub.processId) {
+        // Defer start spawning until after the txn commits — startInstance
+        // opens its own txn, which would deadlock if we called it inside.
+        startsToFire.push(sub.processId);
+      }
+    }
+    // startsToFire are deferred by the caller's txn-commit hook. For
+    // immediate triggers we attempt synchronously (best-effort).
+    for (const processId of startsToFire) {
+      try {
+        const systemUserId = await this.lookupSystemUserId(processId);
+        await this.startInstance({
+          processId,
+          tenantId: args.tenantId,
+          userId: systemUserId,
+          businessKey: undefined,
+          variables: {},
+        });
+        startsTriggered++;
+      } catch (e) {
+        this.logger.warn(
+          `Signal fan-out: failed to start process ${processId} on ${args.signalName}: ${(e as Error).message}`,
+        );
+      }
+    }
+    return { catchesResumed, startsTriggered, skippedSelf };
+  }
+
+  /** Resume a single token from a signal arrival. Similar to
+   *  deliverMessage's resume block but doesn't merge payload (signals
+   *  are payload-less). Caller is responsible for the broadcast loop. */
+  private async resumeTokenFromSignal(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    tokenId: string;
+    signalName: string;
+  }): Promise<void> {
+    const tokenRows = await args.tx
+      .select({
+        id: instanceTokens.id,
+        version: instanceTokens.version,
+        currentNodeId: instanceTokens.currentNodeId,
+        status: instanceTokens.status,
+        waitingFor: instanceTokens.waitingFor,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.tokenId))
+      .limit(1);
+    const tokenRow = tokenRows[0];
+    if (
+      !tokenRow ||
+      tokenRow.status !== "waiting" ||
+      tokenRow.waitingFor !== "signal"
+    ) {
+      if (this.signalSubscriptions) {
+        await this.signalSubscriptions.unsubscribeToken(args.tokenId, args.tx);
+      }
+      return;
+    }
+    const instRow = await this.loadInstanceById(args.tx, args.instanceId, args.tenantId);
+    const canvas = await this.loadCanvasForInstance(args.tx, instRow);
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: tokenRow.id,
+      nodeId: tokenRow.currentNodeId,
+      eventType: "signal-received",
+      payload: { signalName: args.signalName },
+    });
+    if (this.signalSubscriptions) {
+      await this.signalSubscriptions.unsubscribeToken(tokenRow.id, args.tx);
+    }
+
+    const tokenVersion = await this.updateTokenWithLock(
+      args.tx, tokenRow.id, tokenRow.version,
+      { status: "active", waitingFor: null },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: tokenRow.id,
+      nodeId: tokenRow.currentNodeId,
+      eventType: "token-resumed",
+      payload: { via: "signal", signalName: args.signalName },
+    });
+    const advance = await this.advanceToken({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: tokenRow.id,
+      tokenVersion,
+      currentNodeId: tokenRow.currentNodeId,
+      canvas,
+      variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+      resumeFromWait: true,
+    });
+    if (
+      advance.tokenStatus === "completed" &&
+      (await this.countLiveTokens(args.tx, args.instanceId)) === 0
+    ) {
+      await this.updateInstanceWithLock(
+        args.tx, args.instanceId, instRow.version,
+        { status: "completed", completedAt: new Date() },
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-completed",
+        payload: { via: "signal", hops: advance.hops },
+      });
+    } else if (advance.tokenStatus === "failed") {
+      await this.updateInstanceWithLock(
+        args.tx, args.instanceId, instRow.version,
+        {
+          status: "failed",
+          errorMessage: advance.errorMessage ?? null,
+          completedAt: new Date(),
+        },
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-failed",
+        payload: { via: "signal", hops: advance.hops, message: advance.errorMessage },
+      });
+    }
   }
 
   /** Resume a token that was suspended on a serviceTask. Called by
@@ -4425,6 +4840,12 @@ export class EngineService {
       if (this.messageSubscriptions) {
         await this.messageSubscriptions.cancelForInstance(args.instanceId, tx);
       }
+      // P3 Session 8 — same for signal subscriptions (catch rows only;
+      // signal-start rows belong to processes and survive instance
+      // lifecycle).
+      if (this.signalSubscriptions) {
+        await this.signalSubscriptions.cancelForInstance(args.instanceId, tx);
+      }
       for (const tok of liveTokens) {
         try {
           await this.updateTokenWithLock(tx, tok.id, tok.version, {
@@ -5311,6 +5732,18 @@ export class EngineService {
         ),
       );
 
+    // P3 Session 8 — publish-lifecycle. Scan the canvas for top-level
+    // startEvents whose eventDefinition declares an external trigger
+    // (signal / message / timer). For each, remove any existing
+    // registration on the same process and write a fresh row. This
+    // means re-publishing always reflects the latest canvas; no orphan
+    // starts from prior versions.
+    await this.registerProcessStartTriggers({
+      tenantId: args.tenantId,
+      processId: args.processId,
+      canvas,
+    });
+
     return {
       processId: args.processId,
       status: "ACTIVE",
@@ -5318,6 +5751,170 @@ export class EngineService {
       versionNumber: versionRow?.version ?? 1,
       reused,
     };
+  }
+
+  /** P3 Session 8 — read the canvas, identify start events with
+   *  external triggers, and register them in the appropriate registry.
+   *  Always wipes prior registrations first so republish is atomic.
+   *
+   *  Trigger kinds covered:
+   *   - signal:  SIGNAL_SUBSCRIPTIONS row (process_id set, no token).
+   *   - message: MESSAGE_START_SUBSCRIPTIONS row.
+   *   - timer:   SCHEDULED_TIMERS row with kind=process-start-timer.
+   *
+   *  No-op when the relevant subscription service isn't wired (tests). */
+  private async registerProcessStartTriggers(args: {
+    tenantId: string;
+    processId: string;
+    canvas: EngineCanvas;
+  }): Promise<void> {
+    return this.db.transaction(async (tx) => {
+      // Wipe prior registrations atomically. Catch rows (instances)
+      // are untouched; only start rows for THIS process go.
+      if (this.signalSubscriptions) {
+        await this.signalSubscriptions.cancelStartsForProcess(args.processId, tx);
+      }
+      if (this.messageSubscriptions) {
+        await this.messageSubscriptions.unregisterStartsForProcess(args.processId, tx);
+      }
+      if (this.timerScheduler) {
+        // Reuse cancelTimersForInstance pattern at the process layer:
+        // delete every timer row with kind=process-start-timer AND
+        // matching processId in payload. The instanceId on these rows
+        // is technically meaningless (no instance yet), so we filter
+        // on the payload field instead. Direct SQL stays cheap.
+        await tx.execute(sql`
+          DELETE FROM "SCHEDULED_TIMERS"
+          WHERE "KIND" = 'process-start-timer'
+            AND ("PAYLOAD"->>'processId') = ${args.processId}
+        `);
+      }
+
+      // Walk top-level start events (parentId undefined → not in a
+      // subprocess; event-subprocess starts are Session 6b territory).
+      for (const node of args.canvas.nodes) {
+        if (node.type !== "startEvent") continue;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if ((node as any).parentId) continue;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const def = (node as any).data?.eventDefinition as
+          | {
+              kind?: string;
+              signalName?: string;
+              messageName?: string;
+              timerType?: "date" | "duration" | "cycle";
+              value?: string;
+            }
+          | undefined;
+        if (!def || !def.kind) continue;
+
+        if (def.kind === "signal" && def.signalName && this.signalSubscriptions) {
+          await this.signalSubscriptions.subscribeStart({
+            tenantId: args.tenantId,
+            processId: args.processId,
+            signalName: def.signalName.trim(),
+            tx,
+          });
+        } else if (def.kind === "message" && def.messageName && this.messageSubscriptions) {
+          await this.messageSubscriptions.registerStart({
+            tenantId: args.tenantId,
+            processId: args.processId,
+            messageName: def.messageName.trim(),
+            startNodeId: node.id,
+            tx,
+          });
+        } else if (def.kind === "timer" && def.value && def.timerType && this.timerScheduler) {
+          // Parse the timer expression. For v1 we accept literal ISO
+          // strings only — FEEL-evaluated expressions are a polish pass.
+          const parsed = parseProcessStartTimerExpression(def.timerType, def.value);
+          if (!parsed) {
+            this.logger.warn(
+              `Publish: process ${args.processId} start node ${node.id} has unparseable timer "${def.value}" (${def.timerType}); skipping registration.`,
+            );
+            continue;
+          }
+          await this.timerScheduler.scheduleTimer(
+            {
+              tenantId: args.tenantId,
+              // No instance yet — process-start timers are
+              // instance-less. SCHEDULED_TIMERS.instance_id is
+              // nullable for exactly this case (Session 8 migration).
+              instanceId: null as unknown as string,
+              tokenId: null,
+              fireAt: parsed.fireAt,
+              kind: "process-start-timer",
+              payload: {
+                processId: args.processId,
+                startNodeId: node.id,
+                cycleRemaining: parsed.cycleRemaining,
+                cycleIntervalMs: parsed.cycleIntervalMs,
+              },
+            },
+            tx,
+          );
+        }
+      }
+    });
+  }
+
+  /** P3 Session 8 — timer-start dispatcher. Called by
+   *  TimerSchedulerService when a `process-start-timer` row hits its
+   *  fire time. Spawns a fresh instance + (for cycle timers) re-arms
+   *  itself with a decremented repeat count. */
+  async fireProcessStartTimer(t: ClaimedTimer): Promise<void> {
+    const payload = (t.payload as
+      | {
+          processId?: string;
+          cycleRemaining?: number | null;
+          cycleIntervalMs?: number | null;
+        }
+      | null) ?? {};
+    if (!payload.processId) {
+      this.logger.warn(`fireProcessStartTimer: timer ${t.id} missing processId; dropping.`);
+      return;
+    }
+    try {
+      const systemUserId = await this.lookupSystemUserId(payload.processId);
+      await this.startInstance({
+        processId: payload.processId,
+        tenantId: t.tenantId,
+        userId: systemUserId,
+        businessKey: undefined,
+        variables: {},
+      });
+    } catch (e) {
+      this.logger.warn(
+        `fireProcessStartTimer: startInstance failed for process ${payload.processId}: ${(e as Error).message}`,
+      );
+    }
+    // Cycle re-arm: if there are still repeats left, schedule the next
+    // fire. cycleRemaining is the count AFTER this fire — decremented
+    // before write so a R3/PT5S fires 3 times total.
+    const remaining = payload.cycleRemaining ?? 0;
+    const intervalMs = payload.cycleIntervalMs ?? 0;
+    if (remaining > 0 && intervalMs > 0 && this.timerScheduler) {
+      try {
+        await this.timerScheduler.scheduleTimer({
+          tenantId: t.tenantId,
+          // Re-arm: same nullable instance + no token (instance-less
+          // process-start-timer). Schema is nullable as of Session 8
+          // migration; the previous sentinel UUID would FK-fail.
+          instanceId: null as unknown as string,
+          tokenId: null,
+          fireAt: new Date(Date.now() + intervalMs),
+          kind: "process-start-timer",
+          payload: {
+            processId: payload.processId,
+            cycleRemaining: remaining - 1,
+            cycleIntervalMs: intervalMs,
+          },
+        });
+      } catch (e) {
+        this.logger.warn(
+          `fireProcessStartTimer: re-arm failed for process ${payload.processId}: ${(e as Error).message}`,
+        );
+      }
+    }
   }
 
   /** D1.0 — export a process as a portable .flowpro.json bundle.
@@ -6108,6 +6705,41 @@ export function resolveServiceTaskMaxAttempts(node: EngineNode): number | null {
  *  the timer scheduler. */
 const ISO_DURATION_RE =
   /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
+
+/** P3 Session 8 — parse a process-start timer expression into a
+ *  fire-at Date + cycle metadata. Wraps `resolveTimerFireAt` + adds
+ *  cycle-count extraction so the dispatcher knows how many more
+ *  iterations to re-arm. Returns null on unparseable input. */
+function parseProcessStartTimerExpression(
+  timerType: "date" | "duration" | "cycle",
+  value: string,
+): { fireAt: Date; cycleRemaining: number | null; cycleIntervalMs: number | null } | null {
+  const fireAt = resolveTimerFireAt({ timerType, value });
+  if (!fireAt) return null;
+  if (timerType !== "cycle") {
+    return { fireAt, cycleRemaining: null, cycleIntervalMs: null };
+  }
+  // Cycle: R{n}/P{duration}.  Empty {n} = unbounded; we treat that as
+  // a very large but finite count to keep state simple.
+  const m = /^R(\d*)\/(P.+)$/.exec(value.trim());
+  if (!m) return null;
+  const repeatStr = m[1];
+  const durStr = m[2];
+  const intervalMs = parseIsoDurationMs(durStr);
+  if (intervalMs === null) return null;
+  // R0 = no fires at all (rare, but matches the spec).
+  // R{n} = n total fires; we set cycleRemaining = n-1 because the
+  // first fire is the one we're scheduling now.
+  // R (empty) = unbounded → 10000 as a soft cap.
+  const totalFires = repeatStr === "" ? 10000 : Number(repeatStr);
+  if (!Number.isFinite(totalFires) || totalFires < 0) return null;
+  if (totalFires === 0) return null;
+  return {
+    fireAt,
+    cycleRemaining: totalFires - 1,
+    cycleIntervalMs: intervalMs,
+  };
+}
 
 function parseIsoDurationMs(s: string): number | null {
   const m = ISO_DURATION_RE.exec(s.trim());

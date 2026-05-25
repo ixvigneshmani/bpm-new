@@ -1174,6 +1174,14 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "message-subscribed",
   "message-received",
   "message-unsubscribed",
+  // P3 Session 8 — intermediate signal-catch + signal throw + signal
+  // start lifecycle. Signals are tenant-wide broadcasts (no
+  // correlation key); fan-out wakes every catch subscription and
+  // starts every signal-start process matching the name.
+  "signal-subscribed",
+  "signal-received",
+  "signal-thrown",
+  "signal-unsubscribed",
 ]);
 
 export const instanceEvents = pgTable(
@@ -1267,6 +1275,10 @@ export const scheduledTimerKindEnum = pgEnum("SCHEDULED_TIMER_KIND", [
   "boundary-timer",
   "intermediate-catch-timer",
   "start-event-timer",
+  // P3 Session 8 — timer start events on a published process. Fire
+  // creates a fresh instance of `process_id` (payload). Cycle timers
+  // re-arm themselves in the dispatcher until the repeat count drains.
+  "process-start-timer",
 ]);
 
 export const scheduledTimers = pgTable(
@@ -1276,9 +1288,9 @@ export const scheduledTimers = pgTable(
     tenantId: uuid("TENANT_ID")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
-    instanceId: uuid("INSTANCE_ID")
-      .notNull()
-      .references(() => processInstances.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID").references(() => processInstances.id, {
+      onDelete: "cascade",
+    }),
     // Most timers belong to a single token; some kinds (start-event
     // timers when those land) may not — keep nullable.
     tokenId: uuid("TOKEN_ID").references(() => instanceTokens.id, {
@@ -1359,5 +1371,86 @@ export const messageSubscriptions = pgTable(
     ),
     index("MESSAGE_SUBSCRIPTION_INSTANCE_IDX").on(t.instanceId),
     index("MESSAGE_SUBSCRIPTION_TOKEN_IDX").on(t.tokenId),
+  ],
+);
+
+/* ─── SIGNAL_SUBSCRIPTIONS ───────────────────────────────────────────
+ *
+ * P3 Session 8. Backs both intermediate signal-catch tokens AND
+ * signal-start subscriptions registered at process publish time.
+ *
+ * Two row shapes coexist (enforced by a CHECK constraint in the SQL):
+ *   - Catch row:  instanceId + tokenId set, processId NULL.
+ *   - Start row:  processId set, instanceId + tokenId NULL.
+ *
+ * Lookup on POST /api/signals fans out tenant-wide: SELECT every row
+ * matching (tenant, signal_name) → resume each catching token, start
+ * a fresh instance for each start row. All in one txn (one bad target
+ * doesn't kill the others — savepoints).
+ * ──────────────────────────────────────────────────────────────────── */
+export const signalSubscriptions = pgTable(
+  "SIGNAL_SUBSCRIPTIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID").references(() => processInstances.id, {
+      onDelete: "cascade",
+    }),
+    tokenId: uuid("TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    scopeTokenId: uuid("SCOPE_TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    processId: uuid("PROCESS_ID").references(() => processes.id, {
+      onDelete: "cascade",
+    }),
+    signalName: varchar("SIGNAL_NAME", { length: 255 }).notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("SIGNAL_SUBSCRIPTION_LOOKUP_IDX").on(t.tenantId, t.signalName),
+    index("SIGNAL_SUBSCRIPTION_INSTANCE_IDX").on(t.instanceId),
+    index("SIGNAL_SUBSCRIPTION_TOKEN_IDX").on(t.tokenId),
+    index("SIGNAL_SUBSCRIPTION_PROCESS_IDX").on(t.processId),
+  ],
+);
+
+/* ─── MESSAGE_START_SUBSCRIPTIONS ────────────────────────────────────
+ *
+ * P3 Session 8. Registered at process publish time for every
+ * startEvent whose eventDefinition.kind === "message". POST
+ * /api/messages falls back here when no catch subscription exists:
+ * a match starts a fresh instance with the message payload as
+ * initialVariables and the correlationKey as the businessKey.
+ *
+ * Republish wipes existing rows and re-registers, so the latest
+ * publish is the source of truth (no stale orphan starts).
+ * ──────────────────────────────────────────────────────────────────── */
+export const messageStartSubscriptions = pgTable(
+  "MESSAGE_START_SUBSCRIPTIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    processId: uuid("PROCESS_ID")
+      .notNull()
+      .references(() => processes.id, { onDelete: "cascade" }),
+    messageName: varchar("MESSAGE_NAME", { length: 255 }).notNull(),
+    startNodeId: varchar("START_NODE_ID", { length: 255 }).notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("MESSAGE_START_LOOKUP_IDX").on(t.tenantId, t.messageName),
+    index("MESSAGE_START_PROCESS_IDX").on(t.processId),
+    uniqueIndex("MESSAGE_START_SUBSCRIPTIONS_UNIQUE")
+      .on(t.tenantId, t.messageName, t.processId),
   ],
 );
