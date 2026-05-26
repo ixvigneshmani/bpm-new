@@ -1182,6 +1182,21 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "signal-received",
   "signal-thrown",
   "signal-unsubscribed",
+  // P3 Session 9 — round-out of intermediate events.
+  // `message-thrown`: intermediateThrowEvent / endEvent with
+  // eventDefinition.kind=message. Payload carries { messageName,
+  // variables snapshot }. Existing webhook subscribers can listen for
+  // this type and deliver to their host's URL — no per-node URL needed.
+  // `link-followed`: emitted when the publish-time canvas rewrite
+  // turns a linkThrow → linkCatch pair into a direct sequence flow.
+  // (Audit-only; the rewrite happens at publish, no per-instance event.)
+  // `conditional-subscribed` / `conditional-satisfied` /
+  // `conditional-unsubscribed`: conditional catch-event lifecycle.
+  "message-thrown",
+  "link-followed",
+  "conditional-subscribed",
+  "conditional-satisfied",
+  "conditional-unsubscribed",
 ]);
 
 export const instanceEvents = pgTable(
@@ -1452,5 +1467,52 @@ export const messageStartSubscriptions = pgTable(
     index("MESSAGE_START_PROCESS_IDX").on(t.processId),
     uniqueIndex("MESSAGE_START_SUBSCRIPTIONS_UNIQUE")
       .on(t.tenantId, t.messageName, t.processId),
+  ],
+);
+
+/* ─── CONDITIONAL_SUBSCRIPTIONS ──────────────────────────────────────
+ *
+ * P3 Session 9. Backs both intermediate conditional-catch tokens AND
+ * conditional-start registrations on published processes. Same two-
+ * row-shape pattern as SIGNAL_SUBSCRIPTIONS:
+ *
+ *   - Catch row:  instanceId + tokenId set, processId NULL.
+ *   - Start row:  processId set, instanceId + tokenId NULL.
+ *
+ * Evaluation isn't polled. Instead, the engine's variable-set audit
+ * path calls `evaluatePendingConditions(tenantId, instanceId)` which
+ * scans this table and re-evaluates each expression against the new
+ * variable bag. Matches resume tokens / spawn instances inline in the
+ * same txn.
+ * ──────────────────────────────────────────────────────────────────── */
+export const conditionalSubscriptions = pgTable(
+  "CONDITIONAL_SUBSCRIPTIONS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID").references(() => processInstances.id, {
+      onDelete: "cascade",
+    }),
+    tokenId: uuid("TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    scopeTokenId: uuid("SCOPE_TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    processId: uuid("PROCESS_ID").references(() => processes.id, {
+      onDelete: "cascade",
+    }),
+    conditionExpression: varchar("CONDITION_EXPRESSION", { length: 4096 }).notNull(),
+    createdAt: timestamp("CREATED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("CONDITIONAL_SUB_TENANT_IDX").on(t.tenantId),
+    index("CONDITIONAL_SUB_INSTANCE_IDX").on(t.instanceId),
+    index("CONDITIONAL_SUB_TOKEN_IDX").on(t.tokenId),
+    index("CONDITIONAL_SUB_PROCESS_IDX").on(t.processId),
   ],
 );

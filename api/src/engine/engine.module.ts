@@ -13,6 +13,7 @@ import { MessagesController } from "./messages.controller";
 import { OutboxService } from "./outbox.service";
 import { SignalsController } from "./signals.controller";
 import { SignalSubscriptionService } from "./signal-subscription.service";
+import { ConditionalSubscriptionService } from "./conditional-subscription.service";
 import { ServiceTaskRegistry } from "./service-task-registry";
 import { ServiceTaskService } from "./service-task.service";
 import { TasksController } from "./tasks.controller";
@@ -44,6 +45,7 @@ import { WorkerService } from "./worker.service";
     TimerSchedulerService,
     MessageSubscriptionService,
     SignalSubscriptionService,
+    ConditionalSubscriptionService,
   ],
   exports: [
     EngineService,
@@ -52,6 +54,7 @@ import { WorkerService } from "./worker.service";
     TimerSchedulerService,
     MessageSubscriptionService,
     SignalSubscriptionService,
+    ConditionalSubscriptionService,
   ],
 })
 export class EngineModule {}

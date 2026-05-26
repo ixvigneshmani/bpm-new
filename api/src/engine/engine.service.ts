@@ -54,6 +54,7 @@ import { WorkerService } from "./worker.service";
 import { TimerSchedulerService, type ClaimedTimer } from "./timer-scheduler.service";
 import { MessageSubscriptionService } from "./message-subscription.service";
 import { SignalSubscriptionService } from "./signal-subscription.service";
+import { ConditionalSubscriptionService } from "./conditional-subscription.service";
 import { CorrelationContext } from "../common/observability/correlation-context";
 
 /** OS4.1 / M5 — every INSTANCE_EVENTS row written by the engine flows
@@ -209,6 +210,8 @@ export class EngineService {
     private readonly messageSubscriptions?: MessageSubscriptionService,
     // P3 Session 8 — same optional pattern for signal subscriptions.
     private readonly signalSubscriptions?: SignalSubscriptionService,
+    // P3 Session 9 — conditional event subscriptions.
+    private readonly conditionalSubscriptions?: ConditionalSubscriptionService,
   ) {
     // P2 Session 4 — register the task-due-reminder dispatcher. The
     // scheduler is optional in the constructor so unit tests that
@@ -268,6 +271,14 @@ export class EngineService {
       );
     }
     const canvas = projectCanvas(proc.canvasData);
+    // P3 Session 9 — apply link-event rewrite consistently for all
+    // engine reads (publish + startInstance + loadCanvasForInstance).
+    // Idempotent: a process without link events is a no-op.
+    try {
+      rewriteLinkEvents(canvas);
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
     const startNode = findStartEvent(canvas);
 
     // Hash on the canonicalised PROJECTED view — engine semantics
@@ -572,8 +583,69 @@ export class EngineService {
           // clear message. Falls back to the normal terminal logic
           // below when the end event is not an error throw.
           const endDef = (node.data as
-            | { eventDefinition?: { kind?: string; errorCode?: string } }
+            | {
+                eventDefinition?: {
+                  kind?: string;
+                  errorCode?: string;
+                  signalName?: string;
+                  messageName?: string;
+                };
+              }
             | undefined)?.eventDefinition;
+          // P3 Session 9 — signal-throw at end events. Fan out before
+          // we terminate the token so siblings see the signal as having
+          // come from a still-live instance (we don't really care, but
+          // ordering keeps the audit timeline sensible). Non-blocking;
+          // catchers resume in the same txn via fanOutSignal.
+          if (endDef?.kind === "signal") {
+            const signalName = (endDef.signalName ?? "").trim();
+            if (signalName) {
+              await this.fanOutSignal({
+                tx: args.tx,
+                tenantId: args.tenantId,
+                signalName,
+                throwingInstanceId: args.instanceId,
+                throwingTokenId: args.tokenId,
+                throwingNodeId: nodeId,
+              });
+              await recordEvent(args.tx, {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: args.tokenId,
+                nodeId,
+                eventType: "signal-thrown",
+                payload: { signalName, via: "end-event" },
+              });
+            }
+            // Fall through to the normal end-event drain below.
+          }
+          // P3 Session 9 — message-throw at end events. Same emit-to-
+          // outbox pattern as the intermediate variant.
+          if (endDef?.kind === "message") {
+            const messageName = (endDef.messageName ?? "").trim();
+            if (messageName) {
+              const payload = {
+                messageName,
+                throwingNodeId: nodeId,
+                variables: args.variables,
+              };
+              await recordEvent(args.tx, {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: args.tokenId,
+                nodeId,
+                eventType: "message-thrown",
+                payload: { ...payload, via: "end-event" },
+              });
+              await this.emitOutbox(args.tx, {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                eventType: "message-thrown",
+                payload,
+              });
+            }
+            // Fall through to terminate the token below.
+          }
           if (endDef?.kind === "error") {
             const thrown = await this.throwErrorFromEnd({
               tx: args.tx,
@@ -986,6 +1058,92 @@ export class EngineService {
           return { tokenStatus: "waiting", hops };
         }
 
+        // P3 Session 9 — intermediate conditional-catch event.
+        //
+        // Parks the token + writes a CONDITIONAL_SUBSCRIPTIONS row with
+        // the FEEL expression. The expression is re-evaluated whenever
+        // any variable on this instance changes (variable-set audit
+        // hook). Match → resume; no match → row stays.
+        //
+        // NB: we ALSO evaluate the expression once HERE (eager): if the
+        // condition is already true when the token enters, fall through
+        // immediately without parking. This is the BPMN spec behavior
+        // and saves a write-then-fire round trip.
+        if (
+          node.type === "intermediateCatchEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "conditional")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            conditionExpression?: string;
+          };
+          const expr = (def.conditionExpression ?? "").trim();
+          if (!expr) {
+            const m = `intermediateCatchEvent ${nodeId}: kind=conditional but no conditionExpression configured.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          // Eager evaluation against the current variable bag.
+          if (evaluateConditionalExpression(expr, args.variables)) {
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              nodeId,
+              eventType: "conditional-satisfied",
+              payload: { expression: expr, eager: true },
+            });
+            // Fall through to the default outgoing-edge pick below
+            // (drop out of this if-block; node-exited will fire next).
+          } else {
+            const scopeRows = await args.tx
+              .select({ scopeTokenId: instanceTokens.scopeTokenId })
+              .from(instanceTokens)
+              .where(eq(instanceTokens.id, args.tokenId))
+              .limit(1);
+            const scopeTokenId = scopeRows[0]?.scopeTokenId ?? null;
+            version = await this.updateTokenWithLock(
+              args.tx, args.tokenId, version,
+              {
+                status: "waiting",
+                waitingFor: "conditional",
+                currentNodeId: nodeId,
+              },
+            );
+            if (this.conditionalSubscriptions) {
+              await this.conditionalSubscriptions.subscribeCatch({
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: args.tokenId,
+                scopeTokenId,
+                conditionExpression: expr,
+                tx: args.tx,
+              });
+            }
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              nodeId,
+              eventType: "conditional-subscribed",
+              payload: { expression: expr, scopeTokenId },
+            });
+            await recordEvent(args.tx, {
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              tokenId: args.tokenId,
+              nodeId,
+              eventType: "token-waiting",
+              payload: { waitingFor: "conditional", expression: expr },
+            });
+            return { tokenStatus: "waiting", hops };
+          }
+        }
+
         // P3 Session 8 — intermediate signal-throw event.
         //
         // Synchronous in-process broadcast: SELECT every catch row in
@@ -1038,6 +1196,58 @@ export class EngineService {
           // Fall through to the default outgoing-edge logic by NOT
           // returning here — execution drops out of the if (!isResuming)
           // block and continues with the standard `pickNextEdge` path.
+        }
+
+        // P3 Session 9 — intermediate message-throw event.
+        //
+        // Emits a `message-thrown` audit row + an OUTBOX_EVENTS row so
+        // any tenant webhook subscribed to `message-thrown` picks it up
+        // for delivery. No per-node URL field — the host configures
+        // delivery via WEBHOOK_SUBSCRIPTIONS pointing at the URL they
+        // want, filtered by event type / process. That keeps the BPMN
+        // node free of infrastructure concerns and reuses the existing
+        // OS5 retry + HMAC pipeline.
+        //
+        // Payload includes the message name + current variables snapshot
+        // so the receiver has enough context to route or react.
+        if (
+          node.type === "intermediateThrowEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "message")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            messageName?: string;
+          };
+          const messageName = (def.messageName ?? "").trim();
+          if (!messageName) {
+            const m = `intermediateThrowEvent ${nodeId}: kind=message but no messageName configured.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          const payload = {
+            messageName,
+            throwingNodeId: nodeId,
+            variables: args.variables,
+          };
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "message-thrown",
+            payload,
+          });
+          await this.emitOutbox(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            eventType: "message-thrown",
+            payload,
+          });
+          // Fall through to default outgoing-edge handling.
         }
 
         // Wait state: service task suspends the token until the
@@ -2785,6 +2995,12 @@ export class EngineService {
               : { key, value: args.formData[key] },
           });
         }
+        // P3 Session 9 — conditional-catch hook. Re-evaluates any
+        // CONDITIONAL_SUBSCRIPTIONS on this instance against the new
+        // variable bag; matching tokens resume inline in this txn.
+        await this.evaluatePendingConditionsForInstance(
+          tx, args.tenantId, tokenRow.instanceId, mergedVariables,
+        );
       }
 
       const tokenVersion = await this.updateTokenWithLock(
@@ -3010,6 +3226,11 @@ export class EngineService {
               : { key, value: args.payload[key], via: "message" },
           });
         }
+        // P3 Session 9 — conditional-catch hook (same shape as
+        // completeTask's variable-set tail).
+        await this.evaluatePendingConditionsForInstance(
+          tx, args.tenantId, tokenRow.instanceId, mergedVariables,
+        );
       }
 
       // Audit the delivery. We log KEYS only, not values — the
@@ -3143,6 +3364,151 @@ export class EngineService {
         `Message-start fallback: startInstance failed for process ${startProbe.processId} on ${args.messageName}: ${(e as Error).message}`,
       );
       return { outcome: "no-subscription" as const };
+    }
+  }
+
+  /** P3 Session 9 — variable-set hook. Called from every code path
+   *  that mutates instance.variables (completeTask, deliverMessage,
+   *  completeServiceTask, editVariables). Scans
+   *  CONDITIONAL_SUBSCRIPTIONS for this instance and re-evaluates each
+   *  expression against the new variable bag. Matches resume tokens
+   *  inline in the same txn — atomic with the variable change so a
+   *  reader can't observe "variable set but condition not yet fired".
+   *
+   *  Start-row evaluation happens separately via
+   *  `evaluatePendingConditionStartsForTenant` since start rows aren't
+   *  associated with a specific instance.
+   *
+   *  Best-effort: a broken expression silently evaluates to false and
+   *  leaves the subscription in place. Catastrophic eval failures are
+   *  logged but don't abort the variable-set txn — the variable change
+   *  itself is the contract; condition wake-up is opportunistic. */
+  async evaluatePendingConditionsForInstance(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    tenantId: string,
+    instanceId: string,
+    variables: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.conditionalSubscriptions) return;
+    const subs = await this.conditionalSubscriptions.findCatchesForInstance(
+      instanceId,
+      tx,
+    );
+    for (const sub of subs) {
+      if (!sub.tokenId) continue;
+      if (!evaluateConditionalExpression(sub.conditionExpression, variables)) continue;
+      try {
+        await this.resumeTokenFromCondition({
+          tx, tenantId, instanceId, tokenId: sub.tokenId,
+          expression: sub.conditionExpression,
+        });
+      } catch (e) {
+        this.logger.warn(
+          `evaluatePendingConditions: failed to resume token ${sub.tokenId}: ${(e as Error).message}`,
+        );
+      }
+    }
+  }
+
+  /** Same shape as resumeTokenFromSignal — terminal: completes the
+   *  hop chain, deletes the subscription row, advances the token. */
+  private async resumeTokenFromCondition(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    tokenId: string;
+    expression: string;
+  }): Promise<void> {
+    const tokenRows = await args.tx
+      .select({
+        id: instanceTokens.id,
+        version: instanceTokens.version,
+        currentNodeId: instanceTokens.currentNodeId,
+        status: instanceTokens.status,
+        waitingFor: instanceTokens.waitingFor,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.tokenId))
+      .limit(1);
+    const tokenRow = tokenRows[0];
+    if (
+      !tokenRow ||
+      tokenRow.status !== "waiting" ||
+      tokenRow.waitingFor !== "conditional"
+    ) {
+      if (this.conditionalSubscriptions) {
+        await this.conditionalSubscriptions.unsubscribeToken(args.tokenId, args.tx);
+      }
+      return;
+    }
+    const instRow = await this.loadInstanceById(args.tx, args.instanceId, args.tenantId);
+    const canvas = await this.loadCanvasForInstance(args.tx, instRow);
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: tokenRow.id,
+      nodeId: tokenRow.currentNodeId,
+      eventType: "conditional-satisfied",
+      payload: { expression: args.expression },
+    });
+    if (this.conditionalSubscriptions) {
+      await this.conditionalSubscriptions.unsubscribeToken(tokenRow.id, args.tx);
+    }
+    const tokenVersion = await this.updateTokenWithLock(
+      args.tx, tokenRow.id, tokenRow.version,
+      { status: "active", waitingFor: null },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: tokenRow.id,
+      nodeId: tokenRow.currentNodeId,
+      eventType: "token-resumed",
+      payload: { via: "conditional", expression: args.expression },
+    });
+    const advance = await this.advanceToken({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: tokenRow.id,
+      tokenVersion,
+      currentNodeId: tokenRow.currentNodeId,
+      canvas,
+      variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+      resumeFromWait: true,
+    });
+    if (
+      advance.tokenStatus === "completed" &&
+      (await this.countLiveTokens(args.tx, args.instanceId)) === 0
+    ) {
+      await this.updateInstanceWithLock(
+        args.tx, args.instanceId, instRow.version,
+        { status: "completed", completedAt: new Date() },
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-completed",
+        payload: { via: "conditional", hops: advance.hops },
+      });
+    } else if (advance.tokenStatus === "failed") {
+      await this.updateInstanceWithLock(
+        args.tx, args.instanceId, instRow.version,
+        {
+          status: "failed",
+          errorMessage: advance.errorMessage ?? null,
+          completedAt: new Date(),
+        },
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-failed",
+        payload: { via: "conditional", hops: advance.hops, message: advance.errorMessage },
+      });
     }
   }
 
@@ -4846,6 +5212,10 @@ export class EngineService {
       if (this.signalSubscriptions) {
         await this.signalSubscriptions.cancelForInstance(args.instanceId, tx);
       }
+      // P3 Session 9 — same for conditional subscriptions.
+      if (this.conditionalSubscriptions) {
+        await this.conditionalSubscriptions.cancelForInstance(args.instanceId, tx);
+      }
       for (const tok of liveTokens) {
         try {
           await this.updateTokenWithLock(tx, tok.id, tok.version, {
@@ -5048,6 +5418,12 @@ export class EngineService {
           reason: args.reason.trim(),
         },
       });
+      // P3 Session 9 — conditional-catch hook. Admin-edited variable
+      // changes should also wake any parked conditional tokens. Same
+      // contract as completeTask / deliverMessage.
+      await this.evaluatePendingConditionsForInstance(
+        tx, args.tenantId, args.instanceId, merged,
+      );
       this.logger.log({
         event: "engine.instance.variables-edited",
         tenantId: args.tenantId,
@@ -5689,6 +6065,26 @@ export class EngineService {
     // post-publish failure.
     findStartEvent(canvas);
 
+    // P3 Session 9 — link events. Rewrite linkThrow → linkCatch pairs
+    // into direct sequence flows BEFORE we canonicalise/snapshot, so
+    // runtime never sees the link events themselves. Fails publish
+    // loud if there's an orphan throw (no matching catch) or a
+    // duplicate name. Same-scope only — cross-subprocess link is
+    // intentionally rejected (matches Camunda strict).
+    //
+    // We rewrite BOTH the projected canvas (used for the hash) AND
+    // the raw `canvasData` (which gets stored as the snapshot the
+    // runtime loads back later). Without the second rewrite, runtime
+    // would see the original linkThrow + linkCatch nodes and fail
+    // because they have no outgoing sequence flow.
+    try {
+      rewriteLinkEvents(canvas);
+    } catch (e) {
+      // Translate to a 4xx so the Designer can render the error
+      // inline instead of a generic 500.
+      throw new BadRequestException((e as Error).message);
+    }
+
     const snapshot = canonicalise(canvas);
     const definitionHash = sha256Hex(JSON.stringify(snapshot));
 
@@ -6284,10 +6680,19 @@ export class EngineService {
           `Process version ${instance.processVersionId} not found.`,
         );
       }
-      return projectCanvas(row.canvasData);
+      const c = projectCanvas(row.canvasData);
+      // P3 Session 9 — idempotent link rewrite. If the version was
+      // published BEFORE Session 9 shipped, its stored canvas still
+      // has link events; running the rewrite on every load flattens
+      // them on the fly. For Session-9+ versions, the canvas is
+      // already flat and rewriteLinkEvents is a no-op.
+      rewriteLinkEvents(c);
+      return c;
     }
     if (instance.definitionSnapshot) {
-      return projectCanvas(instance.definitionSnapshot);
+      const c = projectCanvas(instance.definitionSnapshot);
+      rewriteLinkEvents(c);
+      return c;
     }
     throw new BadRequestException(
       "Instance has no canvas reference (neither version nor inline snapshot).",
@@ -6705,6 +7110,134 @@ export function resolveServiceTaskMaxAttempts(node: EngineNode): number | null {
  *  the timer scheduler. */
 const ISO_DURATION_RE =
   /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
+
+/** P3 Session 9 — evaluate a conditional event's FEEL expression
+ *  against a variable bag. Wraps `evalCondition` and swallows eval
+ *  errors as `false` (a broken expression should NOT resume the
+ *  token; the audit trail records the failure separately if we want
+ *  to surface it later). */
+function evaluateConditionalExpression(
+  expr: string,
+  variables: Record<string, unknown>,
+): boolean {
+  if (!expr) return false;
+  try {
+    // evalCondition is exported from engine.service.ts itself —
+    // calling within the same file. Returns boolean or throws.
+    return evalCondition(expr, variables);
+  } catch {
+    return false;
+  }
+}
+
+/** P3 Session 9 — rewrite link events at publish time.
+ *
+ *  A `linkThrow` event in one part of the diagram jumps to a `linkCatch`
+ *  with the same name elsewhere in the same scope. To keep the runtime
+ *  ignorant of link events entirely, we rewrite the canvas at publish:
+ *   - find every (linkName) pair of one linkThrow + one linkCatch in
+ *     the same scope (same parentId);
+ *   - rewire the throw's INCOMING edge to point directly at the catch's
+ *     OUTGOING edge target;
+ *   - delete both events + the throw's outgoing edge + the catch's
+ *     incoming edge from the canvas.
+ *
+ *  Validation (fail-publish-loud, NOT runtime):
+ *   - duplicate linkName in the same scope → reject.
+ *   - linkThrow with no matching linkCatch → reject.
+ *   - linkCatch with no matching linkThrow → reject (orphan catch is
+ *     dead code; better to fail than silently leave it).
+ *   - cross-scope link (throw in scope A, catch in scope B) → reject
+ *     (Camunda strict).
+ *
+ *  Mutates the canvas in place. Caller already projected via
+ *  projectCanvas, so node + edge shapes are stable.
+ */
+function rewriteLinkEvents(canvas: EngineCanvas): void {
+  // Index nodes by id for fast lookup.
+  const nodeById = new Map<string, EngineCanvas["nodes"][number]>(
+    canvas.nodes.map((n) => [n.id, n]),
+  );
+  // Group link events by (scope, kind, name).
+  // scope = parentId ?? "__root__".
+  const throws = new Map<string, { node: EngineCanvas["nodes"][number]; scope: string }>();
+  const catches = new Map<string, { node: EngineCanvas["nodes"][number]; scope: string }>();
+  for (const n of canvas.nodes) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const def = (n as any).data?.eventDefinition as
+      | { kind?: string; linkName?: string }
+      | undefined;
+    if (!def || def.kind !== "link") continue;
+    const linkName = (def.linkName ?? "").trim();
+    if (!linkName) {
+      throw new Error(
+        `Publish: link event ${n.id} has no linkName — set the link name on the event definition.`,
+      );
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scope = ((n as any).parentId as string) ?? "__root__";
+    const key = `${scope}::${linkName}`;
+    if (n.type === "intermediateThrowEvent") {
+      if (throws.has(key)) {
+        throw new Error(
+          `Publish: duplicate linkThrow for "${linkName}" in the same scope.`,
+        );
+      }
+      throws.set(key, { node: n, scope });
+    } else if (n.type === "intermediateCatchEvent") {
+      if (catches.has(key)) {
+        throw new Error(
+          `Publish: duplicate linkCatch for "${linkName}" in the same scope.`,
+        );
+      }
+      catches.set(key, { node: n, scope });
+    }
+  }
+  // Match + rewrite.
+  for (const [key, thr] of throws) {
+    const cat = catches.get(key);
+    if (!cat) {
+      throw new Error(
+        `Publish: linkThrow "${thr.node.id}" has no matching linkCatch in the same scope.`,
+      );
+    }
+    catches.delete(key);
+    // Find throw's incoming edge + catch's outgoing edge.
+    const inEdge = canvas.edges.find((e) => e.target === thr.node.id);
+    const outEdge = canvas.edges.find((e) => e.source === cat.node.id);
+    if (!inEdge) {
+      throw new Error(
+        `Publish: linkThrow "${thr.node.id}" has no incoming sequence flow.`,
+      );
+    }
+    if (!outEdge) {
+      throw new Error(
+        `Publish: linkCatch "${cat.node.id}" has no outgoing sequence flow.`,
+      );
+    }
+    // Rewire the incoming edge to point at the catch's outgoing target.
+    inEdge.target = outEdge.target;
+    // Delete the two link events + the throw-outgoing + catch-incoming
+    // edges from the canvas. (The catch may have no incoming, fine.)
+    const remove = new Set<string>([thr.node.id, cat.node.id]);
+    const removeEdgeIds = new Set<string>([outEdge.id]);
+    // Throw's outgoing edge (if any) is dangling now; remove it too.
+    for (const e of canvas.edges) {
+      if (e.source === thr.node.id) removeEdgeIds.add(e.id);
+      if (e.target === cat.node.id && e.id !== inEdge.id) removeEdgeIds.add(e.id);
+    }
+    canvas.nodes = canvas.nodes.filter((n) => !remove.has(n.id));
+    canvas.edges = canvas.edges.filter((e) => !removeEdgeIds.has(e.id));
+    nodeById.delete(thr.node.id);
+    nodeById.delete(cat.node.id);
+  }
+  // Any unmatched catches left = orphan.
+  for (const [key, cat] of catches) {
+    throw new Error(
+      `Publish: linkCatch "${cat.node.id}" has no matching linkThrow in the same scope.`,
+    );
+  }
+}
 
 /** P3 Session 8 — parse a process-start timer expression into a
  *  fire-at Date + cycle metadata. Wraps `resolveTimerFireAt` + adds

@@ -120,14 +120,18 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     );
   };
 
-  // P0–P3 Session 8 — what's wired so far:
+  // P0–P3 Session 9 — what's wired so far:
   //   timer on boundaryEvent .................. ✅ Session 6a
   //   error on boundaryEvent .................. ✅ Session 6b
   //   message on intermediateCatchEvent ....... ✅ Session 7
   //   signal on intermediateCatchEvent ........ ✅ Session 8
   //   signal on intermediateThrowEvent ........ ✅ Session 8
   //   message-start / signal-start / timer-start ✅ Session 8
-  //   intermediate throw (message) ............ P3 Session 9 (outbox)
+  //   message on intermediateThrowEvent ....... ✅ Session 9
+  //   signal/message on endEvent .............. ✅ Session 9
+  //   link events (catch + throw, same scope) . ✅ Session 9 (publish rewrite)
+  //   conditional catch + start ............... ✅ Session 9
+  //   error throw from intermediateThrow ...... P4
   //   escalation / cancel ..................... P4
   //   compensation ............................ P6
   //   terminate ............................... P4 (end-event semantics)
@@ -141,11 +145,25 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     variant === "intermediateCatch" && definition.kind === "signal";
   const signalIntermediateThrowWired =
     variant === "intermediateThrow" && definition.kind === "signal";
+  const messageIntermediateThrowWired =
+    variant === "intermediateThrow" && definition.kind === "message";
   const startWired =
     variant === "start" &&
     (definition.kind === "message" ||
       definition.kind === "signal" ||
-      definition.kind === "timer");
+      definition.kind === "timer" ||
+      definition.kind === "conditional");
+  // P3 Session 9 — link events handled entirely by publish-time
+  // rewrite; runtime never sees them.
+  const linkAnyWired =
+    (variant === "intermediateCatch" || variant === "intermediateThrow") &&
+    definition.kind === "link";
+  const conditionalIntermediateCatchWired =
+    variant === "intermediateCatch" && definition.kind === "conditional";
+  const endEventThrowWired =
+    variant === "end" &&
+    (definition.kind === "signal" ||
+      definition.kind === "message");
   const showRuntimeBanner =
     definition.kind !== "none" &&
     definition.kind !== "terminate" &&
@@ -154,7 +172,11 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     !messageIntermediateCatchWired &&
     !signalIntermediateCatchWired &&
     !signalIntermediateThrowWired &&
-    !startWired;
+    !messageIntermediateThrowWired &&
+    !startWired &&
+    !linkAnyWired &&
+    !conditionalIntermediateCatchWired &&
+    !endEventThrowWired;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
