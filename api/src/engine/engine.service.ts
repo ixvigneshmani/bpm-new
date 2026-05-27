@@ -423,6 +423,14 @@ export class EngineService {
           redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
         instanceStatus = "completed";
+        // P4 Session 11 — if this top-level call was actually a child
+        // (unlikely here since startInstance creates top-level, but
+        // safe to keep), resume the parent chain. No-op for true
+        // top-level instances.
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: inst.id,
+          childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+        });
       } else if (advance.tokenStatus === "failed") {
         await tx
           .update(processInstances)
@@ -446,6 +454,11 @@ export class EngineService {
           payload: { hops: advance.hops, message: advance.errorMessage },
         });
         instanceStatus = "failed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: inst.id,
+          childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+          hops: advance.hops,
+        });
       }
 
       // Event-count + token-count are convenient for the UI; one extra
@@ -1623,6 +1636,30 @@ export class EngineService {
             errorMessage: childResult.errorMessage,
           };
         }
+
+        // P4 Session 11 — callActivity dispatch. Spawns a child instance
+        // of the referenced process, applies input mappings, parks the
+        // parent token, runs the child's root token within the same txn.
+        // If the child completes inline (all sync), the child-completion
+        // hook resumes the parent here. If the child has wait states
+        // (userTasks etc.), the parent stays parked until the child's
+        // last token completes in some later txn — resumeParentFromChild
+        // wakes the parent at that point.
+        if (node.type === "callActivity") {
+          const dispatched = await this.dispatchCallActivity({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            parentInstanceId: args.instanceId,
+            parentTokenId: args.tokenId,
+            parentTokenVersion: version,
+            parentVariables: args.variables,
+            callActivityNode: node,
+            callActivityNodeId: nodeId,
+            parentCanvas: args.canvas,
+            hops,
+          });
+          return dispatched;
+        }
       }
       isResuming = false;
 
@@ -2327,6 +2364,10 @@ export class EngineService {
           payload: { via: "boundary-timer", hops: adv.hops },
           redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: t.tenantId, childInstanceId: t.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: adv.hops,
+        });
       } else if (adv.tokenStatus === "failed") {
         // Failure on the boundary path bubbles up; the boundary
         // shouldn't keep an instance in a half-running state.
@@ -2343,6 +2384,11 @@ export class EngineService {
           instanceId: t.instanceId,
           eventType: "instance-failed",
           payload: { via: "boundary-timer", hops: adv.hops, message: adv.errorMessage },
+        });
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: t.tenantId, childInstanceId: t.instanceId,
+          childStatus: "failed", childErrorMessage: adv.errorMessage ?? null,
+          hops: adv.hops,
         });
       }
     });
@@ -3657,6 +3703,891 @@ export class EngineService {
     };
   }
 
+  /** P4 Session 11 — recursion guard for callActivity chains. A
+   *  callActivity calling itself (direct OR transitively) is the most
+   *  common modeling mistake; without a cap, the engine would create
+   *  rows forever in a single advanceToken call. 20 is high enough for
+   *  realistic process compositions (mortgage origination, etc.) while
+   *  cheap to enforce. */
+  private static readonly MAX_CALL_DEPTH = 20;
+
+  /** P4 Session 11 — apply Designer-style {source, target}[] mappings
+   *  from `source` bag to `target` bag (returns NEW object). The
+   *  Designer's CallActivitySection emits an array shape, not the
+   *  Record<target, MappingEntry> shape used by service-task input
+   *  mappings — so we can't reuse `applyMapping` directly. `source`
+   *  expressions support:
+   *    • `$varname[.path]` — explicit reference syntax
+   *    • `varname[.path]` — bare reference (Designer default)
+   *    • everything else passes through as a literal string
+   *  Missing source paths produce undefined, omitted from the output. */
+  private applyVariableMappingsArr(
+    mappings: Array<{ source: string; target: string }> | undefined,
+    source: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!mappings || !Array.isArray(mappings)) return {};
+    const out: Record<string, unknown> = {};
+    for (const m of mappings) {
+      if (!m || typeof m.target !== "string" || typeof m.source !== "string") continue;
+      const expr = m.source.trim();
+      if (!expr) continue;
+      let value: unknown;
+      const path = expr.startsWith("$") ? expr.slice(1) : expr;
+      // Try as a variable path first.
+      value = getByPath(source, path);
+      if (value === undefined && !expr.startsWith("$") && !/^[\w$.]+$/.test(expr)) {
+        // Bare expression with non-identifier chars → treat as literal.
+        value = expr;
+      }
+      if (value !== undefined) out[m.target] = value;
+    }
+    return out;
+  }
+
+  /** P4 Session 11 — dispatch a callActivity. Resolves the called
+   *  process by slug (D1 design — slug is cross-env identity), applies
+   *  input mappings, parks the parent token, spawns a fresh child
+   *  instance with parent linkage + incremented callDepth, runs the
+   *  child's root token within the same txn.
+   *
+   *  Returns:
+   *  - `waiting` if the child has wait states (userTask, message catch,
+   *    etc.) — parent stays parked, waking later via
+   *    `maybeResumeParentFromChild` once the child completes.
+   *  - `completed`/`failed` if the child finished inline; parent has
+   *    been resumed by the inline call to `maybeResumeParentFromChild`
+   *    that follows the child's advanceToken.
+   *
+   *  Modeling errors (missing/archived called process, recursion cap
+   *  exceeded, unknown slug) fail loud at the parent token. */
+  private async dispatchCallActivity(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    parentInstanceId: string;
+    parentTokenId: string;
+    parentTokenVersion: number;
+    parentVariables: Record<string, unknown>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    callActivityNode: any;
+    callActivityNodeId: string;
+    parentCanvas: EngineCanvas;
+    hops: number;
+  }): Promise<{
+    tokenStatus: "completed" | "waiting" | "failed";
+    hops: number;
+    errorMessage?: string;
+  }> {
+    const nodeData = (args.callActivityNode.data ?? {}) as Record<string, unknown>;
+    const call = nodeData.call as
+      | {
+          calledProcessId?: string;
+          binding?: "latest" | "deployment" | "version";
+          version?: string;
+          inputMappings?: Array<{ source: string; target: string }>;
+          outputMappings?: Array<{ source: string; target: string }>;
+          propagateAllVariables?: boolean;
+        }
+      | undefined;
+    if (!call || !call.calledProcessId) {
+      const message = `callActivity ${args.callActivityNodeId}: no calledProcessId configured.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+
+    // Look up parent's call depth to enforce the recursion cap.
+    const parentRows = await args.tx
+      .select({ callDepth: processInstances.callDepth })
+      .from(processInstances)
+      .where(eq(processInstances.id, args.parentInstanceId))
+      .limit(1);
+    const parentDepth = (parentRows[0]?.callDepth as number | null) ?? 0;
+    if (parentDepth + 1 > EngineService.MAX_CALL_DEPTH) {
+      const message =
+        `callActivity ${args.callActivityNodeId}: max call depth ` +
+        `(${EngineService.MAX_CALL_DEPTH}) exceeded — likely recursive ` +
+        `process composition. Parent instance ${args.parentInstanceId} is at depth ${parentDepth}.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+
+    // Resolve called process. calledProcessId may be a slug OR a uuid
+    // (old saves). Try slug first (D1 design); only try as UUID if it
+    // matches the UUID shape — otherwise Postgres rejects the cast and
+    // the OR clause fails on a non-UUID slug.
+    const slugCandidate = call.calledProcessId;
+    const looksLikeUuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        slugCandidate,
+      );
+    const procRows = await args.tx
+      .select({
+        id: processes.id,
+        slug: processes.slug,
+        status: processes.status,
+        canvasData: processes.canvasData,
+      })
+      .from(processes)
+      .where(
+        and(
+          eq(processes.tenantId, args.tenantId),
+          looksLikeUuid
+            ? or(
+                eq(processes.slug, slugCandidate),
+                eq(processes.id, slugCandidate),
+              )
+            : eq(processes.slug, slugCandidate),
+        ),
+      )
+      .limit(1);
+    const called = procRows[0];
+    if (!called) {
+      const message =
+        `callActivity ${args.callActivityNodeId}: called process ` +
+        `"${slugCandidate}" not found in tenant.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+    if (called.status !== "ACTIVE") {
+      const message =
+        `callActivity ${args.callActivityNodeId}: called process ` +
+        `"${slugCandidate}" is in status "${called.status}" — must be ACTIVE to call.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+    if (!called.canvasData) {
+      const message =
+        `callActivity ${args.callActivityNodeId}: called process ` +
+        `"${slugCandidate}" has no canvas.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+
+    // Project + link-rewrite the child canvas exactly like a top-level
+    // start. Safe inside a callActivity dispatch (canvas immutable).
+    const childCanvas = projectCanvas(called.canvasData);
+    try {
+      rewriteLinkEvents(childCanvas);
+    } catch (e) {
+      const message =
+        `callActivity ${args.callActivityNodeId}: child canvas link-event ` +
+        `rewrite failed — ${(e as Error).message}`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+
+    let childStart;
+    try {
+      childStart = findStartEvent(childCanvas);
+    } catch (e) {
+      const message =
+        `callActivity ${args.callActivityNodeId}: child has no start event — ${(e as Error).message}`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+
+    // Compute child's initial variables.
+    const childInitVars: Record<string, unknown> = call.propagateAllVariables
+      ? { ...args.parentVariables }
+      : this.applyVariableMappingsArr(call.inputMappings, args.parentVariables);
+
+    // Get/create the child's process version for the FK.
+    const childSnapshot = canonicalise(childCanvas);
+    const childHash = sha256Hex(JSON.stringify(childSnapshot));
+    // Look up the parent's startedBy so child inherits the user
+    // (audit cohesion — same actor across the call chain).
+    const parentInstRows = await args.tx
+      .select({ startedBy: processInstances.startedBy })
+      .from(processInstances)
+      .where(eq(processInstances.id, args.parentInstanceId))
+      .limit(1);
+    const parentStartedBy = parentInstRows[0]?.startedBy as string | undefined;
+    if (!parentStartedBy) {
+      const message = `callActivity ${args.callActivityNodeId}: parent instance startedBy missing — cannot start child.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.parentInstanceId, args.parentTokenId,
+        args.parentTokenVersion, args.callActivityNodeId, message,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+    }
+    const childVersionId = await this.getOrCreateProcessVersion({
+      processId: called.id as string,
+      tenantId: args.tenantId,
+      userId: parentStartedBy,
+      hash: childHash,
+      canvas: called.canvasData as Record<string, unknown>,
+    });
+
+    // Park the parent token at the callActivity node.
+    const parkedParentVersion = await this.updateTokenWithLock(
+      args.tx, args.parentTokenId, args.parentTokenVersion,
+      { status: "waiting", waitingFor: "callActivity", currentNodeId: args.callActivityNodeId },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.parentInstanceId,
+      tokenId: args.parentTokenId,
+      nodeId: args.callActivityNodeId,
+      eventType: "token-waiting",
+      payload: { waitingFor: "callActivity", calledProcessSlug: called.slug },
+    });
+
+    // INSERT the child PROCESS_INSTANCES row with parent linkage.
+    const childInstRows = await args.tx
+      .insert(processInstances)
+      .values({
+        tenantId: args.tenantId,
+        processId: called.id as string,
+        startedBy: parentStartedBy,
+        status: "running",
+        variables: childInitVars,
+        processVersionId: childVersionId,
+        definitionHash: childHash,
+        businessKey: null,
+        parentInstanceId: args.parentInstanceId,
+        parentTokenId: args.parentTokenId,
+        callDepth: parentDepth + 1,
+      })
+      .returning({ id: processInstances.id });
+    const childInstanceId = childInstRows[0].id as string;
+
+    // Audit child-instance-started on the parent (visible in parent's
+    // activity feed) + instance-started on the child (standard).
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.parentInstanceId,
+      tokenId: args.parentTokenId,
+      nodeId: args.callActivityNodeId,
+      eventType: "child-instance-started",
+      payload: {
+        childInstanceId,
+        calledProcessSlug: called.slug,
+        calledProcessId: called.id,
+        callDepth: parentDepth + 1,
+        propagateAllVariables: !!call.propagateAllVariables,
+      },
+    });
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: childInstanceId,
+      userId: parentStartedBy,
+      eventType: "instance-started",
+      payload: {
+        processId: called.id,
+        definitionHash: childHash,
+        parentInstanceId: args.parentInstanceId,
+        parentTokenId: args.parentTokenId,
+        callDepth: parentDepth + 1,
+      },
+    });
+
+    // Spawn the child's initial token at its start event.
+    const [childToken] = await args.tx
+      .insert(instanceTokens)
+      .values({
+        tenantId: args.tenantId,
+        instanceId: childInstanceId,
+        currentNodeId: childStart.id,
+        status: "active",
+      })
+      .returning({ id: instanceTokens.id, version: instanceTokens.version });
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: childInstanceId,
+      tokenId: childToken.id,
+      nodeId: childStart.id,
+      eventType: "token-created",
+    });
+
+    // Subscribe root-scope event subprocesses for the child (mirror
+    // top-level startInstance flow). Otherwise root-level timer/
+    // escalation event-subprocesses inside the child would never fire.
+    await this.subscribeEventSubProcessTimers({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: childInstanceId,
+      parentScopeNodeId: null,
+      parentScopeTokenId: childToken.id,
+      canvas: childCanvas,
+    });
+
+    // Drive the child token within the parent's txn.
+    const childAdvance = await this.advanceToken({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: childInstanceId,
+      tokenId: childToken.id,
+      tokenVersion: childToken.version,
+      currentNodeId: childStart.id,
+      canvas: childCanvas,
+      variables: childInitVars,
+    });
+
+    // If the child completed inline (no live tokens), mark it completed
+    // and resume the parent (output mappings applied). The completion
+    // helper writes instance-completed audit + outbox.
+    if (childAdvance.tokenStatus === "completed") {
+      const liveChildTokens = await this.countLiveTokens(args.tx, childInstanceId);
+      if (liveChildTokens === 0) {
+        await args.tx
+          .update(processInstances)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(processInstances.id, childInstanceId));
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: childInstanceId,
+          eventType: "instance-completed",
+          payload: { hops: childAdvance.hops },
+        });
+        await this.emitOutbox(args.tx, {
+          tenantId: args.tenantId,
+          processId: called.id as string,
+          instanceId: childInstanceId,
+          eventType: "instance-completed",
+          payload: { hops: childAdvance.hops, variables: childInitVars },
+        });
+        // Resume parent. Recursing through advanceToken re-evaluates
+        // the parent's next outgoing edge after output mappings merge.
+        const resumed = await this.resumeParentFromChild({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          childInstanceId,
+          childStatus: "completed",
+          childErrorMessage: null,
+          hops: childAdvance.hops,
+        });
+        if (resumed) {
+          return {
+            tokenStatus: resumed.tokenStatus,
+            hops: args.hops + resumed.hops,
+            errorMessage: resumed.errorMessage,
+          };
+        }
+        return { tokenStatus: "completed", hops: args.hops + childAdvance.hops };
+      }
+      // Live tokens remain — parent must wait. Return waiting.
+      return { tokenStatus: "waiting", hops: args.hops + childAdvance.hops };
+    }
+
+    if (childAdvance.tokenStatus === "failed") {
+      await args.tx
+        .update(processInstances)
+        .set({
+          status: "failed",
+          errorMessage: childAdvance.errorMessage ?? null,
+          completedAt: new Date(),
+        })
+        .where(eq(processInstances.id, childInstanceId));
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: childInstanceId,
+        eventType: "instance-failed",
+        payload: { hops: childAdvance.hops, message: childAdvance.errorMessage },
+      });
+      // Propagate child failure to parent — re-throws error/escalation
+      // at the callActivity node OR fails the parent with a chain
+      // message. Returns the resulting parent token status.
+      const propagated = await this.resumeParentFromChild({
+        tx: args.tx,
+        tenantId: args.tenantId,
+        childInstanceId,
+        childStatus: "failed",
+        childErrorMessage: childAdvance.errorMessage ?? "Child instance failed.",
+        hops: childAdvance.hops,
+      });
+      if (propagated) {
+        return {
+          tokenStatus: propagated.tokenStatus,
+          hops: args.hops + propagated.hops,
+          errorMessage: propagated.errorMessage,
+        };
+      }
+      // Defensive fallback — shouldn't happen since we passed a parent.
+      return { tokenStatus: "failed", hops: args.hops + childAdvance.hops, errorMessage: childAdvance.errorMessage };
+    }
+
+    // Child still waiting (has userTasks / catches / etc.) — parent
+    // stays parked. The async completion path will call
+    // resumeParentFromChild later via maybeResumeParentFromChild.
+    void parkedParentVersion;
+    return { tokenStatus: "waiting", hops: args.hops + childAdvance.hops };
+  }
+
+  /** P4 Session 11 — resume parent instance after child terminates.
+   *  Called inline by `dispatchCallActivity` (child completed sync) and
+   *  by `maybeResumeParentFromChild` (child completed async via task
+   *  completion path). Returns null when there is no parent (child is
+   *  top-level).
+   *
+   *  On child success: applies output mappings, merges into parent
+   *  variables, resumes parent token + advances. Emits `call-completed`
+   *  on the parent.
+   *
+   *  On child failure: emits `child-instance-failed` on the parent. If
+   *  the child failed via an uncaught error/escalation that bubbled to
+   *  `instance-failed` with a specific code, we re-throw at the parent's
+   *  callActivity (so a boundary on the call can catch it). Otherwise
+   *  the parent token is marked failed with a chained message — the
+   *  parent's outer completion gate flips the parent to failed.
+   */
+  private async resumeParentFromChild(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    childInstanceId: string;
+    childStatus: "completed" | "failed";
+    childErrorMessage: string | null;
+    hops: number;
+  }): Promise<null | {
+    tokenStatus: "completed" | "waiting" | "failed";
+    hops: number;
+    errorMessage?: string;
+  }> {
+    // Load child's parent linkage + final variables.
+    const childRows = await args.tx
+      .select({
+        parentInstanceId: processInstances.parentInstanceId,
+        parentTokenId: processInstances.parentTokenId,
+        variables: processInstances.variables,
+        processId: processInstances.processId,
+      })
+      .from(processInstances)
+      .where(eq(processInstances.id, args.childInstanceId))
+      .limit(1);
+    const child = childRows[0];
+    if (!child || !child.parentInstanceId) {
+      return null; // Top-level instance — nothing to resume.
+    }
+    const parentInstanceId = child.parentInstanceId as string;
+    const parentTokenId = child.parentTokenId as string | null;
+    if (!parentTokenId) {
+      this.logger.warn(
+        `Child instance ${args.childInstanceId} completed but parent token was cleared (cascade?). Skipping parent resume.`,
+      );
+      return null;
+    }
+
+    // Load parent token row + its callActivity node.
+    const parentTokRows = await args.tx
+      .select({
+        id: instanceTokens.id,
+        version: instanceTokens.version,
+        status: instanceTokens.status,
+        waitingFor: instanceTokens.waitingFor,
+        currentNodeId: instanceTokens.currentNodeId,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, parentTokenId))
+      .limit(1);
+    const parentTok = parentTokRows[0];
+    if (!parentTok) {
+      this.logger.warn(
+        `Child instance ${args.childInstanceId}: parent token ${parentTokenId} vanished. Skipping resume.`,
+      );
+      return null;
+    }
+    if (parentTok.status !== "waiting" || parentTok.waitingFor !== "callActivity") {
+      this.logger.warn(
+        `Child instance ${args.childInstanceId}: parent token ${parentTokenId} not parked on callActivity ` +
+        `(status=${parentTok.status}, waitingFor=${parentTok.waitingFor}). Skipping resume.`,
+      );
+      return null;
+    }
+
+    // Load parent's canvas + variables.
+    const parentInstRows = await args.tx
+      .select({
+        processId: processInstances.processId,
+        variables: processInstances.variables,
+      })
+      .from(processInstances)
+      .where(eq(processInstances.id, parentInstanceId))
+      .limit(1);
+    const parentInst = parentInstRows[0];
+    if (!parentInst) {
+      this.logger.warn(`Parent instance ${parentInstanceId} vanished. Skipping resume.`);
+      return null;
+    }
+    const parentProc = await this.loadProcessForInstance(
+      parentInst.processId as string, args.tenantId,
+    );
+    const parentCanvas = projectCanvas(parentProc.canvasData);
+    try {
+      rewriteLinkEvents(parentCanvas);
+    } catch {
+      // Already validated at publish; tolerate at runtime.
+    }
+    const callActivityNode = parentCanvas.nodes.find(
+      (n) => n.id === parentTok.currentNodeId,
+    );
+    if (!callActivityNode || callActivityNode.type !== "callActivity") {
+      this.logger.warn(
+        `Parent token ${parentTokenId} parked on node ${parentTok.currentNodeId} which is not a callActivity. Skipping.`,
+      );
+      return null;
+    }
+    const call = (callActivityNode.data as Record<string, unknown> | undefined)?.call as
+      | {
+          outputMappings?: Array<{ source: string; target: string }>;
+          propagateAllVariables?: boolean;
+        }
+      | undefined;
+
+    if (args.childStatus === "failed") {
+      // Audit child failure on parent.
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: parentInstanceId,
+        tokenId: parentTokenId,
+        nodeId: callActivityNode.id,
+        eventType: "child-instance-failed",
+        payload: {
+          childInstanceId: args.childInstanceId,
+          message: args.childErrorMessage,
+        },
+      });
+      const errMsg = args.childErrorMessage ?? "Child instance failed.";
+      // Extract error code if it was "Uncaught error \"CODE\" thrown at …"
+      const codeMatch = /Uncaught error "([^"]+)"/.exec(errMsg);
+      const errorCode = codeMatch ? codeMatch[1] : "";
+
+      // FIRST check for an error boundary directly attached to THIS
+      // callActivity node — the scope walker (throwErrorFromEnd) only
+      // looks at boundaries on ENCLOSING scope hosts (parent
+      // subprocess etc.), so without this check a boundary on the
+      // callActivity itself would be missed. This mirrors how
+      // subProcess boundaries are matched: the boundary's attachedToRef
+      // points to the host activity id. Camunda-style match: empty
+      // errorCode on the boundary catches any code.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const directBoundary = (parentCanvas.nodes as any[]).find((n) => {
+        if (n.type !== "boundaryEvent") return false;
+        if (n.data?.attachedToRef !== callActivityNode.id) return false;
+        if (n.data?.eventDefinition?.kind !== "error") return false;
+        const wanted = (n.data.eventDefinition.errorCode ?? "").trim();
+        return wanted === "" || wanted === errorCode;
+      });
+      if (directBoundary) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const outgoing = (parentCanvas.edges as any[]).find(
+          (e) => e.source === directBoundary.id,
+        );
+        if (outgoing) {
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: parentInstanceId,
+            tokenId: parentTokenId,
+            nodeId: callActivityNode.id,
+            eventType: "error-thrown",
+            payload: { errorCode, via: "callActivity" },
+          });
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: parentInstanceId,
+            tokenId: parentTokenId,
+            nodeId: callActivityNode.id,
+            eventType: "boundary-fired",
+            payload: {
+              boundaryNodeId: directBoundary.id,
+              kind: "error",
+              errorCode,
+              interrupting: true,
+              target: outgoing.target,
+              via: "callActivity",
+            },
+          });
+          // Mark the parent token failed (interrupted by boundary) and
+          // spawn the recovery token at the boundary's outgoing edge.
+          await this.updateTokenWithLock(
+            args.tx, parentTokenId, parentTok.version as number,
+            {
+              status: "failed",
+              errorMessage: `Interrupted by error boundary ${directBoundary.id} (code "${errorCode}") via callActivity.`,
+            },
+          );
+          const parentScopeId =
+            (
+              await args.tx
+                .select({ scopeTokenId: instanceTokens.scopeTokenId })
+                .from(instanceTokens)
+                .where(eq(instanceTokens.id, parentTokenId))
+                .limit(1)
+            )[0]?.scopeTokenId ?? null;
+          const childTokRows = await args.tx
+            .insert(instanceTokens)
+            .values({
+              tenantId: args.tenantId,
+              instanceId: parentInstanceId,
+              currentNodeId: outgoing.target,
+              status: "active",
+              parentTokenId,
+              scopeTokenId: parentScopeId,
+            })
+            .returning({ id: instanceTokens.id, version: instanceTokens.version });
+          const childTok = childTokRows[0];
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: parentInstanceId,
+            tokenId: childTok.id,
+            nodeId: outgoing.target,
+            eventType: "token-created",
+            payload: {
+              parentTokenId,
+              scopeTokenId: parentScopeId,
+              via: "callActivity-error-boundary",
+            },
+          });
+          const recov = await this.advanceToken({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: parentInstanceId,
+            tokenId: childTok.id,
+            tokenVersion: childTok.version ?? 0,
+            currentNodeId: outgoing.target,
+            canvas: parentCanvas,
+            variables: parentInst.variables as Record<string, unknown>,
+          });
+          return {
+            tokenStatus: recov.tokenStatus,
+            hops: args.hops + recov.hops,
+            errorMessage: recov.errorMessage,
+          };
+        }
+      }
+
+      // No direct boundary — fall back to scope walker (covers the
+      // case where an outer subprocess has the catcher).
+      const thrown = await this.throwErrorFromEnd({
+        tx: args.tx,
+        tenantId: args.tenantId,
+        instanceId: parentInstanceId,
+        throwingTokenId: parentTokenId,
+        throwingTokenVersion: parentTok.version as number,
+        errorCode,
+        throwNodeId: callActivityNode.id,
+        canvas: parentCanvas,
+        variables: parentInst.variables as Record<string, unknown>,
+        hops: args.hops,
+      });
+      return {
+        tokenStatus: thrown.tokenStatus,
+        hops: thrown.hops,
+        errorMessage: thrown.errorMessage ?? `Child instance failed: ${errMsg}`,
+      };
+    }
+
+    // Child completed — apply output mappings into parent.variables.
+    const childVars = (child.variables as Record<string, unknown> | null) ?? {};
+    const parentVars = (parentInst.variables as Record<string, unknown> | null) ?? {};
+    const outputs: Record<string, unknown> = call?.propagateAllVariables
+      ? { ...childVars }
+      : this.applyVariableMappingsArr(call?.outputMappings, childVars);
+    const mergedParentVars = { ...parentVars, ...outputs };
+    if (Object.keys(outputs).length > 0) {
+      await args.tx
+        .update(processInstances)
+        .set({ variables: mergedParentVars, updatedAt: new Date() })
+        .where(eq(processInstances.id, parentInstanceId));
+    }
+
+    // Audit child-instance-completed + call-completed on parent.
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: parentInstanceId,
+      tokenId: parentTokenId,
+      nodeId: callActivityNode.id,
+      eventType: "child-instance-completed",
+      payload: {
+        childInstanceId: args.childInstanceId,
+        outputsMerged: Object.keys(outputs),
+        propagateAllVariables: !!call?.propagateAllVariables,
+      },
+    });
+
+    // Resume parent token — flip active, log token-resumed, advance.
+    const newParentVer = await this.updateTokenWithLock(
+      args.tx, parentTokenId, parentTok.version as number,
+      { status: "active", waitingFor: null },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: parentInstanceId,
+      tokenId: parentTokenId,
+      nodeId: callActivityNode.id,
+      eventType: "token-resumed",
+      payload: { via: "callActivity", childInstanceId: args.childInstanceId },
+    });
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: parentInstanceId,
+      tokenId: parentTokenId,
+      nodeId: callActivityNode.id,
+      eventType: "call-completed",
+      payload: { childInstanceId: args.childInstanceId, hops: args.hops },
+    });
+
+    const cont = await this.advanceToken({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: parentInstanceId,
+      tokenId: parentTokenId,
+      tokenVersion: newParentVer,
+      currentNodeId: callActivityNode.id,
+      canvas: parentCanvas,
+      variables: mergedParentVars,
+      resumeFromWait: true,
+    });
+    return {
+      tokenStatus: cont.tokenStatus,
+      hops: args.hops + cont.hops,
+      errorMessage: cont.errorMessage,
+    };
+  }
+
+  /** P4 Session 11 — hook called by every instance-completion /
+   *  instance-failed code path. If the just-finished instance is a
+   *  child of a callActivity, resume the parent. If the parent's
+   *  resume also flips the parent to completed/failed, we cascade
+   *  upward (parent of parent, etc.) until we hit a top-level instance.
+   *  Safe to call on top-level instances — returns silently.
+   *
+   *  Caller is responsible for having already INSERT'd the
+   *  instance-completed / instance-failed audit row for THIS instance;
+   *  this method only handles the parent-chain resume. */
+  private async maybeResumeParentFromChild(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    childInstanceId: string;
+    childStatus: "completed" | "failed";
+    childErrorMessage: string | null;
+    hops: number;
+  }): Promise<void> {
+    const result = await this.resumeParentFromChild({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      childInstanceId: args.childInstanceId,
+      childStatus: args.childStatus,
+      childErrorMessage: args.childErrorMessage,
+      hops: args.hops,
+    });
+    if (!result) return; // No parent — top-level instance.
+
+    // After resume, the parent token may have terminated the parent
+    // instance (completed / failed). Flip the parent instance and
+    // recurse upward if it has a parent of its own.
+    const childRows = await args.tx
+      .select({ parentInstanceId: processInstances.parentInstanceId })
+      .from(processInstances)
+      .where(eq(processInstances.id, args.childInstanceId))
+      .limit(1);
+    const parentInstanceId = childRows[0]?.parentInstanceId as string | null;
+    if (!parentInstanceId) return;
+
+    if (result.tokenStatus === "completed") {
+      const live = await this.countLiveTokens(args.tx, parentInstanceId);
+      if (live === 0) {
+        // Parent drains. Mark completed + emit audit + cascade up.
+        const parentInstRows = await args.tx
+          .select({
+            processId: processInstances.processId,
+            variables: processInstances.variables,
+          })
+          .from(processInstances)
+          .where(eq(processInstances.id, parentInstanceId))
+          .limit(1);
+        const parentInst = parentInstRows[0];
+        await args.tx
+          .update(processInstances)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(processInstances.id, parentInstanceId));
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: parentInstanceId,
+          eventType: "instance-completed",
+          payload: { hops: result.hops },
+        });
+        await this.emitOutbox(args.tx, {
+          tenantId: args.tenantId,
+          processId: parentInst?.processId as string,
+          instanceId: parentInstanceId,
+          eventType: "instance-completed",
+          payload: { hops: result.hops, variables: parentInst?.variables ?? {} },
+        });
+        // Recurse for grandparent.
+        await this.maybeResumeParentFromChild({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          childInstanceId: parentInstanceId,
+          childStatus: "completed",
+          childErrorMessage: null,
+          hops: result.hops,
+        });
+      }
+    } else if (result.tokenStatus === "failed") {
+      const parentInstRows = await args.tx
+        .select({ processId: processInstances.processId })
+        .from(processInstances)
+        .where(eq(processInstances.id, parentInstanceId))
+        .limit(1);
+      const parentInst = parentInstRows[0];
+      await args.tx
+        .update(processInstances)
+        .set({
+          status: "failed",
+          errorMessage: result.errorMessage ?? null,
+          completedAt: new Date(),
+        })
+        .where(eq(processInstances.id, parentInstanceId));
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: parentInstanceId,
+        eventType: "instance-failed",
+        payload: { hops: result.hops, message: result.errorMessage },
+      });
+      await this.emitOutbox(args.tx, {
+        tenantId: args.tenantId,
+        processId: parentInst?.processId as string,
+        instanceId: parentInstanceId,
+        eventType: "instance-failed",
+        payload: { hops: result.hops, message: result.errorMessage },
+      });
+      // Recurse for grandparent (propagate failure upward).
+      await this.maybeResumeParentFromChild({
+        tx: args.tx,
+        tenantId: args.tenantId,
+        childInstanceId: parentInstanceId,
+        childStatus: "failed",
+        childErrorMessage: result.errorMessage ?? null,
+        hops: result.hops,
+      });
+    }
+    // If result.tokenStatus === "waiting", the parent is still running
+    // (e.g. parent's callActivity error was caught by a boundary and
+    // recovery path is now ongoing). Nothing more to do here.
+  }
+
   /** P2 Session 6b — at scope entry (root process start OR subprocess
    *  entry), find eventSubProcess children of the scope whose inner
    *  start event carries a timer eventDefinition, and schedule a
@@ -3924,6 +4855,10 @@ export class EngineService {
           payload: { via: "event-subprocess-timer", hops: adv.hops },
           redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: t.tenantId, childInstanceId: t.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: adv.hops,
+        });
       } else if (adv.tokenStatus === "failed") {
         await tx
           .update(processInstances)
@@ -3938,6 +4873,11 @@ export class EngineService {
           instanceId: t.instanceId,
           eventType: "instance-failed",
           payload: { via: "event-subprocess-timer", hops: adv.hops, message: adv.errorMessage },
+        });
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: t.tenantId, childInstanceId: t.instanceId,
+          childStatus: "failed", childErrorMessage: adv.errorMessage ?? null,
+          hops: adv.hops,
         });
       }
     });
@@ -4268,6 +5208,12 @@ export class EngineService {
           payload: { hops: advance.hops },
         });
         instanceStatus = "completed";
+        // P4 Session 11 — if this instance is a callActivity child,
+        // resume the parent + cascade up the call chain.
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+        });
       } else if (advance.tokenStatus === "failed") {
         await this.updateInstanceWithLock(
           tx,
@@ -4286,6 +5232,11 @@ export class EngineService {
           payload: { hops: advance.hops, message: advance.errorMessage },
         });
         instanceStatus = "failed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+          hops: advance.hops,
+        });
       }
 
       this.logger.log({
@@ -4513,6 +5464,10 @@ export class EngineService {
           payload: { via: "message", hops: advance.hops },
         });
         instanceStatus = "completed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+        });
       } else if (advance.tokenStatus === "failed") {
         await this.updateInstanceWithLock(
           tx,
@@ -4531,6 +5486,11 @@ export class EngineService {
           payload: { via: "message", hops: advance.hops, message: advance.errorMessage },
         });
         instanceStatus = "failed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+          hops: advance.hops,
+        });
       }
 
       return {
@@ -4700,6 +5660,10 @@ export class EngineService {
         eventType: "instance-completed",
         payload: { via: "conditional", hops: advance.hops },
       });
+      await this.maybeResumeParentFromChild({
+        tx: args.tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+        childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+      });
     } else if (advance.tokenStatus === "failed") {
       await this.updateInstanceWithLock(
         args.tx, args.instanceId, instRow.version,
@@ -4714,6 +5678,11 @@ export class EngineService {
         instanceId: args.instanceId,
         eventType: "instance-failed",
         payload: { via: "conditional", hops: advance.hops, message: advance.errorMessage },
+      });
+      await this.maybeResumeParentFromChild({
+        tx: args.tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+        childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+        hops: advance.hops,
       });
     }
   }
@@ -4939,6 +5908,10 @@ export class EngineService {
         eventType: "instance-completed",
         payload: { via: "signal", hops: advance.hops },
       });
+      await this.maybeResumeParentFromChild({
+        tx: args.tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+        childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+      });
     } else if (advance.tokenStatus === "failed") {
       await this.updateInstanceWithLock(
         args.tx, args.instanceId, instRow.version,
@@ -4953,6 +5926,11 @@ export class EngineService {
         instanceId: args.instanceId,
         eventType: "instance-failed",
         payload: { via: "signal", hops: advance.hops, message: advance.errorMessage },
+      });
+      await this.maybeResumeParentFromChild({
+        tx: args.tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+        childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+        hops: advance.hops,
       });
     }
   }
@@ -5089,6 +6067,10 @@ export class EngineService {
           redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
         instanceStatus = "completed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+        });
       } else if (advance.tokenStatus === "failed") {
         await this.updateInstanceWithLock(
           tx,
@@ -5107,6 +6089,11 @@ export class EngineService {
           payload: { hops: advance.hops, message: advance.errorMessage },
         });
         instanceStatus = "failed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+          hops: advance.hops,
+        });
       }
 
       return {
@@ -5856,6 +6843,10 @@ export class EngineService {
           payload: { hops: advance.hops },
         });
         instanceStatus = "completed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+        });
       } else if (advance.tokenStatus === "failed") {
         await this.updateInstanceWithLock(
           tx,
@@ -5874,6 +6865,11 @@ export class EngineService {
           payload: { hops: advance.hops, message: advance.errorMessage },
         });
         instanceStatus = "failed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: tokenRow.instanceId,
+          childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+          hops: advance.hops,
+        });
       }
 
       this.logger.log({
@@ -6456,6 +7452,38 @@ export class EngineService {
           errorMessage: args.reason ?? null,
         },
       );
+
+      // P4 Session 11 — cascade cancel to running children spawned via
+      // callActivity. FK ON DELETE CASCADE only fires on row DELETE; we
+      // update status, so explicit recursion is needed. Children's own
+      // cancelInstance handles their tokens + subscriptions + jobs and
+      // recurses into THEIR children. Best-effort: failures on one child
+      // don't block the parent cancel.
+      const childInstances = await tx
+        .select({ id: processInstances.id })
+        .from(processInstances)
+        .where(
+          and(
+            eq(processInstances.parentInstanceId, inst.id),
+            inArray(processInstances.status, ["running", "suspended"] as const),
+          ),
+        );
+      for (const child of childInstances as Array<{ id: string }>) {
+        try {
+          await this.cancelInstance({
+            instanceId: child.id,
+            tenantId: args.tenantId,
+            userId: args.userId,
+            reason: args.reason
+              ? `Parent cancelled: ${args.reason}`
+              : "Parent instance cancelled.",
+          });
+        } catch (e) {
+          this.logger.warn(
+            `cancelInstance: failed to cascade-cancel child ${child.id}: ${(e as Error).message}`,
+          );
+        }
+      }
 
       // Cancel any in-flight jobs tied to this instance. Without this,
       // service-task jobs that were queued/running when the user
@@ -7057,6 +8085,10 @@ export class EngineService {
           redactedKeys: canvas.engineConfig?.redactedVariableKeys,
         });
         instanceStatus = "completed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+          childStatus: "completed", childErrorMessage: null, hops: advance.hops,
+        });
       } else if (advance.tokenStatus === "failed") {
         await tx
           .update(processInstances)
@@ -7075,6 +8107,11 @@ export class EngineService {
           payload: { hops: advance.hops, message: advance.errorMessage, via: "replay" },
         });
         instanceStatus = "failed";
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+          childStatus: "failed", childErrorMessage: advance.errorMessage ?? null,
+          hops: advance.hops,
+        });
       } else if (inst.status === "suspended") {
         // Replay flipped a suspended instance to running — emit the
         // resumed lifecycle event so subscribers don't stay stale.

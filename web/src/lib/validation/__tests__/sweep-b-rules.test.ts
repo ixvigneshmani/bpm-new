@@ -216,13 +216,14 @@ describe("feel-expression", () => {
 });
 
 describe("call-activity-runtime", () => {
-  it("warns on every callActivity until the runtime ships", () => {
+  // P4 Session 11 — callActivity is now wired end-to-end. The rule is
+  // retained as a no-op placeholder; ensure it emits no issues.
+  it("no longer flags callActivity (runtime shipped in Session 11)", () => {
     const nodes = [
       mkNode({ id: "ca", type: "callActivity", data: { label: "Child" } }),
     ];
     const issues = runValidation(nodes, []);
     const i = issues.find((x) => x.ruleId === "call-activity-runtime");
-    expect(i?.severity).toBe("warning");
-    expect(i?.nodeId).toBe("ca");
+    expect(i).toBeUndefined();
   });
 });

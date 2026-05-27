@@ -12,7 +12,6 @@ import type {
 import { apiGet } from "../../../../lib/api";
 import useCanvasStore from "../../../../store/canvas-store";
 import MappingTable from "../fields/MappingTable";
-import DesignOnlyBanner from "../banners/DesignOnlyBanner";
 import { configBox, inputStyle, labelStyle, monoInput } from "../styles";
 
 type Props = {
@@ -81,12 +80,6 @@ export default function CallActivitySection({ call, onChange }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <DesignOnlyBanner milestone="E8">
-        Engine today doesn't spawn child instances — a token reaching this
-        node hops straight to the outgoing edge. CallActivity dispatch
-        (input/output mappings + error propagation) ships in P4 of the
-        engine sprint.
-      </DesignOnlyBanner>
       <div style={configBox}>
         <div>
           <div style={labelStyle}>Called Process</div>

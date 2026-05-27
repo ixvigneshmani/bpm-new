@@ -1007,6 +1007,19 @@ export const processInstances = pgTable(
     // (task completion can transition running → completed; cancel will
     // race in a future phase).
     version: integer("VERSION").notNull().default(0),
+    /** P4 Session 11 — CallActivity parent linkage. Set on child
+     *  instances spawned by a callActivity node in some other instance.
+     *  Null for top-level (user-started or event-triggered) instances.
+     *  Cascade-delete: cancelInstance on a parent cascades to children. */
+    parentInstanceId: uuid("PARENT_INSTANCE_ID"),
+    /** P4 Session 11 — the specific parent token parked at the
+     *  callActivity node. Set null on delete because tokens can be
+     *  cleaned up; child completion logs "parent gone" in that case. */
+    parentTokenId: uuid("PARENT_TOKEN_ID"),
+    /** P4 Session 11 — call-stack depth. Top-level = 0; each
+     *  callActivity adds 1. Engine enforces a hard cap (20) to prevent
+     *  infinite recursion. */
+    callDepth: integer("CALL_DEPTH").notNull().default(0),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1019,6 +1032,7 @@ export const processInstances = pgTable(
     index("PROC_INST_PROCESS_IDX").on(t.processId),
     index("PROC_INST_TENANT_STATUS_IDX").on(t.tenantId, t.status),
     index("PROC_INST_TENANT_BUSINESSKEY_IDX").on(t.tenantId, t.businessKey),
+    index("PROC_INST_PARENT_IDX").on(t.parentInstanceId),
   ],
 );
 
@@ -1218,6 +1232,16 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   // boundary on the transaction host fires.
   "cancel-thrown",
   "cancel-caught",
+  // P4 Session 11 — callActivity lifecycle. `child-instance-started`
+  // at the parent's callActivity node when the child instance is
+  // spawned (payload: childInstanceId, calledProcessSlug, version,
+  // callDepth). `child-instance-completed` / `child-instance-failed`
+  // when the child terminates. `call-completed` on the parent token's
+  // resume after output mappings (payload: outputsMerged, hops).
+  "child-instance-started",
+  "child-instance-completed",
+  "child-instance-failed",
+  "call-completed",
 ]);
 
 export const instanceEvents = pgTable(

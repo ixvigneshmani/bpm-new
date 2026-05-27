@@ -3634,4 +3634,28 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
       expect(failedUpd?.set.errorMessage).toMatch(/cancel events are only valid inside a transaction subprocess/i);
     });
   });
+
+  describe("P4 Session 11 — callActivity dispatch", () => {
+    it("missing calledProcessId on the call config fails the parent token loud", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "ca", type: "callActivity", data: { call: { binding: "latest" } } },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "ca" },
+          { id: "e2", source: "ca", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("failed");
+      const failedUpd = env.updates.find(
+        (u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed",
+      );
+      expect(failedUpd?.set.errorMessage).toMatch(/no calledProcessId configured/i);
+    });
+  });
 });
