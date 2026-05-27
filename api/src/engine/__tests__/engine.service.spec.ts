@@ -3492,4 +3492,146 @@ describe("EngineService — P2 task-due reminder scheduling", () => {
       expect(scheduler.callbacks.has("start-event-timer")).toBe(true);
     });
   });
+
+  describe("P4 Session 10 — error throw from intermediateThrowEvent", () => {
+    it("intermediate error-throw with no catcher emits error-thrown + error-uncaught and fails the instance", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "thr", type: "intermediateThrowEvent", data: { eventDefinition: { kind: "error", errorCode: "BOOM" } } },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "thr" },
+          { id: "e2", source: "thr", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("failed");
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      expect(events.find((e) => e.eventType === "error-thrown" && e.nodeId === "thr")).toBeTruthy();
+      expect(events.find((e) => e.eventType === "error-uncaught")).toBeTruthy();
+    });
+  });
+
+  describe("P4 Session 10 — escalation events", () => {
+    it("intermediate escalation throw with no catcher emits escalation-thrown + escalation-uncaught and instance completes (non-fatal)", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "thr", type: "intermediateThrowEvent", data: { eventDefinition: { kind: "escalation", escalationCode: "SLA" } } },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "thr" },
+          { id: "e2", source: "thr", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("completed");
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      expect(events.find((e) => e.eventType === "escalation-thrown")).toBeTruthy();
+      expect(events.find((e) => e.eventType === "escalation-uncaught")).toBeTruthy();
+    });
+
+    it("end-event escalation throw with no catcher emits escalation-uncaught (still completes)", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "endEsc", type: "endEvent", data: { eventDefinition: { kind: "escalation", escalationCode: "SLA" } } },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "endEsc" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("completed");
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      const thrown = events.find((e) => e.eventType === "escalation-thrown");
+      expect(thrown).toBeTruthy();
+      expect((thrown?.payload as { escalationCode?: string })?.escalationCode).toBe("SLA");
+    });
+
+    it("intermediate escalation catch parks token with waitingFor=escalation and emits escalation-subscribed", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "catch", type: "intermediateCatchEvent", data: { eventDefinition: { kind: "escalation", escalationCode: "FOO" } } },
+          { id: "e", type: "endEvent" },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "catch" },
+          { id: "e2", source: "catch", target: "e" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("running");
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      const sub = events.find((e) => e.eventType === "escalation-subscribed");
+      expect(sub).toBeTruthy();
+      expect((sub?.payload as { escalationCode?: string })?.escalationCode).toBe("FOO");
+    });
+  });
+
+  describe("P4 Session 10 — terminate end event", () => {
+    it("root terminate end event marks instance completed", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          { id: "term", type: "endEvent", data: { eventDefinition: { kind: "terminate" } } },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "term" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("completed");
+      const events = env.inserts
+        .filter((i) => i.table === "INSTANCE_EVENTS")
+        .map((i) => i.values[0]);
+      const fired = events.find((e) => e.eventType === "terminate-fired");
+      expect(fired).toBeTruthy();
+    });
+  });
+
+  describe("P4 Session 10 — cancel end event", () => {
+    it("cancel end event outside a transaction fails the token loud", async () => {
+      const env = makeFakeTx({
+        nodes: [
+          { id: "s", type: "startEvent" },
+          // Cancel at root scope — modeling error.
+          { id: "cancel", type: "endEvent", data: { eventDefinition: { kind: "cancel" } } },
+        ],
+        edges: [
+          { id: "e1", source: "s", target: "cancel" },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const service = new EngineService(env.db as any, makeFakeWorker() as any);
+      const out = await service.startInstance({ processId: "p", tenantId: "t", userId: "u" });
+      expect(out.status).toBe("failed");
+      const failedUpd = env.updates.find(
+        (u) => u.table === "PROCESS_INSTANCES" && u.set.status === "failed",
+      );
+      expect(failedUpd?.set.errorMessage).toMatch(/cancel events are only valid inside a transaction subprocess/i);
+    });
+  });
 });

@@ -918,7 +918,9 @@ const subprocessRuntimeRule: ValidationRule = {
       });
       const innerKind =
         (innerStart?.data as { eventDefinition?: { kind?: string } } | undefined)?.eventDefinition?.kind;
-      if (innerKind === "timer") continue;
+      // Timer event subprocesses ship in Session 6b; escalation event
+      // subprocesses ship in Session 10 (interrupting + non-interrupting).
+      if (innerKind === "timer" || innerKind === "escalation") continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `subprocess-runtime:${n.id}`,
@@ -960,15 +962,13 @@ const EVENT_HOST_TYPES = new Set([
   "intermediateThrowEvent", "boundaryEvent",
 ]);
 
-// P2 Session 6b — `timer` is wired end-to-end on boundary events
-// (subscribe + fire) AND on event-subprocess inner start events (timer
-// fires the event-subprocess, interrupting / non-interrupting). `error`
-// is now caught at boundary events (Session 6b). Remaining inert kinds
-// (message, signal, escalation, conditional, link, cancel, compensation)
-// stay flagged until Sessions 7–9 + P4/P6.
+// P4 Session 10 — escalation, terminate, cancel now wired across
+// throw/catch/boundary/event-subprocess (cancel: end-event + boundary
+// only, transaction-scoped). Remaining truly inert kind = compensation
+// (P6 Session 16). Specific event kinds at specific hosts that are
+// wired get explicit fall-through cases above this rule.
 const EVENT_KINDS_STILL_INERT = new Set([
-  "message", "signal", "escalation", "conditional",
-  "link", "cancel", "compensation",
+  "compensation",
 ]);
 
 const eventDefinitionRuntimeRule: ValidationRule = {
@@ -997,6 +997,19 @@ const eventDefinitionRuntimeRule: ValidationRule = {
       // Error end events (kind 'error' on endEvent) throw + walk scope
       // chain to a matching error boundary as of Session 6b. Don't flag.
       if (kind === "error" && n.type === "endEvent") continue;
+      // P4 Session 10 — error throw also wired from intermediateThrow.
+      if (kind === "error" && n.type === "intermediateThrowEvent") continue;
+      // P4 Session 10 — escalation: catch (intermediate), throw
+      // (intermediate + end), boundary, event-subprocess start.
+      if (kind === "escalation") continue;
+      // P4 Session 10 — terminate end event (scope-bounded kill).
+      if (kind === "terminate" && n.type === "endEvent") continue;
+      // P4 Session 10 — cancel end event (transaction-scoped, validated
+      // at runtime) + cancel boundary (on transaction host).
+      if (
+        kind === "cancel" &&
+        (n.type === "endEvent" || n.type === "boundaryEvent")
+      ) continue;
       if (!EVENT_KINDS_STILL_INERT.has(kind) && kind !== "timer" && kind !== "terminate") continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
@@ -1023,14 +1036,21 @@ const boundaryEventRuntimeRule: ValidationRule = {
       if (n.type !== "boundaryEvent") continue;
       const d = n.data as { eventDefinition?: { kind?: string } } | undefined;
       const kind = d?.eventDefinition?.kind;
-      if (kind === "timer" || kind === "error") continue; // shipped
+      // P4 Session 10 — escalation + cancel boundaries now execute.
+      // Timer (6a) + error (6b) shipped earlier.
+      if (
+        kind === "timer" ||
+        kind === "error" ||
+        kind === "escalation" ||
+        kind === "cancel"
+      ) continue;
       const label = labelOf(n as { id: string; data: Record<string, unknown> });
       issues.push({
         id: `boundary-event-runtime:${n.id}`,
         severity: "warning",
         ruleId: "boundary-event-runtime",
         nodeId: n.id,
-        message: `Boundary event "${label}" (kind "${kind ?? "none"}") — engine doesn't register this boundary kind today. Timer (6a) + error (6b) work; message/signal/escalation/compensation land in P3/P4/P6.`,
+        message: `Boundary event "${label}" (kind "${kind ?? "none"}") — engine doesn't register this boundary kind today. Timer (6a) + error (6b) + escalation/cancel (Session 10) work; message/signal/compensation land in P3/P6.`,
       });
     }
     return issues;

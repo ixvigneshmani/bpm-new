@@ -1197,6 +1197,27 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "conditional-subscribed",
   "conditional-satisfied",
   "conditional-unsubscribed",
+  // P4 Session 10 — escalation propagation lifecycle. Mirrors the
+  // error model (Session 6b): `escalation-thrown` at throw; one of
+  // `escalation-caught` (with payload.catcherNodeId + interrupting
+  // flag) or `escalation-uncaught` at chain end. Intermediate catch
+  // park/resume emit `escalation-subscribed` + `escalation-unsubscribed`.
+  "escalation-thrown",
+  "escalation-caught",
+  "escalation-uncaught",
+  "escalation-subscribed",
+  "escalation-unsubscribed",
+  // P4 Session 10 — terminate end event bulk-kills every live token in
+  // the containing scope (subprocess scope OR root process). Payload:
+  // { scopeTokenId | null, killedTokens: N }.
+  "terminate-fired",
+  // P4 Session 10 — cancel end-event + boundary catch (mechanism only;
+  // compensation handler firing arrives in Session 16). cancel-thrown
+  // is emitted by an end event with kind='cancel' inside a transaction
+  // subprocess; cancel-caught is emitted when the matching cancel
+  // boundary on the transaction host fires.
+  "cancel-thrown",
+  "cancel-caught",
 ]);
 
 export const instanceEvents = pgTable(

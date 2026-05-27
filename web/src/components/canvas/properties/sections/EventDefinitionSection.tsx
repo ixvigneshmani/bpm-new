@@ -120,7 +120,7 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     );
   };
 
-  // P0–P3 Session 9 — what's wired so far:
+  // P0–P4 Session 10 — what's wired so far:
   //   timer on boundaryEvent .................. ✅ Session 6a
   //   error on boundaryEvent .................. ✅ Session 6b
   //   message on intermediateCatchEvent ....... ✅ Session 7
@@ -131,10 +131,14 @@ export default function EventDefinitionSection({ definition, onChange, variant }
   //   signal/message on endEvent .............. ✅ Session 9
   //   link events (catch + throw, same scope) . ✅ Session 9 (publish rewrite)
   //   conditional catch + start ............... ✅ Session 9
-  //   error throw from intermediateThrow ...... P4
-  //   escalation / cancel ..................... P4
-  //   compensation ............................ P6
-  //   terminate ............................... P4 (end-event semantics)
+  //   error throw from intermediateThrow ...... ✅ Session 10
+  //   escalation (catch, throw, end, boundary,
+  //     event-subprocess) ..................... ✅ Session 10
+  //   terminate (end-event scope-bounded) ..... ✅ Session 10
+  //   cancel (end-event + boundary in
+  //     transaction subprocess) ............... ✅ Session 10 (mechanism;
+  //                                                compensation handler S16)
+  //   compensation handler firing ............. P6 Session 16
   const timerBoundaryWired =
     variant === "boundary" && definition.kind === "timer";
   const errorBoundaryWired =
@@ -164,9 +168,26 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     variant === "end" &&
     (definition.kind === "signal" ||
       definition.kind === "message");
+  // P4 Session 10 wiring:
+  const errorIntermediateThrowWired =
+    variant === "intermediateThrow" && definition.kind === "error";
+  const escalationCatchWired =
+    variant === "intermediateCatch" && definition.kind === "escalation";
+  const escalationThrowWired =
+    (variant === "intermediateThrow" || variant === "end") &&
+    definition.kind === "escalation";
+  const escalationBoundaryWired =
+    variant === "boundary" && definition.kind === "escalation";
+  const escalationStartWired =
+    variant === "start" && definition.kind === "escalation";
+  const terminateEndWired =
+    variant === "end" && definition.kind === "terminate";
+  const cancelEndWired =
+    variant === "end" && definition.kind === "cancel";
+  const cancelBoundaryWired =
+    variant === "boundary" && definition.kind === "cancel";
   const showRuntimeBanner =
     definition.kind !== "none" &&
-    definition.kind !== "terminate" &&
     !timerBoundaryWired &&
     !errorBoundaryWired &&
     !messageIntermediateCatchWired &&
@@ -176,7 +197,15 @@ export default function EventDefinitionSection({ definition, onChange, variant }
     !startWired &&
     !linkAnyWired &&
     !conditionalIntermediateCatchWired &&
-    !endEventThrowWired;
+    !endEventThrowWired &&
+    !errorIntermediateThrowWired &&
+    !escalationCatchWired &&
+    !escalationThrowWired &&
+    !escalationBoundaryWired &&
+    !escalationStartWired &&
+    !terminateEndWired &&
+    !cancelEndWired &&
+    !cancelBoundaryWired;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

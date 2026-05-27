@@ -589,6 +589,7 @@ export class EngineService {
                   errorCode?: string;
                   signalName?: string;
                   messageName?: string;
+                  escalationCode?: string;
                 };
               }
             | undefined)?.eventDefinition;
@@ -660,6 +661,65 @@ export class EngineService {
               hops,
             });
             return thrown;
+          }
+          // P4 Session 10 — escalation end event. Like the error end
+          // throw, the throwing token terminates; unlike error, an
+          // uncaught escalation is non-fatal — the throwing branch
+          // simply drains. Catchers (boundary / event-subprocess /
+          // intermediate-catch) fire as a side effect.
+          if (endDef?.kind === "escalation") {
+            await this.throwEscalation({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              throwingTokenId: args.tokenId,
+              escalationCode: (endDef.escalationCode ?? "").trim(),
+              throwNodeId: nodeId,
+              canvas: args.canvas,
+              variables: args.variables,
+              terminateThrower: true,
+              throwingTokenVersion: version,
+            });
+            // Token already marked completed by throwEscalation.
+            return { tokenStatus: "completed", hops };
+          }
+          // P4 Session 10 — terminate end event. Bulk-kills every live
+          // token in the containing scope (subprocess scope if the
+          // throwing token has scopeTokenId, else the whole process).
+          // Different from a regular end event, which only drains its
+          // own token.
+          if (endDef?.kind === "terminate") {
+            const adv = await this.terminateScope({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              throwingTokenId: args.tokenId,
+              throwingTokenVersion: version,
+              throwNodeId: nodeId,
+              canvas: args.canvas,
+              variables: args.variables,
+              hops,
+            });
+            return adv;
+          }
+          // P4 Session 10 — cancel end event. Mechanism only this
+          // session: scope-kill + boundary fire (if attached to a
+          // transaction host); compensation handler invocation parks
+          // for Session 16. Outside a transaction subprocess this is
+          // a modeling error — we fail loud.
+          if (endDef?.kind === "cancel") {
+            const adv = await this.throwCancelFromEnd({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              throwingTokenId: args.tokenId,
+              throwingTokenVersion: version,
+              throwNodeId: nodeId,
+              canvas: args.canvas,
+              variables: args.variables,
+              hops,
+            });
+            return adv;
           }
           await recordEvent(args.tx, {
             tenantId: args.tenantId,
@@ -1144,6 +1204,61 @@ export class EngineService {
           }
         }
 
+        // P4 Session 10 — intermediate escalation-catch event.
+        //
+        // No subscription table. The catch token is parked in
+        // INSTANCE_TOKENS with waitingFor='escalation'; throwEscalation
+        // scans for parked tokens by currentNodeId + scope chain at
+        // throw time. The escalationCode wanted by THIS catch is read
+        // off the canvas via currentNodeId, so a republish that swaps
+        // the code is honored automatically.
+        //
+        // No eager evaluation — escalations are externally-thrown
+        // events; nothing on the canvas at entry could already have
+        // delivered one.
+        if (
+          node.type === "intermediateCatchEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "escalation")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            escalationCode?: string;
+          };
+          const wanted = (def.escalationCode ?? "").trim();
+          const scopeRows = await args.tx
+            .select({ scopeTokenId: instanceTokens.scopeTokenId })
+            .from(instanceTokens)
+            .where(eq(instanceTokens.id, args.tokenId))
+            .limit(1);
+          const scopeTokenId = scopeRows[0]?.scopeTokenId ?? null;
+          version = await this.updateTokenWithLock(
+            args.tx, args.tokenId, version,
+            {
+              status: "waiting",
+              waitingFor: "escalation",
+              currentNodeId: nodeId,
+            },
+          );
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "escalation-subscribed",
+            payload: { escalationCode: wanted, scopeTokenId },
+          });
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-waiting",
+            payload: { waitingFor: "escalation", escalationCode: wanted },
+          });
+          return { tokenStatus: "waiting", hops };
+        }
+
         // P3 Session 8 — intermediate signal-throw event.
         //
         // Synchronous in-process broadcast: SELECT every catch row in
@@ -1246,6 +1361,69 @@ export class EngineService {
             instanceId: args.instanceId,
             eventType: "message-thrown",
             payload,
+          });
+          // Fall through to default outgoing-edge handling.
+        }
+
+        // P4 Session 10 — intermediate error-throw event.
+        //
+        // Throwing an error from inside the flow (vs at an end event)
+        // is interrupting: the current branch terminates and the
+        // throwErrorFromEnd walker takes over scope-chain matching.
+        // throwErrorFromEnd marks the throwing token completed +
+        // walks up to find a boundary or fail with `error-uncaught`.
+        if (
+          node.type === "intermediateThrowEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "error")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            errorCode?: string;
+          };
+          const thrown = await this.throwErrorFromEnd({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            throwingTokenId: args.tokenId,
+            throwingTokenVersion: version,
+            errorCode: (def.errorCode ?? "").trim(),
+            throwNodeId: nodeId,
+            canvas: args.canvas,
+            variables: args.variables,
+            hops,
+          });
+          return thrown;
+        }
+
+        // P4 Session 10 — intermediate escalation-throw event.
+        //
+        // Unlike error, escalation does NOT terminate the throwing
+        // branch (per BPMN 2.0): the token continues out the throw
+        // event's outgoing edge. Catchers fire as a side effect.
+        // Caught + non-interrupting variant keeps catcher's host
+        // running too. If the chain has no catcher, we emit
+        // `escalation-uncaught` and continue anyway — escalations are
+        // notifications, not failures.
+        if (
+          node.type === "intermediateThrowEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "escalation")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            escalationCode?: string;
+          };
+          await this.throwEscalation({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            throwingTokenId: args.tokenId,
+            escalationCode: (def.escalationCode ?? "").trim(),
+            throwNodeId: nodeId,
+            canvas: args.canvas,
+            variables: args.variables,
+            terminateThrower: false,
           });
           // Fall through to default outgoing-edge handling.
         }
@@ -2449,6 +2627,1034 @@ export class EngineService {
       payload: { errorCode: args.errorCode },
     });
     return { tokenStatus: "failed", hops: args.hops, errorMessage: message };
+  }
+
+  /** P4 Session 10 — throw a BPMN escalation. Walks the scope chain
+   *  (same shape as `throwErrorFromEnd`) looking for the first matching
+   *  catcher at each level:
+   *    1. Intermediate-catch escalation tokens parked in this scope
+   *       (sibling branches of the same scope).
+   *    2. Escalation boundary attached to the scope's host activity.
+   *    3. Escalation event-subprocess child of the scope.
+   *
+   *  Match policy: empty/null escalationCode on the catcher = catch-all
+   *  (Camunda-style). Specific code requires exact match.
+   *
+   *  Interrupting catchers (boundary cancelActivity!==false, or event
+   *  subprocess interrupting!==false): kill host scope + all scoped
+   *  children, then spawn one token at the catcher's outgoing edge.
+   *  Non-interrupting catchers: leave host running; spawn a sibling
+   *  token at the catcher's outgoing edge.
+   *
+   *  Uncaught escalations are NON-FATAL — escalations are notifications
+   *  in BPMN 2.0; we emit `escalation-uncaught` and return. The throwing
+   *  token's lifecycle is controlled by `terminateThrower`:
+   *    - true (end-event throw): throwing token marked completed here.
+   *    - false (intermediate throw): caller continues advancing the
+   *      throwing token past this node.
+   */
+  private async throwEscalation(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    throwingTokenId: string;
+    throwingTokenVersion?: number;
+    escalationCode: string;
+    throwNodeId: string;
+    canvas: EngineCanvas;
+    variables: Record<string, unknown>;
+    terminateThrower: boolean;
+  }): Promise<void> {
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "escalation-thrown",
+      payload: { escalationCode: args.escalationCode },
+    });
+
+    if (args.terminateThrower && args.throwingTokenVersion !== undefined) {
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: args.throwingTokenId,
+        nodeId: args.throwNodeId,
+        eventType: "node-exited",
+      });
+      await this.updateTokenWithLock(
+        args.tx, args.throwingTokenId, args.throwingTokenVersion,
+        { status: "completed", currentNodeId: args.throwNodeId },
+      );
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: args.throwingTokenId,
+        nodeId: args.throwNodeId,
+        eventType: "token-completed",
+        payload: { via: "escalation-throw" },
+      });
+    }
+
+    const codeMatches = (wanted: string): boolean => {
+      const w = (wanted ?? "").trim();
+      return w === "" || w === args.escalationCode;
+    };
+
+    // Throwing token's scope is the starting scope.
+    const startRows = await args.tx
+      .select({ scopeTokenId: instanceTokens.scopeTokenId })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.throwingTokenId))
+      .limit(1);
+    let cursorScope: string | null =
+      (startRows[0]?.scopeTokenId as string | null) ?? null;
+    // First search level: throwing token's own scope (sibling
+    // intermediate catches). After that we hop up via the scope token.
+    let searchScopeTokenId: string | null = cursorScope;
+    const chain: Array<{
+      id: string;
+      version: number;
+      scopeTokenId: string | null;
+    }> = [];
+
+    // Walk: at each level, look for intermediate catch tokens parked in
+    // this scope, then boundary, then event subprocess.
+    // The first iteration uses searchScopeTokenId = throwing scope.
+    // Subsequent iterations walk cursorScope up the chain.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nodes = args.canvas.nodes as any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const edges = args.canvas.edges as any[];
+
+    while (true) {
+      // (1) Intermediate-catch escalation in this scope.
+      const catchRows = await args.tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          currentNodeId: instanceTokens.currentNodeId,
+          scopeTokenId: instanceTokens.scopeTokenId,
+        })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.instanceId, args.instanceId),
+            eq(instanceTokens.status, "waiting"),
+            eq(instanceTokens.waitingFor, "escalation"),
+            searchScopeTokenId === null
+              ? isNull(instanceTokens.scopeTokenId)
+              : eq(instanceTokens.scopeTokenId, searchScopeTokenId),
+          ),
+        );
+      const catchHit = (catchRows as Array<{
+        id: string;
+        version: number;
+        currentNodeId: string;
+        scopeTokenId: string | null;
+      }>).find((row) => {
+        const n = nodes.find((m) => m.id === row.currentNodeId);
+        if (!n || n.type !== "intermediateCatchEvent") return false;
+        const def = n.data?.eventDefinition;
+        if (def?.kind !== "escalation") return false;
+        return codeMatches(def.escalationCode ?? "");
+      });
+      if (catchHit) {
+        // Resume this catch token. Interrupting? Per BPMN spec, an
+        // intermediate-catch is always "non-interrupting" in the sense
+        // that the throwing branch isn't killed — but the catch ITSELF
+        // resumes and continues past the catch. We do NOT kill chain
+        // intermediate scopes.
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: catchHit.id,
+          nodeId: catchHit.currentNodeId,
+          eventType: "escalation-unsubscribed",
+          payload: { escalationCode: args.escalationCode, reason: "caught" },
+        });
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: catchHit.id,
+          nodeId: catchHit.currentNodeId,
+          eventType: "escalation-caught",
+          payload: {
+            catcherKind: "intermediate-catch",
+            catcherNodeId: catchHit.currentNodeId,
+            escalationCode: args.escalationCode,
+            throwNodeId: args.throwNodeId,
+            interrupting: false,
+          },
+        });
+        const newVer = await this.updateTokenWithLock(
+          args.tx, catchHit.id, catchHit.version,
+          { status: "active", waitingFor: null },
+        );
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: catchHit.id,
+          nodeId: catchHit.currentNodeId,
+          eventType: "token-resumed",
+          payload: { via: "escalation" },
+        });
+        await this.advanceToken({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: catchHit.id,
+          tokenVersion: newVer,
+          currentNodeId: catchHit.currentNodeId,
+          canvas: args.canvas,
+          variables: args.variables,
+          resumeFromWait: true,
+        });
+        return;
+      }
+
+      // (2) + (3) need a scope token (we're at root if cursorScope ===
+      // null — handle root event subprocesses below the loop).
+      if (cursorScope === null) break;
+      const scopeRows = await args.tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          currentNodeId: instanceTokens.currentNodeId,
+          scopeTokenId: instanceTokens.scopeTokenId,
+          status: instanceTokens.status,
+        })
+        .from(instanceTokens)
+        .where(eq(instanceTokens.id, cursorScope))
+        .limit(1);
+      const scopeTok = scopeRows[0];
+      if (!scopeTok) break;
+      const hostNodeId = scopeTok.currentNodeId as string;
+
+      // (2) Boundary on host activity.
+      const boundary = nodes.find((n) => {
+        if (n.type !== "boundaryEvent") return false;
+        if (n.data?.attachedToRef !== hostNodeId) return false;
+        const d = n.data?.eventDefinition;
+        if (d?.kind !== "escalation") return false;
+        return codeMatches(d.escalationCode ?? "");
+      });
+      if (boundary) {
+        const interrupting = boundary.data?.cancelActivity !== false;
+        const outgoing = edges.find((e) => e.source === boundary.id);
+        if (!outgoing) {
+          this.logger.warn(
+            `Escalation boundary ${boundary.id} has no outgoing flow; emitting caught but cannot continue.`,
+          );
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: scopeTok.id as string,
+            nodeId: hostNodeId,
+            eventType: "escalation-caught",
+            payload: {
+              catcherKind: "boundary",
+              catcherNodeId: boundary.id,
+              escalationCode: args.escalationCode,
+              throwNodeId: args.throwNodeId,
+              interrupting,
+              warning: "no outgoing edge",
+            },
+          });
+          return;
+        }
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: scopeTok.id as string,
+          nodeId: hostNodeId,
+          eventType: "escalation-caught",
+          payload: {
+            catcherKind: "boundary",
+            catcherNodeId: boundary.id,
+            escalationCode: args.escalationCode,
+            throwNodeId: args.throwNodeId,
+            interrupting,
+            target: outgoing.target,
+          },
+        });
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: scopeTok.id as string,
+          nodeId: hostNodeId,
+          eventType: "boundary-fired",
+          payload: {
+            boundaryNodeId: boundary.id,
+            kind: "escalation",
+            escalationCode: args.escalationCode,
+            interrupting,
+            target: outgoing.target,
+          },
+        });
+
+        if (interrupting) {
+          // Tear down intermediate scopes between throw and catch.
+          for (const intermediate of chain) {
+            await this.updateTokenWithLock(
+              args.tx, intermediate.id, intermediate.version,
+              {
+                status: "failed",
+                errorMessage: `Cancelled by escalation boundary ${boundary.id} on enclosing scope.`,
+              },
+            );
+            if (intermediate.scopeTokenId) {
+              await args.tx
+                .update(instanceTokens)
+                .set({
+                  status: "failed",
+                  errorMessage: `Cancelled by escalation boundary ${boundary.id} on enclosing scope.`,
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(instanceTokens.scopeTokenId, intermediate.scopeTokenId),
+                    ne(instanceTokens.id, intermediate.id),
+                    inArray(instanceTokens.status, ["active", "waiting"] as const),
+                  ),
+                );
+            }
+          }
+          await this.updateTokenWithLock(
+            args.tx, scopeTok.id as string, scopeTok.version as number,
+            {
+              status: "failed",
+              errorMessage: `Interrupted by escalation boundary ${boundary.id} (code "${args.escalationCode}").`,
+            },
+          );
+          await args.tx
+            .update(instanceTokens)
+            .set({
+              status: "failed",
+              errorMessage: `Cancelled by escalation boundary ${boundary.id} on enclosing host.`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(instanceTokens.scopeTokenId, scopeTok.id as string),
+                inArray(instanceTokens.status, ["active", "waiting"] as const),
+              ),
+            );
+          await this.timerScheduler?.cancelTimer(scopeTok.id as string, args.tx);
+        }
+
+        // Spawn the recovery token at the boundary's outgoing target.
+        // Interrupting → inherits host's PARENT scope (host is killed).
+        // Non-interrupting → inherits host's PARENT scope too (sibling
+        // of the host activity), matching Session 6a timer boundary.
+        const parentScope = scopeTok.scopeTokenId as string | null;
+        const childRows = await args.tx
+          .insert(instanceTokens)
+          .values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            currentNodeId: outgoing.target,
+            status: "active",
+            parentTokenId: scopeTok.id as string,
+            scopeTokenId: parentScope,
+          })
+          .returning({ id: instanceTokens.id, version: instanceTokens.version });
+        const child = childRows[0];
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          nodeId: outgoing.target,
+          eventType: "token-created",
+          payload: {
+            parentTokenId: scopeTok.id,
+            scopeTokenId: parentScope,
+            via: interrupting ? "escalation-boundary" : "escalation-boundary-non-interrupting",
+          },
+        });
+        await this.advanceToken({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          tokenVersion: child.version ?? 0,
+          currentNodeId: outgoing.target,
+          canvas: args.canvas,
+          variables: args.variables,
+        });
+        return;
+      }
+
+      // (3) Event subprocess child of this scope's host.
+      const esp = nodes.find((n) => {
+        if (n.type !== "eventSubProcess") return false;
+        if ((n as { parentId?: string }).parentId !== hostNodeId) return false;
+        const inner = nodes.find(
+          (m) =>
+            m.type === "startEvent" &&
+            (m as { parentId?: string }).parentId === n.id,
+        );
+        const def = inner?.data?.eventDefinition;
+        if (def?.kind !== "escalation") return false;
+        return codeMatches(def.escalationCode ?? "");
+      });
+      if (esp) {
+        const inner = nodes.find(
+          (m) =>
+            m.type === "startEvent" &&
+            (m as { parentId?: string }).parentId === esp.id,
+        );
+        if (inner) {
+          const espData = esp.data as { interrupting?: boolean } | undefined;
+          const startData = inner.data as { isInterrupting?: boolean } | undefined;
+          const interrupting =
+            espData?.interrupting !== false && startData?.isInterrupting !== false;
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: scopeTok.id as string,
+            nodeId: hostNodeId,
+            eventType: "escalation-caught",
+            payload: {
+              catcherKind: "event-subprocess",
+              catcherNodeId: esp.id,
+              innerStartId: inner.id,
+              escalationCode: args.escalationCode,
+              throwNodeId: args.throwNodeId,
+              interrupting,
+            },
+          });
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: scopeTok.id as string,
+            nodeId: hostNodeId,
+            eventType: "event-subprocess-fired",
+            payload: {
+              eventSubProcessId: esp.id,
+              innerStartId: inner.id,
+              kind: "escalation",
+              interrupting,
+            },
+          });
+          if (interrupting) {
+            // Kill host scope's live children (sibling branches inside
+            // the host). The host scope token itself stays alive to
+            // let the event subprocess execute within its scope.
+            await args.tx
+              .update(instanceTokens)
+              .set({
+                status: "failed",
+                errorMessage: `Cancelled by escalation event subprocess ${esp.id} on enclosing host.`,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(instanceTokens.scopeTokenId, scopeTok.id as string),
+                  inArray(instanceTokens.status, ["active", "waiting"] as const),
+                ),
+              );
+          }
+          // Spawn the event-subprocess inner-start child token inside
+          // the host scope (scopeTokenId = host's scope token).
+          const childRows = await args.tx
+            .insert(instanceTokens)
+            .values({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              currentNodeId: inner.id,
+              status: "active",
+              parentTokenId: scopeTok.id as string,
+              scopeTokenId: scopeTok.id as string,
+            })
+            .returning({ id: instanceTokens.id, version: instanceTokens.version });
+          const child = childRows[0];
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: child.id,
+            nodeId: inner.id,
+            eventType: "token-created",
+            payload: {
+              parentTokenId: scopeTok.id,
+              scopeTokenId: scopeTok.id,
+              via: interrupting ? "escalation-event-subprocess" : "escalation-event-subprocess-non-interrupting",
+            },
+          });
+          await this.advanceToken({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: child.id,
+            tokenVersion: child.version ?? 0,
+            currentNodeId: inner.id,
+            canvas: args.canvas,
+            variables: args.variables,
+          });
+          return;
+        }
+      }
+
+      // No catcher at this scope — record + walk up.
+      chain.push({
+        id: scopeTok.id as string,
+        version: scopeTok.version as number,
+        scopeTokenId: (scopeTok.scopeTokenId as string | null) ?? null,
+      });
+      cursorScope = (scopeTok.scopeTokenId as string | null) ?? null;
+      searchScopeTokenId = cursorScope;
+    }
+
+    // Cursor walked to null — root scope. Check root-level event
+    // subprocesses (parentId === null) with escalation start.
+    const rootEsp = nodes.find((n) => {
+      if (n.type !== "eventSubProcess") return false;
+      if ((n as { parentId?: string }).parentId) return false;
+      const inner = nodes.find(
+        (m) =>
+          m.type === "startEvent" &&
+          (m as { parentId?: string }).parentId === n.id,
+      );
+      const def = inner?.data?.eventDefinition;
+      if (def?.kind !== "escalation") return false;
+      return codeMatches(def.escalationCode ?? "");
+    });
+    if (rootEsp) {
+      const inner = nodes.find(
+        (m) =>
+          m.type === "startEvent" &&
+          (m as { parentId?: string }).parentId === rootEsp.id,
+      );
+      if (inner) {
+        const espData = rootEsp.data as { interrupting?: boolean } | undefined;
+        const startData = inner.data as { isInterrupting?: boolean } | undefined;
+        const interrupting =
+          espData?.interrupting !== false && startData?.isInterrupting !== false;
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.throwingTokenId,
+          nodeId: args.throwNodeId,
+          eventType: "escalation-caught",
+          payload: {
+            catcherKind: "event-subprocess",
+            catcherNodeId: rootEsp.id,
+            innerStartId: inner.id,
+            escalationCode: args.escalationCode,
+            throwNodeId: args.throwNodeId,
+            interrupting,
+            atRoot: true,
+          },
+        });
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.throwingTokenId,
+          nodeId: args.throwNodeId,
+          eventType: "event-subprocess-fired",
+          payload: {
+            eventSubProcessId: rootEsp.id,
+            innerStartId: inner.id,
+            kind: "escalation",
+            interrupting,
+            atRoot: true,
+          },
+        });
+        if (interrupting) {
+          // Root-level interrupting: kill every other live token in the
+          // instance (the inner event-subprocess will be spawned fresh
+          // and is the only survivor).
+          await args.tx
+            .update(instanceTokens)
+            .set({
+              status: "failed",
+              errorMessage: `Cancelled by escalation event subprocess ${rootEsp.id} at root scope.`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(instanceTokens.instanceId, args.instanceId),
+                inArray(instanceTokens.status, ["active", "waiting"] as const),
+              ),
+            );
+        }
+        const childRows = await args.tx
+          .insert(instanceTokens)
+          .values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            currentNodeId: inner.id,
+            status: "active",
+            parentTokenId: null,
+            scopeTokenId: null,
+          })
+          .returning({ id: instanceTokens.id, version: instanceTokens.version });
+        const child = childRows[0];
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          nodeId: inner.id,
+          eventType: "token-created",
+          payload: {
+            scopeTokenId: null,
+            via: interrupting ? "escalation-event-subprocess" : "escalation-event-subprocess-non-interrupting",
+            atRoot: true,
+          },
+        });
+        await this.advanceToken({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          tokenVersion: child.version ?? 0,
+          currentNodeId: inner.id,
+          canvas: args.canvas,
+          variables: args.variables,
+        });
+        return;
+      }
+    }
+
+    // Uncaught — non-fatal.
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "escalation-uncaught",
+      payload: { escalationCode: args.escalationCode },
+    });
+  }
+
+  /** P4 Session 10 — terminate end event. Bulk-kills every live token
+   *  in the throwing token's containing scope. If the throwing token
+   *  has a `scopeTokenId`, the kill is bounded to that scope (sub-
+   *  process-scoped terminate). If `scopeTokenId IS NULL`, the kill is
+   *  instance-wide and the instance flips to completed (root terminate).
+   *
+   *  Pattern matches Camunda's TerminateEndEventBehavior: every other
+   *  token in the scope is marked completed (NOT failed — terminate
+   *  is normal-path teardown, not an error). The throwing token also
+   *  marks itself completed. Timers/messages/signals/conditionals for
+   *  killed tokens cascade via FK ON DELETE — but since we update
+   *  status rather than delete, we additionally call cancelForInstance
+   *  on the subscription services (for root terminate) so the indices
+   *  drain. For subprocess-scoped terminate, the affected subscriptions
+   *  are FK-linked to the killed tokens and become unreachable; the
+   *  per-instance cancellation in cancelInstance is the safety net. */
+  private async terminateScope(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    throwingTokenId: string;
+    throwingTokenVersion: number;
+    throwNodeId: string;
+    canvas: EngineCanvas;
+    variables: Record<string, unknown>;
+    hops: number;
+  }): Promise<{
+    tokenStatus: "completed" | "waiting" | "failed";
+    hops: number;
+    errorMessage?: string;
+  }> {
+    // Read throwing token's scope.
+    const startRows = await args.tx
+      .select({ scopeTokenId: instanceTokens.scopeTokenId })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.throwingTokenId))
+      .limit(1);
+    const scope = (startRows[0]?.scopeTokenId as string | null) ?? null;
+
+    // Mark throwing token completed first.
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "node-exited",
+    });
+    await this.updateTokenWithLock(
+      args.tx, args.throwingTokenId, args.throwingTokenVersion,
+      { status: "completed", currentNodeId: args.throwNodeId },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "token-completed",
+      payload: { via: "terminate" },
+    });
+
+    // Bulk-kill other live tokens in scope.
+    let killed = 0;
+    if (scope === null) {
+      // Root scope: every other live token in the instance. Count
+      // first so we have a deterministic killed-count (drizzle's
+      // update doesn't return a portable rowCount in all dialects).
+      const liveRows = await args.tx
+        .select({ id: instanceTokens.id })
+        .from(instanceTokens)
+        .where(
+          and(
+            eq(instanceTokens.instanceId, args.instanceId),
+            ne(instanceTokens.id, args.throwingTokenId),
+            inArray(instanceTokens.status, ["active", "waiting"] as const),
+          ),
+        );
+      killed = (liveRows as Array<unknown>).length;
+      if (killed > 0) {
+        await args.tx
+          .update(instanceTokens)
+          .set({
+            status: "completed",
+            errorMessage: `Terminated by ${args.throwNodeId}.`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(instanceTokens.instanceId, args.instanceId),
+              ne(instanceTokens.id, args.throwingTokenId),
+              inArray(instanceTokens.status, ["active", "waiting"] as const),
+            ),
+          );
+      }
+    } else {
+      // Scope-bounded: walk scope subtree. Shallow first; deeper
+      // subprocess descendants are covered by their scope chain via
+      // scope_token_id but our shallow update only catches direct
+      // children. Iteratively expand: collect ids in scope, then
+      // mark scope-descendants of those ids, etc. Bounded by depth
+      // of nesting at runtime (typically 1-3).
+      const toKill = new Set<string>();
+      let frontier: string[] = [scope];
+      while (frontier.length > 0) {
+        const childRows = await args.tx
+          .select({ id: instanceTokens.id })
+          .from(instanceTokens)
+          .where(
+            and(
+              inArray(instanceTokens.scopeTokenId, frontier),
+              inArray(instanceTokens.status, ["active", "waiting"] as const),
+            ),
+          );
+        const next: string[] = [];
+        for (const r of childRows as Array<{ id: string }>) {
+          if (r.id === args.throwingTokenId) continue;
+          if (toKill.has(r.id)) continue;
+          toKill.add(r.id);
+          next.push(r.id);
+        }
+        frontier = next;
+      }
+      if (toKill.size > 0) {
+        await args.tx
+          .update(instanceTokens)
+          .set({
+            status: "completed",
+            errorMessage: `Terminated by ${args.throwNodeId} (scope-bounded).`,
+            updatedAt: new Date(),
+          })
+          .where(inArray(instanceTokens.id, Array.from(toKill)));
+        killed = toKill.size;
+      }
+    }
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "terminate-fired",
+      payload: { scopeTokenId: scope, killedTokens: killed },
+    });
+
+    // Scope-bounded terminate: resume the parent token (same as a
+    // regular end event finishing the scope drain). Root terminate:
+    // outer instance-completion gate picks it up.
+    if (scope !== null) {
+      const liveInScope = await this.countLiveScopeTokens(args.tx, scope);
+      if (liveInScope === 0) {
+        const parentRows = await args.tx
+          .select({
+            id: instanceTokens.id,
+            version: instanceTokens.version,
+            currentNodeId: instanceTokens.currentNodeId,
+            status: instanceTokens.status,
+          })
+          .from(instanceTokens)
+          .where(eq(instanceTokens.id, scope))
+          .limit(1);
+        const parent = parentRows[0];
+        if (parent && parent.status === "waiting") {
+          const newVer = await this.updateTokenWithLock(
+            args.tx, parent.id, parent.version,
+            { status: "active", waitingFor: null },
+          );
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: parent.id,
+            nodeId: parent.currentNodeId,
+            eventType: "token-resumed",
+            payload: { via: "subprocess", scopeTokenId: scope, viaTerminate: true },
+          });
+          const cont = await this.advanceToken({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: parent.id,
+            tokenVersion: newVer,
+            currentNodeId: parent.currentNodeId,
+            canvas: args.canvas,
+            variables: args.variables,
+            resumeFromWait: true,
+          });
+          return {
+            tokenStatus: cont.tokenStatus,
+            hops: args.hops + cont.hops,
+            errorMessage: cont.errorMessage,
+          };
+        }
+      }
+    }
+
+    return { tokenStatus: "completed", hops: args.hops };
+  }
+
+  /** P4 Session 10 — cancel end event. Only valid inside a transaction
+   *  subprocess (host activity type === 'transaction'). Triggers:
+   *    - one `cancel-thrown` audit
+   *    - if a cancel boundary is attached to the transaction host, fire
+   *      it (interrupting): kill host + scope children, spawn recovery
+   *      token at boundary's outgoing edge, emit `cancel-caught`
+   *    - if no boundary, treat like terminate (scope-bounded kill +
+   *      resume parent); emit `cancel-thrown` + an `escalation-uncaught`
+   *      style note in audit
+   *
+   *  Compensation handler invocation deferred to Session 16. The cancel
+   *  is the trigger; Session 16 will invoke compensation handlers
+   *  registered on transaction children before the boundary fires.
+   */
+  private async throwCancelFromEnd(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    throwingTokenId: string;
+    throwingTokenVersion: number;
+    throwNodeId: string;
+    canvas: EngineCanvas;
+    variables: Record<string, unknown>;
+    hops: number;
+  }): Promise<{
+    tokenStatus: "completed" | "waiting" | "failed";
+    hops: number;
+    errorMessage?: string;
+  }> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nodes = args.canvas.nodes as any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const edges = args.canvas.edges as any[];
+    const startRows = await args.tx
+      .select({ scopeTokenId: instanceTokens.scopeTokenId })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.throwingTokenId))
+      .limit(1);
+    const scopeId = (startRows[0]?.scopeTokenId as string | null) ?? null;
+    // Cancel outside a transaction is a modeling error.
+    if (scopeId === null) {
+      const m = `Cancel end event ${args.throwNodeId}: not inside a subprocess scope (cancel events are only valid inside a transaction subprocess).`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.instanceId, args.throwingTokenId,
+        args.throwingTokenVersion, args.throwNodeId, m,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: m };
+    }
+    const scopeRows = await args.tx
+      .select({
+        id: instanceTokens.id,
+        version: instanceTokens.version,
+        currentNodeId: instanceTokens.currentNodeId,
+        scopeTokenId: instanceTokens.scopeTokenId,
+        status: instanceTokens.status,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, scopeId))
+      .limit(1);
+    const scopeTok = scopeRows[0];
+    if (!scopeTok) {
+      const m = `Cancel end event ${args.throwNodeId}: scope token not found.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.instanceId, args.throwingTokenId,
+        args.throwingTokenVersion, args.throwNodeId, m,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: m };
+    }
+    const hostNodeId = scopeTok.currentNodeId as string;
+    const hostNode = nodes.find((n) => n.id === hostNodeId);
+    if (hostNode?.type !== "transaction") {
+      const m = `Cancel end event ${args.throwNodeId}: containing scope is "${hostNode?.type ?? "unknown"}", expected transaction.`;
+      await this.markTokenFailed(
+        args.tx, args.tenantId, args.instanceId, args.throwingTokenId,
+        args.throwingTokenVersion, args.throwNodeId, m,
+      );
+      return { tokenStatus: "failed", hops: args.hops, errorMessage: m };
+    }
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "cancel-thrown",
+      payload: { transactionId: hostNodeId },
+    });
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "node-exited",
+    });
+    await this.updateTokenWithLock(
+      args.tx, args.throwingTokenId, args.throwingTokenVersion,
+      { status: "completed", currentNodeId: args.throwNodeId },
+    );
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "token-completed",
+      payload: { via: "cancel-throw" },
+    });
+
+    // Bulk-kill scope siblings (transaction tear-down).
+    await args.tx
+      .update(instanceTokens)
+      .set({
+        status: "failed",
+        errorMessage: `Cancelled by transaction cancel-end ${args.throwNodeId}.`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(instanceTokens.scopeTokenId, scopeId),
+          ne(instanceTokens.id, args.throwingTokenId),
+          inArray(instanceTokens.status, ["active", "waiting"] as const),
+        ),
+      );
+
+    // Look for a cancel boundary on the transaction host.
+    const boundary = nodes.find((n) => {
+      if (n.type !== "boundaryEvent") return false;
+      if (n.data?.attachedToRef !== hostNodeId) return false;
+      return n.data?.eventDefinition?.kind === "cancel";
+    });
+    if (!boundary) {
+      // No boundary: just tear down the transaction scope.
+      // Compensation handlers (Session 16) would also fire here.
+      await this.updateTokenWithLock(
+        args.tx, scopeTok.id as string, scopeTok.version as number,
+        {
+          status: "failed",
+          errorMessage: `Transaction cancelled by ${args.throwNodeId}; no cancel boundary attached.`,
+        },
+      );
+      await this.timerScheduler?.cancelTimer(scopeTok.id as string, args.tx);
+      return { tokenStatus: "completed", hops: args.hops };
+    }
+
+    const outgoing = edges.find((e) => e.source === boundary.id);
+    if (!outgoing) {
+      const m = `Cancel boundary ${boundary.id} has no outgoing flow.`;
+      this.logger.warn(m);
+      await this.updateTokenWithLock(
+        args.tx, scopeTok.id as string, scopeTok.version as number,
+        { status: "failed", errorMessage: m },
+      );
+      return { tokenStatus: "completed", hops: args.hops };
+    }
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: scopeTok.id as string,
+      nodeId: hostNodeId,
+      eventType: "cancel-caught",
+      payload: {
+        catcherKind: "boundary",
+        catcherNodeId: boundary.id,
+        transactionId: hostNodeId,
+        target: outgoing.target,
+      },
+    });
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: scopeTok.id as string,
+      nodeId: hostNodeId,
+      eventType: "boundary-fired",
+      payload: {
+        boundaryNodeId: boundary.id,
+        kind: "cancel",
+        interrupting: true,
+        target: outgoing.target,
+      },
+    });
+    await this.updateTokenWithLock(
+      args.tx, scopeTok.id as string, scopeTok.version as number,
+      {
+        status: "failed",
+        errorMessage: `Interrupted by cancel boundary ${boundary.id}.`,
+      },
+    );
+    await this.timerScheduler?.cancelTimer(scopeTok.id as string, args.tx);
+
+    const parentScope = scopeTok.scopeTokenId as string | null;
+    const childRows = await args.tx
+      .insert(instanceTokens)
+      .values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        currentNodeId: outgoing.target,
+        status: "active",
+        parentTokenId: scopeTok.id as string,
+        scopeTokenId: parentScope,
+      })
+      .returning({ id: instanceTokens.id, version: instanceTokens.version });
+    const child = childRows[0];
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: child.id,
+      nodeId: outgoing.target,
+      eventType: "token-created",
+      payload: {
+        parentTokenId: scopeTok.id,
+        scopeTokenId: parentScope,
+        via: "cancel-boundary",
+      },
+    });
+    const adv = await this.advanceToken({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: child.id,
+      tokenVersion: child.version ?? 0,
+      currentNodeId: outgoing.target,
+      canvas: args.canvas,
+      variables: args.variables,
+    });
+    return {
+      tokenStatus: adv.tokenStatus,
+      hops: args.hops + adv.hops,
+      errorMessage: adv.errorMessage,
+    };
   }
 
   /** P2 Session 6b — at scope entry (root process start OR subprocess
