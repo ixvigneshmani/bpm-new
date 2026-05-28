@@ -68,6 +68,10 @@ export interface ExternalBpmContainer {
   /** Lane direction — "horizontal" is a row (label on left), "vertical"
    *  is a column (label on top). Undefined for pools. */
   orientation?: 'horizontal' | 'vertical';
+  /** Hex fill colour from the BPD XML (e.g. webMethods' soft yellow
+   *  "#ffffcc"). Null when the source didn't carry one. */
+  bgColor?: string | null;
+  labelBgColor?: string | null;
 }
 
 export interface ExternalBpmEdge {
@@ -400,6 +404,8 @@ export class ExternalBpmService implements OnModuleDestroy {
           height: l.height,
           parentId: l.poolId,
           orientation: l.orientation,
+          bgColor: l.bgColor,
+          labelBgColor: l.labelBgColor,
         })),
     ];
 

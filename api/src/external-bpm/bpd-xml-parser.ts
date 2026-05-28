@@ -51,6 +51,12 @@ export interface BpdLane {
    *  Same model can mix them in different pools (AMCProcess uses
    *  horizontal, PermitProcess uses vertical). */
   orientation: 'horizontal' | 'vertical';
+  /** Background fill colour as authored in the BPD (e.g. "#ffffcc").
+   *  Comes from the <swimlane>'s red/green/blue attributes. null when
+   *  the attrs were missing. */
+  bgColor: string | null;
+  /** Colour of the lane's label band. From labelRed/labelGreen/labelBlue. */
+  labelBgColor: string | null;
 }
 
 /** Edge metadata from the BPD XML. webMethods stores not just which
@@ -119,6 +125,24 @@ const parser = new XMLParser({
     name === 'bendpoint' ||
     (STEP_ELEMENT_NAMES as readonly string[]).includes(name),
 });
+
+/** Pack 3 attrs (red, green, blue 0-255) into a "#rrggbb" string.
+ *  webMethods stores swimlane fill / label colours as separate channels. */
+function packColor(
+  redAttr: unknown,
+  greenAttr: unknown,
+  blueAttr: unknown,
+): string | null {
+  const r = Number(redAttr);
+  const g = Number(greenAttr);
+  const b = Number(blueAttr);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
+    return null;
+  }
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  const hex = (v: number) => clamp(v).toString(16).padStart(2, '0');
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
+}
 
 /** Parse webMethods' "x,y" location attribute into a point. */
 function parseLocation(raw: unknown): { x: number; y: number } | null {
@@ -303,6 +327,13 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
       // to horizontal.
       const orientation: 'horizontal' | 'vertical' = swH > swW ? 'vertical' : 'horizontal';
 
+      const bgColor = packColor(swEl['@red'], swEl['@green'], swEl['@blue']);
+      const labelBgColor = packColor(
+        swEl['@labelRed'],
+        swEl['@labelGreen'],
+        swEl['@labelBlue'],
+      );
+
       if (orientation === 'vertical') {
         laneRecords.push({
           id: swUid,
@@ -313,6 +344,8 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
           width: swW,
           height: swH,
           orientation,
+          bgColor,
+          labelBgColor,
         });
         verticalStackX += swW;
       } else {
@@ -325,6 +358,8 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
           width: swW,
           height: swH,
           orientation,
+          bgColor,
+          labelBgColor,
         });
         horizontalStackY += swH;
       }

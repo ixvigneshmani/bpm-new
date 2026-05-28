@@ -5,16 +5,16 @@
  * fetched live from the API every visit.
  *
  * Layout notes:
- *  • webMethods stores tight coordinates (~120 px between nodes). The
- *    Designer's BPMN task boxes render at ~180 px, so we scale all
- *    coordinates by SCALE to give edges room to route cleanly.
- *  • Each edge picks an explicit sourceHandle / targetHandle based on
- *    the relative position of source vs target — otherwise React Flow's
- *    default mid-edge attach makes the orthogonal router bend through
- *    the node bodies.
- *  • Pools (and lanes when present) come from the BPD XML, not the
- *    relational tables. They render as parent nodes; steps chain to
- *    them via `parentId` + `extent: "parent"`.
+ *  • Coordinates come straight from the webMethods Designer (via
+ *    WMSTEPDEFINITION for nodes, BPD XML <bendpoint> for edge
+ *    waypoints, <swimlane> for pool/lane structure).
+ *  • SCALE blows the source ICON_ coords (~90 px) up to BPMN-rendered
+ *    sizes (~180 px) so adjacent nodes don't overlap.
+ *  • Each edge picks an explicit sourceHandle / targetHandle from the
+ *    BPD XML's sourceTerminal / targetTerminal so the orthogonal
+ *    router attaches to the side the designer authored.
+ *  • Swimlane bg color comes from the BPD's red/green/blue attrs
+ *    (webMethods' soft yellow #ffffcc).
  * ────────────────────────────────────────────────────────────────────── */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -35,15 +35,19 @@ import "@xyflow/react/dist/style.css";
 import { apiGet } from "../lib/api";
 import { nodeTypes } from "../components/canvas/nodes";
 import { edgeTypes } from "../components/canvas/edges";
-import { runAutoLayout } from "../lib/external-bpm-layout";
 
-/** webMethods → BPMN coordinate scale, applied in `source` mode only.
- *  webMethods stores tight ICON_ coordinates (~60-90 px sizes); the
- *  BPMN node components render at ~180 px wide, so we 2× the source
- *  coords to keep things from overlapping. In `auto` mode ELK already
- *  emits coords in standard pixel space, so we use 1×. */
-const SOURCE_SCALE = 2;
-const AUTO_SCALE = 1;
+/** webMethods → BPMN coordinate scale. 2.6× gives the BPMN-sized nodes
+ *  enough room to breathe without losing the original spatial layout. */
+const SCALE = 2.6;
+
+/** Fallback fill when a swimlane's BPD XML didn't carry a colour. Soft
+ *  alternating greys keep adjacent lanes visually distinct. */
+const FALLBACK_LANE_FILLS = ["#FAFBFC", "#F4F6F8"];
+
+/** Default colour for the lane LABEL band when the BPD didn't carry
+ *  one — slightly stronger tint than the body fill so the label stands
+ *  out against the lane background. */
+const FALLBACK_LANE_LABEL_FILL = "#E5E7EB";
 
 /** Match the Designer's edge defaults so transitions render with the
  *  same arrow style — sequence-flow filled arrowhead in slate-400.
@@ -98,6 +102,8 @@ interface ExternalContainer {
   parentId: string | null;
   /** "horizontal" = row (label on left), "vertical" = column (label on top). */
   orientation?: "horizontal" | "vertical";
+  bgColor?: string | null;
+  labelBgColor?: string | null;
 }
 
 interface ExternalGraph {
@@ -143,13 +149,6 @@ function PreviewInner() {
   const [graph, setGraph] = useState<ExternalGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Auto-layout state. `source` shows the model as authored in the
-  // webMethods Designer; `auto` runs ELK to repack the graph for
-  // readability (clean orthogonal flow, no overlaps, no empty bands).
-  // Default to "auto" because the source coords are often sparse.
-  const [layoutMode, setLayoutMode] = useState<"source" | "auto">("auto");
-  const [autoGraph, setAutoGraph] = useState<ExternalGraph | null>(null);
-  const [autoLaying, setAutoLaying] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -175,110 +174,74 @@ function PreviewInner() {
     }
   }, [load, processKey, modelVersion, deploymentVersion]);
 
-  // Whenever a new graph arrives, kick off an ELK auto-layout in the
-  // background. The result is cached so toggling between Source / Auto
-  // is instant after the first compute.
-  useEffect(() => {
-    if (!graph) {
-      setAutoGraph(null);
-      return;
-    }
-    let cancelled = false;
-    setAutoLaying(true);
-    runAutoLayout(graph.containers ?? [], graph.nodes, graph.edges)
-      .then((laid) => {
-        if (cancelled) return;
-        setAutoGraph({ ...graph, containers: laid.containers, nodes: laid.nodes });
-      })
-      .catch((err) => {
-        console.warn("Auto-layout failed:", err);
-        if (!cancelled) setAutoGraph(null);
-      })
-      .finally(() => {
-        if (!cancelled) setAutoLaying(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [graph]);
-
-  /** The graph actually rendered — auto-laid when ready and toggled on,
-   *  otherwise the original webMethods source layout. */
-  const displayGraph = useMemo(() => {
-    if (layoutMode === "auto" && autoGraph) return autoGraph;
-    return graph;
-  }, [layoutMode, autoGraph, graph]);
-
-  // Build the React Flow node list. Pools/lanes come first so they sit
-  // beneath the step nodes in the render order; React Flow uses array
-  // order for z-stacking within a parent.
   const rfNodes: Node[] = useMemo(() => {
-    if (!displayGraph) return [];
-    const containers = displayGraph.containers ?? [];
-    const scale = layoutMode === "auto" ? AUTO_SCALE : SOURCE_SCALE;
+    if (!graph) return [];
+    const containers = graph.containers ?? [];
 
     const out: Node[] = [];
 
-    // Render order matters for React Flow's z-stack: pools at the
-    // bottom, swimlanes (lanes) on top of their pool, steps on top of
-    // their swimlane/pool. parentId chains handle relative positioning.
+    // Pools at the bottom of the z-stack.
     for (const c of containers.filter((c) => c.type === "pool")) {
       out.push({
         id: c.id,
         type: "pool",
-        position: { x: c.x * scale, y: c.y * scale },
+        position: { x: c.x * SCALE, y: c.y * SCALE },
         data: {
           label: c.label ?? "Pool",
           participantName: c.label ?? "Pool",
-          width: c.width * scale,
-          height: c.height * scale,
+          width: c.width * SCALE,
+          height: c.height * SCALE,
         },
-        width: c.width * scale,
-        height: c.height * scale,
+        width: c.width * SCALE,
+        height: c.height * SCALE,
         draggable: false,
         selectable: false,
       });
     }
 
-    // Swimlanes (rendered as "lane" type) — parent is their pool.
-    // Pass isHorizontal so the LaneNode chooses left-band vs top-band
-    // label placement to match the original BPD direction.
-    for (const c of containers.filter((c) => c.type === "lane")) {
+    // Swimlanes on top of the pool, with the BPD's authored fill color
+    // (or a soft alternating fallback) so adjacent lanes read distinctly.
+    const lanes = containers.filter((c) => c.type === "lane");
+    lanes.forEach((c, i) => {
       const isHorizontal = c.orientation !== "vertical";
+      const bg = c.bgColor ?? FALLBACK_LANE_FILLS[i % FALLBACK_LANE_FILLS.length];
+      const labelBg = c.labelBgColor ?? FALLBACK_LANE_LABEL_FILL;
       out.push({
         id: c.id,
         type: "lane",
         parentId: c.parentId ?? undefined,
         extent: c.parentId ? "parent" : undefined,
-        position: { x: c.x * scale, y: c.y * scale },
+        position: { x: c.x * SCALE, y: c.y * SCALE },
         data: {
           label: c.label ?? "",
-          width: c.width * scale,
-          height: c.height * scale,
+          width: c.width * SCALE,
+          height: c.height * SCALE,
           isHorizontal,
         },
-        width: c.width * scale,
-        height: c.height * scale,
+        width: c.width * SCALE,
+        height: c.height * SCALE,
         draggable: false,
         selectable: false,
+        // Override the LaneNode's default visuals with the source colors.
+        // CSS custom properties propagate inward so the label band picks
+        // up its tint without us forking the node component.
+        style: {
+          background: bg,
+          ["--lane-label-bg" as string]: labelBg,
+        },
       });
-    }
+    });
 
-    // Steps — parentId is the most specific container (swimlane when
-    // the step's Y fell into a swimlane band, otherwise pool). Positions
-    // are already container-relative thanks to the service-side
-    // coordinate transform.
-    for (const n of displayGraph.nodes) {
+    // Steps last (z-stack top). When the step is in a swimlane, its
+    // position has already been transformed to be lane-relative.
+    for (const n of graph.nodes) {
       out.push({
         id: n.id,
         type: n.type,
         parentId: n.parentId ?? undefined,
         extent: n.parentId ? "parent" : undefined,
-        position: { x: n.x * scale, y: n.y * scale },
+        position: { x: n.x * SCALE, y: n.y * SCALE },
         data: { label: n.label ?? "" },
-        ...(layoutMode === "auto"
-          ? { width: n.width * scale, height: n.height * scale }
-          : {}),
         draggable: false,
         selectable: true,
         connectable: false,
@@ -286,18 +249,14 @@ function PreviewInner() {
     }
 
     return out;
-  }, [displayGraph, layoutMode]);
+  }, [graph]);
 
-  // Build edges with explicit handles so the BPMN sequence edge can
-  // route orthogonally without bending through node bodies.
   const rfEdges: Edge[] = useMemo(() => {
-    if (!displayGraph) return [];
-    const containers = displayGraph.containers ?? [];
-    const scale = layoutMode === "auto" ? AUTO_SCALE : SOURCE_SCALE;
+    if (!graph) return [];
+    const containers = graph.containers ?? [];
 
-    // Precompute each step's absolute (canvas-space) centre. Walk the
-    // parent chain so a step nested as step → swimlane → pool gets all
-    // three offsets summed.
+    // Walk the parent chain so a step nested step → swimlane → pool
+    // gets all three absolute offsets summed for centre computation.
     const containerById = new Map(containers.map((c) => [c.id, c]));
     function absoluteOrigin(parentId: string | null): { x: number; y: number } {
       let x = 0;
@@ -306,27 +265,26 @@ function PreviewInner() {
       while (cur) {
         const c = containerById.get(cur);
         if (!c) break;
-        x += c.x * scale;
-        y += c.y * scale;
+        x += c.x * SCALE;
+        y += c.y * SCALE;
         cur = c.parentId;
       }
       return { x, y };
     }
     const stepCenter = new Map<string, { x: number; y: number }>();
-    for (const n of displayGraph.nodes) {
+    for (const n of graph.nodes) {
       const origin = absoluteOrigin(n.parentId);
-      const baseX = origin.x + n.x * scale;
-      const baseY = origin.y + n.y * scale;
+      const baseX = origin.x + n.x * SCALE;
+      const baseY = origin.y + n.y * SCALE;
       stepCenter.set(n.id, {
-        x: baseX + (n.width * scale) / 2,
-        y: baseY + (n.height * scale) / 2,
+        x: baseX + (n.width * SCALE) / 2,
+        y: baseY + (n.height * SCALE) / 2,
       });
     }
 
-    return displayGraph.edges.map((e) => {
-      // Prefer the API-provided handles (derived from the BPD XML's
-      // sourceTerminal/targetTerminal — what the original Designer
-      // actually authored). Fall back to geometry if the XML omitted them.
+    return graph.edges.map((e) => {
+      // Prefer API-supplied handles (BPD terminal hints); fall back to
+      // a geometric guess when the XML omitted them.
       let sourceHandle = e.sourceHandle;
       let targetHandle = e.targetHandle;
       if (!sourceHandle || !targetHandle) {
@@ -339,14 +297,9 @@ function PreviewInner() {
         sourceHandle ??= guess.sourceHandle;
         targetHandle ??= guess.targetHandle;
       }
-      // Waypoints are only meaningful in Source mode — they're the
-      // designer's manual bendpoints in the ORIGINAL coordinate system.
-      // Auto mode rearranges nodes via ELK, so those bendpoints would
-      // land in the wrong places; ELK does its own orthogonal routing.
-      const scaledWaypoints =
-        layoutMode === "source" && e.waypoints?.length
-          ? e.waypoints.map((p) => ({ x: p.x * scale, y: p.y * scale }))
-          : [];
+      const scaledWaypoints = e.waypoints?.length
+        ? e.waypoints.map((p) => ({ x: p.x * SCALE, y: p.y * SCALE }))
+        : [];
       return {
         id: e.id,
         source: e.source,
@@ -358,14 +311,12 @@ function PreviewInner() {
         style: e.conditional ? { strokeDasharray: "5 4" } : undefined,
         data: {
           isConditional: e.conditional,
-          // The Designer's BpmnSequenceEdge reads data.waypoints and
-          // renders the edge through them in order.
           waypoints: scaledWaypoints,
           conditionText: e.conditionText,
         },
       };
     });
-  }, [displayGraph, layoutMode]);
+  }, [graph]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -392,57 +343,16 @@ function PreviewInner() {
                 {(graph.containers ?? []).filter((c) => c.type === "pool").length === 1 ? "" : "s"}
               </span>
               <span>·</span>
+              <span>
+                {(graph.containers ?? []).filter((c) => c.type === "lane").length}{" "}
+                swimlanes
+              </span>
+              <span>·</span>
               <span>{graph.nodes.length} nodes</span>
               <span>·</span>
               <span>{graph.edges.length} edges</span>
             </>
           )}
-          {/* Layout toggle. Default to Auto; user can flip to Source to
-              see the model exactly as authored in webMethods Designer. */}
-          <div className="flex items-center bg-slate-100 rounded-md p-0.5 ml-3">
-            <button
-              type="button"
-              onClick={() => setLayoutMode("source")}
-              className={
-                "px-2.5 py-1 text-xs rounded font-medium transition-colors " +
-                (layoutMode === "source"
-                  ? "bg-white text-slate-700 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700")
-              }
-              title="Show the layout exactly as it was authored in webMethods Designer"
-            >
-              Source
-            </button>
-            <button
-              type="button"
-              onClick={() => setLayoutMode("auto")}
-              disabled={!autoGraph && !autoLaying}
-              className={
-                "px-2.5 py-1 text-xs rounded font-medium transition-colors flex items-center gap-1 " +
-                (layoutMode === "auto"
-                  ? "bg-white text-indigo-600 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700")
-              }
-              title="Re-arrange the graph for clean reading (ELK layered, orthogonal)"
-            >
-              <svg
-                width="11"
-                height="11"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polygon points="3 11 22 2 13 21 11 13 3 11" />
-              </svg>
-              Auto
-              {autoLaying && layoutMode === "auto" && (
-                <span className="text-[10px] opacity-70">…</span>
-              )}
-            </button>
-          </div>
         </div>
       </header>
 
@@ -459,10 +369,6 @@ function PreviewInner() {
         )}
         {!loading && !error && graph && (
           <ReactFlow
-            // Re-keying on layoutMode forces React Flow to rebuild and
-            // re-fit when the user toggles between Source / Auto, so the
-            // viewport always frames the new graph cleanly.
-            key={layoutMode}
             nodes={rfNodes}
             edges={rfEdges}
             nodeTypes={nodeTypes}
@@ -472,9 +378,12 @@ function PreviewInner() {
             elementsSelectable
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
             fitView
-            fitViewOptions={{ padding: 0.08 }}
-            minZoom={0.1}
-            maxZoom={2}
+            // Cap the zoom-out: for big multi-swimlane diagrams fitView
+            // would otherwise shrink everything to unreadable size.
+            // 0.4 keeps labels legible while still giving an overview.
+            fitViewOptions={{ padding: 0.08, minZoom: 0.4 }}
+            minZoom={0.2}
+            maxZoom={2.5}
             panOnDrag
             panOnScroll
             zoomOnScroll={false}
