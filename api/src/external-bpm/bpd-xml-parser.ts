@@ -100,9 +100,13 @@ const parser = new XMLParser({
   allowBooleanAttributes: true,
   // Preserve every element even when only one occurrence — saves us a
   // pile of "is it an array?" branches downstream.
+  //
+  // NOTE the element name is <swimlane>, NOT <lane>. webMethods uses
+  // "swimlane" in its BPD vocabulary; we keep "lane" in our internal
+  // types because that's the BPMN-standard term.
   isArray: (name) =>
     name === 'pool' ||
-    name === 'lane' ||
+    name === 'swimlane' ||
     name === 'transition' ||
     name === 'bendpoint' ||
     (STEP_ELEMENT_NAMES as readonly string[]).includes(name),
@@ -223,8 +227,8 @@ function collectTransitions(
     });
   }
   // Recurse into nested lanes (and any other container element).
-  const lanes = (container['lane'] ?? []) as Array<Record<string, unknown>>;
-  for (const l of lanes) collectTransitions(l, acc);
+  const swimlanes = (container['swimlane'] ?? []) as Array<Record<string, unknown>>;
+  for (const l of swimlanes) collectTransitions(l, acc);
 }
 
 /** Parse a BPD XML blob and pull out the container structure.
@@ -269,49 +273,63 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
     const poolLabel = (poolEl['@label'] ?? poolEl['@name'] ?? null) as string | null;
     const poolSteps = stepChildren(poolEl);
 
-    // Collect lanes inside this pool
-    const laneEls = (poolEl['lane'] ?? []) as Array<Record<string, unknown>>;
+    // Collect <swimlane> elements — the BPMN "lanes" in webMethods'
+    // vocabulary. They are direct pool children with explicit width/
+    // height. They stack vertically in document order; steps are NOT
+    // nested inside them in the XML — instead each step's Y position
+    // determines which swimlane band it visually belongs to.
+    const swimlaneEls = (poolEl['swimlane'] ?? []) as Array<Record<string, unknown>>;
     const laneRecords: BpdLane[] = [];
-    const laneChildBboxes: Array<{ x: number; y: number; w: number; h: number }> = [];
+    let swimlaneY = 0;
 
-    for (const laneEl of laneEls) {
-      const laneUid = typeof laneEl['@uid'] === 'string' ? laneEl['@uid'] : null;
-      if (!laneUid) continue;
-      const laneLabel = (laneEl['@label'] ?? laneEl['@name'] ?? null) as string | null;
-      const laneSteps = stepChildren(laneEl);
-      for (const s of laneSteps) {
-        stepToLane.set(s.uid, laneUid);
-        stepToPool.set(s.uid, poolUid);
-      }
-      const laneBbox = computeBbox(laneSteps, 30, 20);
-      const laneX = num(laneEl['@x'], 0);
-      const laneY = num(laneEl['@y'], 0);
-      const laneW = num(laneEl['@width'], laneBbox.width);
-      const laneH = num(laneEl['@height'], laneBbox.height);
+    for (const swEl of swimlaneEls) {
+      const swUid = typeof swEl['@uid'] === 'string' ? swEl['@uid'] : null;
+      if (!swUid) continue;
+      const swLabel = (swEl['@label'] ?? swEl['@name'] ?? null) as string | null;
+      // webMethods writes explicit width + height on every swimlane.
+      // Fall back to a reasonable default if a malformed model omits them.
+      const swW = num(swEl['@width'], 800);
+      const swH = num(swEl['@height'], 150);
       laneRecords.push({
-        id: laneUid,
+        id: swUid,
         poolId: poolUid,
-        label: laneLabel,
-        x: laneX,
-        y: laneY,
-        width: laneW,
-        height: laneH,
+        label: swLabel,
+        x: 0,
+        y: swimlaneY,
+        width: swW,
+        height: swH,
       });
-      laneChildBboxes.push({ x: laneX, y: laneY, w: laneW, h: laneH });
+      swimlaneY += swH;
     }
 
-    // Steps living directly under the pool (no lane wrapper)
+    // All steps under the pool are direct children. Assign each to a
+    // swimlane by checking which Y-band it falls in. Falls back to
+    // pool membership only if no swimlane contains its Y.
     for (const s of poolSteps) {
       stepToPool.set(s.uid, poolUid);
+      for (const sw of laneRecords) {
+        if (s.y >= sw.y && s.y < sw.y + sw.height) {
+          stepToLane.set(s.uid, sw.id);
+          break;
+        }
+      }
     }
 
-    // Pool dimensions: prefer XML, fall back to bbox of (lanes + direct steps)
-    const containedForBbox = [...laneChildBboxes, ...poolSteps];
-    const bbox = computeBbox(containedForBbox);
+    // Pool dimensions: prefer XML; fall back to (sum of swimlane heights)
+    // for height and (max swimlane width OR step bbox) for width.
+    const stepBbox = computeBbox(poolSteps);
+    const swimlanesTotalHeight = laneRecords.reduce((s, l) => s + l.height, 0);
+    const swimlanesMaxWidth = laneRecords.reduce((s, l) => Math.max(s, l.width), 0);
     const poolX = num(poolEl['@x'], 0);
     const poolY = num(poolEl['@y'], poolStackY);
-    const poolW = num(poolEl['@width'], bbox.width);
-    const poolH = num(poolEl['@height'], bbox.height);
+    const poolW = num(
+      poolEl['@width'],
+      Math.max(swimlanesMaxWidth, stepBbox.width),
+    );
+    const poolH = num(
+      poolEl['@height'],
+      swimlanesTotalHeight > 0 ? swimlanesTotalHeight : stepBbox.height,
+    );
 
     pools.push({
       id: poolUid,

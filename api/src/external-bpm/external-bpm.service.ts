@@ -260,24 +260,35 @@ export class ExternalBpmService implements OnModuleDestroy {
     const incoming = new Set<string>();
     for (const t of txRes.recordset) incoming.add(t.TARGETSTEPID);
 
+    // Lane lookup by uid — used to translate WMSTEPDEFINITION's
+    // pool-relative step coords into swimlane-relative coords when a
+    // step lives inside a swimlane (so React Flow's parent chain
+    // renders it at the right spot inside the swimlane band).
+    const lanesById = new Map<string, (typeof containerMap.lanes)[number]>();
+    for (const l of containerMap.lanes) lanesById.set(l.id, l);
+
     const nodes: ExternalBpmNode[] = stepsRes.recordset.map((s) => {
       const mappedType = mapWmTypeToBpmn(s.TYPE);
       const isImplicitStart = !incoming.has(s.STEPID) && mappedType !== 'endEvent';
-      // Prefer lane membership over pool membership — a step's most
-      // specific container is its lane (which itself nests inside the pool).
+      // Prefer swimlane membership; fall back to pool only when the
+      // step's Y didn't land in any swimlane band.
+      const swimlaneId = containerMap.stepToLane.get(s.STEPID);
       const parentId =
-        containerMap.stepToLane.get(s.STEPID) ??
-        containerMap.stepToPool.get(s.STEPID) ??
-        null;
+        swimlaneId ?? containerMap.stepToPool.get(s.STEPID) ?? null;
+      const rawX = s.ICON_X ?? 0;
+      const rawY = s.ICON_Y ?? 0;
+      // If parented to a swimlane, the step's stored Y is pool-relative
+      // and we need to subtract the swimlane's pool-relative Y to make
+      // it swimlane-relative (React Flow parent-child semantics).
+      const sw = swimlaneId ? lanesById.get(swimlaneId) : null;
+      const x = rawX;
+      const y = sw ? rawY - sw.y : rawY;
       return {
         id: s.STEPID,
         type: isImplicitStart ? 'startEvent' : mappedType,
         label: s.STEPLABEL,
-        // Coordinates from WMSTEPDEFINITION are pool-/lane-relative when
-        // the step has a container, or canvas-absolute when it doesn't.
-        // The frontend handles the two cases via the parentId chain.
-        x: s.ICON_X ?? 0,
-        y: s.ICON_Y ?? 0,
+        x,
+        y,
         width: s.ICON_WIDTH ?? 60,
         height: s.ICON_HEIGHT ?? 60,
         parentId,

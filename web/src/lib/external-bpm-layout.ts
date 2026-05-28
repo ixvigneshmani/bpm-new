@@ -81,92 +81,95 @@ function standardSizeFor(type: string): { width: number; height: number } {
   return { width: STANDARD_TASK_WIDTH, height: STANDARD_TASK_HEIGHT };
 }
 
+/** ELK layout options shared by every container. */
+function elkLayoutOptions(leftPad: number) {
+  return {
+    "elk.algorithm": "layered",
+    "elk.direction": "RIGHT",
+    "elk.layered.spacing.nodeNodeBetweenLayers": "100",
+    "elk.spacing.nodeNode": "70",
+    "elk.layered.spacing.edgeNodeBetweenLayers": "40",
+    "elk.spacing.edgeNode": "30",
+    "elk.spacing.edgeEdge": "20",
+    "elk.edgeRouting": "ORTHOGONAL",
+    "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+    "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
+    "elk.padding": `[top=${POOL_PADDING_Y},left=${leftPad},bottom=${POOL_PADDING_Y},right=${POOL_PADDING_X}]`,
+  };
+}
+
 export async function runAutoLayout(
   containers: LayoutContainer[],
   nodes: LayoutNode[],
   edges: LayoutEdge[],
 ): Promise<{ nodes: LayoutNode[]; containers: LayoutContainer[] }> {
   const pools = containers.filter((c) => c.type === "pool");
-
-  // Group nodes by their containing pool (resolving lane→pool if needed).
-  const poolOfNode = new Map<string, string | null>();
-  for (const n of nodes) {
-    if (!n.parentId) {
-      poolOfNode.set(n.id, null);
-      continue;
-    }
-    const direct = containers.find((c) => c.id === n.parentId);
-    if (direct?.type === "pool") poolOfNode.set(n.id, direct.id);
-    else if (direct?.type === "lane") poolOfNode.set(n.id, direct.parentId);
-    else poolOfNode.set(n.id, null);
+  const swimlanesByPool = new Map<string, LayoutContainer[]>();
+  for (const c of containers) {
+    if (c.type !== "lane" || !c.parentId) continue;
+    const arr = swimlanesByPool.get(c.parentId) ?? [];
+    arr.push(c);
+    swimlanesByPool.set(c.parentId, arr);
   }
 
-  // Defensive orphan inference: any node missing a pool gets adopted by
-  // the pool of its most common neighbour. This catches steps whose
-  // container info was missing from the BPD XML (e.g. terminate / error
-  // events authored at diagram root). Without this they'd render at raw
-  // webMethods coords outside any pool, which looks broken and confuses
-  // the per-pool layout. Iterate until stable (orphans can chain).
+  // For every step, identify its leaf container (swimlane > pool > null).
+  // Cross-container edges are dropped from the per-container ELK input;
+  // they re-emerge as React Flow edges using their original endpoints.
+  const leafOfNode = new Map<string, string | null>();
+  for (const n of nodes) {
+    leafOfNode.set(n.id, n.parentId ?? null);
+  }
+
+  // Orphan inference — same as before, but now uses leaf container, not pool.
   for (let pass = 0; pass < 5; pass++) {
     let changed = false;
     for (const n of nodes) {
-      if (poolOfNode.get(n.id)) continue;
+      if (leafOfNode.get(n.id)) continue;
       const tally = new Map<string, number>();
       for (const e of edges) {
         const peer = e.source === n.id ? e.target : e.target === n.id ? e.source : null;
         if (!peer) continue;
-        const peerPool = poolOfNode.get(peer);
-        if (peerPool) tally.set(peerPool, (tally.get(peerPool) ?? 0) + 1);
+        const peerLeaf = leafOfNode.get(peer);
+        if (peerLeaf) tally.set(peerLeaf, (tally.get(peerLeaf) ?? 0) + 1);
       }
       if (tally.size === 0) continue;
       const winner = [...tally.entries()].sort((a, b) => b[1] - a[1])[0][0];
-      poolOfNode.set(n.id, winner);
+      leafOfNode.set(n.id, winner);
       changed = true;
     }
     if (!changed) break;
   }
 
-  // Pre-built map of edges within each pool. Cross-pool edges are
-  // skipped — they don't influence the per-pool layout.
-  const edgesByPool = new Map<string, LayoutEdge[]>();
+  // Edges within each leaf container (used by ELK per-container).
+  const edgesByLeaf = new Map<string, LayoutEdge[]>();
   for (const e of edges) {
-    const srcPool = poolOfNode.get(e.source);
-    const tgtPool = poolOfNode.get(e.target);
-    if (srcPool && srcPool === tgtPool) {
-      const arr = edgesByPool.get(srcPool) ?? [];
+    const srcLeaf = leafOfNode.get(e.source);
+    const tgtLeaf = leafOfNode.get(e.target);
+    if (srcLeaf && srcLeaf === tgtLeaf) {
+      const arr = edgesByLeaf.get(srcLeaf) ?? [];
       arr.push(e);
-      edgesByPool.set(srcPool, arr);
+      edgesByLeaf.set(srcLeaf, arr);
     }
   }
 
   const newNodes: LayoutNode[] = [];
   const newContainers: LayoutContainer[] = [];
-  let stackY = 0;
+  let poolStackY = 0;
 
-  for (const pool of pools) {
-    const childNodes = nodes.filter((n) => poolOfNode.get(n.id) === pool.id);
-    const childEdges = edgesByPool.get(pool.id) ?? [];
-
-    // Hand ELK an idealised graph: standard BPM dimensions for each
-    // shape, layered algorithm, left-to-right reading direction,
-    // orthogonal edges.
+  /** Run ELK on a single leaf container and yield laid-out child nodes
+   *  plus the natural (width, height) the algorithm chose. */
+  async function layoutLeaf(
+    leafId: string,
+    leftPad: number,
+  ): Promise<{ width: number; height: number; placed: LayoutNode[] }> {
+    const childNodes = nodes.filter((n) => leafOfNode.get(n.id) === leafId);
+    const childEdges = edgesByLeaf.get(leafId) ?? [];
+    if (childNodes.length === 0) {
+      return { width: 400, height: 150, placed: [] };
+    }
     const elkGraph = {
-      id: pool.id,
-      layoutOptions: {
-        "elk.algorithm": "layered",
-        "elk.direction": "RIGHT",
-        // Generous spacing — webMethods diagrams use long task labels
-        // that wrap, so tight spacing makes adjacent rows touch.
-        "elk.layered.spacing.nodeNodeBetweenLayers": "100",
-        "elk.spacing.nodeNode": "70",
-        "elk.layered.spacing.edgeNodeBetweenLayers": "40",
-        "elk.spacing.edgeNode": "30",
-        "elk.spacing.edgeEdge": "20",
-        "elk.edgeRouting": "ORTHOGONAL",
-        "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-        "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
-        "elk.padding": `[top=${POOL_PADDING_Y},left=${POOL_LABEL_BAND + POOL_PADDING_X},bottom=${POOL_PADDING_Y},right=${POOL_PADDING_X}]`,
-      },
+      id: leafId,
+      layoutOptions: elkLayoutOptions(leftPad),
       children: childNodes.map((n) => {
         const std = standardSizeFor(n.type);
         return { id: n.id, width: std.width, height: std.height };
@@ -177,55 +180,89 @@ export async function runAutoLayout(
         targets: [e.target],
       })),
     };
-
-    let laid: Awaited<ReturnType<typeof elk.layout>>;
     try {
-      laid = await elk.layout(elkGraph);
+      const laid = (await elk.layout(elkGraph)) as {
+        width?: number;
+        height?: number;
+        children?: Array<{ id: string; x?: number; y?: number }>;
+      };
+      const placed: LayoutNode[] = [];
+      for (const child of laid.children ?? []) {
+        const original = childNodes.find((n) => n.id === child.id);
+        if (!original) continue;
+        const std = standardSizeFor(original.type);
+        placed.push({
+          ...original,
+          x: child.x ?? 0,
+          y: child.y ?? 0,
+          width: std.width,
+          height: std.height,
+        });
+      }
+      return {
+        width: Math.max(laid.width ?? 0, 400),
+        height: Math.max(laid.height ?? 0, 150),
+        placed,
+      };
     } catch (err) {
-      console.warn(`ELK layout failed for pool ${pool.id}:`, err);
-      // Fall back to source positions on failure.
-      newContainers.push({ ...pool, y: stackY });
-      stackY += pool.height + POOL_GAP;
-      for (const n of childNodes) newNodes.push(n);
-      continue;
+      console.warn(`ELK layout failed for ${leafId}:`, err);
+      return { width: 400, height: 150, placed: childNodes };
     }
-
-    const poolW = Math.max(laid.width ?? 0, 400);
-    const poolH = Math.max(laid.height ?? 0, 200);
-
-    newContainers.push({
-      ...pool,
-      x: 0,
-      y: stackY,
-      width: poolW,
-      height: poolH,
-    });
-
-    for (const child of laid.children ?? []) {
-      const original = childNodes.find((n) => n.id === child.id);
-      if (!original) continue;
-      const std = standardSizeFor(original.type);
-      newNodes.push({
-        ...original,
-        x: child.x ?? 0,
-        y: child.y ?? 0,
-        width: std.width,
-        height: std.height,
-      });
-    }
-
-    stackY += poolH + POOL_GAP;
   }
 
-  // Carry forward any node that didn't fit into a pool (rare — usually
-  // means the BPD XML didn't have container info for that step) and any
-  // lane containers (visual only, untouched by layout).
+  for (const pool of pools) {
+    const swimlanes = swimlanesByPool.get(pool.id) ?? [];
+    if (swimlanes.length > 0) {
+      // Pool has swimlanes — lay out each swimlane independently,
+      // stack them vertically inside the pool, then resize the pool
+      // to enclose them all.
+      let laneStackY = 0;
+      let maxLaneWidth = 0;
+      for (const sw of swimlanes) {
+        const laid = await layoutLeaf(sw.id, POOL_LABEL_BAND + 24);
+        newContainers.push({
+          ...sw,
+          x: 0,
+          y: laneStackY,
+          width: laid.width,
+          height: laid.height,
+        });
+        for (const p of laid.placed) newNodes.push(p);
+        laneStackY += laid.height;
+        if (laid.width > maxLaneWidth) maxLaneWidth = laid.width;
+      }
+      newContainers.push({
+        ...pool,
+        x: 0,
+        y: poolStackY,
+        width: maxLaneWidth,
+        height: laneStackY,
+      });
+      poolStackY += laneStackY + POOL_GAP;
+    } else {
+      // Pool has no swimlanes — single ELK pass over the pool itself.
+      const laid = await layoutLeaf(pool.id, POOL_LABEL_BAND + POOL_PADDING_X);
+      newContainers.push({
+        ...pool,
+        x: 0,
+        y: poolStackY,
+        width: laid.width,
+        height: laid.height,
+      });
+      for (const p of laid.placed) newNodes.push(p);
+      poolStackY += laid.height + POOL_GAP;
+    }
+  }
+
+  // Carry forward any nodes / swimlanes we didn't end up laying out
+  // (e.g. orphan node with no neighbours to infer membership from).
   const placedIds = new Set(newNodes.map((n) => n.id));
   for (const n of nodes) {
     if (!placedIds.has(n.id)) newNodes.push(n);
   }
+  const placedContainerIds = new Set(newContainers.map((c) => c.id));
   for (const c of containers) {
-    if (c.type !== "pool") newContainers.push(c);
+    if (!placedContainerIds.has(c.id)) newContainers.push(c);
   }
 
   return { nodes: newNodes, containers: newContainers };

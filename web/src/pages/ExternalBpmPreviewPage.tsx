@@ -215,24 +215,11 @@ function PreviewInner() {
     const containers = displayGraph.containers ?? [];
     const scale = layoutMode === "auto" ? AUTO_SCALE : SOURCE_SCALE;
 
-    // Step → which pool it belongs to (one level up only; lanes are
-    // visual-only in v1 so steps parent directly to the pool, not the
-    // lane — keeps coordinate math simple since WMSTEPDEFINITION
-    // positions are pool-relative).
-    const stepPoolMap = new Map<string, string>();
-    for (const n of displayGraph.nodes) {
-      if (n.parentId) {
-        // The parentId might be a lane uid; resolve up to the pool.
-        const lane = containers.find(
-          (c) => c.type === "lane" && c.id === n.parentId,
-        );
-        stepPoolMap.set(n.id, lane?.parentId ?? n.parentId);
-      }
-    }
-
     const out: Node[] = [];
 
-    // Pools first
+    // Render order matters for React Flow's z-stack: pools at the
+    // bottom, swimlanes (lanes) on top of their pool, steps on top of
+    // their swimlane/pool. parentId chains handle relative positioning.
     for (const c of containers.filter((c) => c.type === "pool")) {
       out.push({
         id: c.id,
@@ -251,7 +238,7 @@ function PreviewInner() {
       });
     }
 
-    // Lanes next (children of pools)
+    // Swimlanes (rendered as "lane" type) — parent is their pool.
     for (const c of containers.filter((c) => c.type === "lane")) {
       out.push({
         id: c.id,
@@ -271,18 +258,16 @@ function PreviewInner() {
       });
     }
 
-    // Steps last (chained to their pool for parent positioning). When
-    // auto-layout is on we MUST pass width/height through to React Flow
-    // so its bbox matches ELK's reserved space — otherwise RF measures
-    // the rendered DOM (which can differ from ELK's hint), and adjacent
-    // nodes appear to overlap.
+    // Steps — parentId is the most specific container (swimlane when
+    // the step's Y fell into a swimlane band, otherwise pool). Positions
+    // are already container-relative thanks to the service-side
+    // coordinate transform.
     for (const n of displayGraph.nodes) {
-      const poolId = stepPoolMap.get(n.id);
       out.push({
         id: n.id,
         type: n.type,
-        parentId: poolId,
-        extent: poolId ? "parent" : undefined,
+        parentId: n.parentId ?? undefined,
+        extent: n.parentId ? "parent" : undefined,
         position: { x: n.x * scale, y: n.y * scale },
         data: { label: n.label ?? "" },
         ...(layoutMode === "auto"
@@ -304,24 +289,28 @@ function PreviewInner() {
     const containers = displayGraph.containers ?? [];
     const scale = layoutMode === "auto" ? AUTO_SCALE : SOURCE_SCALE;
 
-    // Precompute each step's absolute centre on the canvas so we can
-    // compare source vs target direction.
-    const poolOffset = new Map<string, { x: number; y: number }>();
-    for (const c of containers.filter((c) => c.type === "pool")) {
-      poolOffset.set(c.id, { x: c.x * scale, y: c.y * scale });
+    // Precompute each step's absolute (canvas-space) centre. Walk the
+    // parent chain so a step nested as step → swimlane → pool gets all
+    // three offsets summed.
+    const containerById = new Map(containers.map((c) => [c.id, c]));
+    function absoluteOrigin(parentId: string | null): { x: number; y: number } {
+      let x = 0;
+      let y = 0;
+      let cur = parentId;
+      while (cur) {
+        const c = containerById.get(cur);
+        if (!c) break;
+        x += c.x * scale;
+        y += c.y * scale;
+        cur = c.parentId;
+      }
+      return { x, y };
     }
     const stepCenter = new Map<string, { x: number; y: number }>();
     for (const n of displayGraph.nodes) {
-      const parentPool = (() => {
-        if (!n.parentId) return null;
-        const direct = containers.find((c) => c.id === n.parentId);
-        if (direct?.type === "pool") return direct.id;
-        if (direct?.type === "lane") return direct.parentId;
-        return null;
-      })();
-      const offset = parentPool ? poolOffset.get(parentPool) : null;
-      const baseX = (offset?.x ?? 0) + n.x * scale;
-      const baseY = (offset?.y ?? 0) + n.y * scale;
+      const origin = absoluteOrigin(n.parentId);
+      const baseX = origin.x + n.x * scale;
+      const baseY = origin.y + n.y * scale;
       stepCenter.set(n.id, {
         x: baseX + (n.width * scale) / 2,
         y: baseY + (n.height * scale) / 2,
