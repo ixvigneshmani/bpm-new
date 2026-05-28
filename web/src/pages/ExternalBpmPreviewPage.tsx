@@ -411,33 +411,52 @@ function PreviewInner() {
         .external-bpm-canvas .react-flow__node-receiveTask > div,
         .external-bpm-canvas .react-flow__node-manualTask > div,
         .external-bpm-canvas .react-flow__node-callActivity > div,
-        .external-bpm-canvas .react-flow__node-subProcess > div {
-          width: 100% !important;
-          height: 100% !important;
-          min-width: 0 !important;
-          min-height: 0 !important;
-          font-size: 15px !important;
-          line-height: 1.25 !important;
-        }
+        .external-bpm-canvas .react-flow__node-subProcess > div,
         .external-bpm-canvas .react-flow__node-exclusiveGateway > div,
         .external-bpm-canvas .react-flow__node-parallelGateway > div,
         .external-bpm-canvas .react-flow__node-inclusiveGateway > div,
-        .external-bpm-canvas .react-flow__node-eventBasedGateway > div {
-          width: 100% !important;
-          height: 100% !important;
-          font-size: 13px !important;
-        }
+        .external-bpm-canvas .react-flow__node-eventBasedGateway > div,
         .external-bpm-canvas .react-flow__node-startEvent > div,
         .external-bpm-canvas .react-flow__node-endEvent > div,
         .external-bpm-canvas .react-flow__node-intermediateCatchEvent > div,
         .external-bpm-canvas .react-flow__node-intermediateThrowEvent > div {
           width: 100% !important;
           height: 100% !important;
-          font-size: 13px !important;
+          min-width: 0 !important;
+          min-height: 0 !important;
         }
-        /* Edge labels (condition text) — bump from default 11. */
-        .external-bpm-canvas .react-flow__edge-textwrapper {
-          font-size: 12px;
+
+        /* Make ALL text inside step nodes bigger. The Designer's BPMN
+           components render labels in deeply nested spans/divs, so we
+           use a universal selector with !important to win against
+           their own font-size declarations. Use big numbers (18 / 20
+           px) so the text stays legible even when fitView zooms out
+           to 0.3-0.5 on wide diagrams. */
+        .external-bpm-canvas .react-flow__node:not(.react-flow__node-pool):not(.react-flow__node-lane) * {
+          font-size: 18px !important;
+          line-height: 1.2 !important;
+        }
+        .external-bpm-canvas .react-flow__node-exclusiveGateway *,
+        .external-bpm-canvas .react-flow__node-parallelGateway *,
+        .external-bpm-canvas .react-flow__node-inclusiveGateway *,
+        .external-bpm-canvas .react-flow__node-eventBasedGateway *,
+        .external-bpm-canvas .react-flow__node-startEvent *,
+        .external-bpm-canvas .react-flow__node-endEvent *,
+        .external-bpm-canvas .react-flow__node-intermediateCatchEvent *,
+        .external-bpm-canvas .react-flow__node-intermediateThrowEvent * {
+          font-size: 16px !important;
+        }
+
+        /* Lane labels (vertical text on swimlane bands). */
+        .external-bpm-canvas .react-flow__node-lane * {
+          font-size: 18px !important;
+        }
+
+        /* Edge labels (condition text). */
+        .external-bpm-canvas .react-flow__edge-textwrapper,
+        .external-bpm-canvas .react-flow__edge-text {
+          font-size: 16px !important;
+          font-weight: 500;
         }
       `}</style>
 
