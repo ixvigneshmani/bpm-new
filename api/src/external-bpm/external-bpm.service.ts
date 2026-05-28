@@ -78,6 +78,13 @@ export interface ExternalBpmEdge {
   targetHandle: string | null;
   conditional: boolean;
   label: string | null;
+  /** Designer-authored bend points in canvas-absolute coordinates, in
+   *  source order. Empty when the edge was drawn straight. The frontend
+   *  scales these and feeds them to BpmnSequenceEdge.data.waypoints so
+   *  edges follow the exact path the modeller drew. */
+  waypoints: Array<{ x: number; y: number }>;
+  /** Condition expression on the transition, e.g. "doc/action == 'APPROVED'". */
+  conditionText: string | null;
 }
 
 export interface ExternalBpmGraph {
@@ -277,29 +284,59 @@ export class ExternalBpmService implements OnModuleDestroy {
       };
     });
 
-    // Look up the BPD XML's per-edge terminal hints (which side of each
-    // node the original Designer attached the transition to). When
-    // present these produce dramatically cleaner orthogonal routing.
-    const terminalLookup = new Map<string, { sourceTerminal: string | null; targetTerminal: string | null }>();
-    for (const tt of containerMap.transitionTerminals) {
-      terminalLookup.set(`${tt.source}->${tt.target}`, {
-        sourceTerminal: tt.sourceTerminal,
-        targetTerminal: tt.targetTerminal,
+    // Look up the BPD XML's per-edge metadata: which side of each node
+    // the transition attaches to (terminals), the bendpoints the
+    // designer drew, and the condition expression. Without bendpoints
+    // the orthogonal router takes shortest-path lines that cut through
+    // other nodes. webMethods stores ~2 bendpoints per edge on average
+    // for non-trivial models.
+    //
+    // Some transitions in WMSTEPTRANSITIONDEFINITION have multiple
+    // rows for the same (source,target) pair (parallel flows). We
+    // build a per-pair queue so each DB row pulls a distinct XML entry.
+    const metaQueues = new Map<string, ExternalBpmEdge['waypoints'][]>();
+    const metaTerminalsQueues = new Map<
+      string,
+      Array<{
+        sourceTerminal: string | null;
+        targetTerminal: string | null;
+        conditionText: string | null;
+      }>
+    >();
+    for (const tm of containerMap.transitionMeta) {
+      const key = `${tm.source}->${tm.target}`;
+      if (!metaQueues.has(key)) metaQueues.set(key, []);
+      metaQueues.get(key)!.push(tm.waypoints);
+      if (!metaTerminalsQueues.has(key)) metaTerminalsQueues.set(key, []);
+      metaTerminalsQueues.get(key)!.push({
+        sourceTerminal: tm.sourceTerminal,
+        targetTerminal: tm.targetTerminal,
+        conditionText: tm.conditionText,
       });
     }
 
     const edges: ExternalBpmEdge[] = txRes.recordset.map((t, i) => {
-      const hint = terminalLookup.get(`${t.SOURCESTEPID}->${t.TARGETSTEPID}`);
+      const key = `${t.SOURCESTEPID}->${t.TARGETSTEPID}`;
+      const waypoints = metaQueues.get(key)?.shift() ?? [];
+      const term = metaTerminalsQueues.get(key)?.shift() ?? {
+        sourceTerminal: null,
+        targetTerminal: null,
+        conditionText: null,
+      };
       return {
         // SOURCESTEPID + TARGETSTEPID is not always unique on its own (parallel
         // edges happen), so include the row index to keep React Flow happy.
         id: `${t.SOURCESTEPID}__${t.TARGETSTEPID}__${i}`,
         source: t.SOURCESTEPID,
         target: t.TARGETSTEPID,
-        sourceHandle: terminalToHandle('source', hint?.sourceTerminal ?? null),
-        targetHandle: terminalToHandle('target', hint?.targetTerminal ?? null),
+        sourceHandle: terminalToHandle('source', term.sourceTerminal),
+        targetHandle: terminalToHandle('target', term.targetTerminal),
         conditional: t.TYPE === 0 && t.VISUALTYPE === 2,
-        label: t.LABEL,
+        // Show the designer's condition expression when present, else
+        // fall back to the relational LABEL column.
+        label: term.conditionText ?? t.LABEL,
+        waypoints,
+        conditionText: term.conditionText,
       };
     });
 

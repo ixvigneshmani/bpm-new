@@ -81,6 +81,10 @@ interface ExternalEdge {
   targetHandle: string | null;
   conditional: boolean;
   label: string | null;
+  /** Designer-authored bendpoints from the BPD XML, in canvas-absolute
+   *  coordinates. Empty when the edge was drawn straight. */
+  waypoints: Array<{ x: number; y: number }>;
+  conditionText: string | null;
 }
 
 interface ExternalContainer {
@@ -340,6 +344,14 @@ function PreviewInner() {
         sourceHandle ??= guess.sourceHandle;
         targetHandle ??= guess.targetHandle;
       }
+      // Waypoints are only meaningful in Source mode — they're the
+      // designer's manual bendpoints in the ORIGINAL coordinate system.
+      // Auto mode rearranges nodes via ELK, so those bendpoints would
+      // land in the wrong places; ELK does its own orthogonal routing.
+      const scaledWaypoints =
+        layoutMode === "source" && e.waypoints?.length
+          ? e.waypoints.map((p) => ({ x: p.x * scale, y: p.y * scale }))
+          : [];
       return {
         id: e.id,
         source: e.source,
@@ -349,7 +361,13 @@ function PreviewInner() {
         type: "sequence",
         label: e.label ?? undefined,
         style: e.conditional ? { strokeDasharray: "5 4" } : undefined,
-        data: { isConditional: e.conditional },
+        data: {
+          isConditional: e.conditional,
+          // The Designer's BpmnSequenceEdge reads data.waypoints and
+          // renders the edge through them in order.
+          waypoints: scaledWaypoints,
+          conditionText: e.conditionText,
+        },
       };
     });
   }, [displayGraph, layoutMode]);

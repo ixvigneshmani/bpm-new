@@ -45,16 +45,24 @@ export interface BpdLane {
   height: number;
 }
 
-/** Edge attachment hint from the BPD XML. webMethods stores which side
- *  of the source/target node each transition attaches to — using these
- *  produces dramatically cleaner routing than guessing from positions,
- *  because the original designer hand-placed them to avoid overlaps. */
-export interface BpdTransitionTerminal {
+/** Edge metadata from the BPD XML. webMethods stores not just which
+ *  side the transition attaches to (sourceTerminal/targetTerminal) but
+ *  also the EXACT waypoints the original designer dragged the edge
+ *  through — `<bendpoint location="x,y"/>` elements. Without these the
+ *  orthogonal router takes shortest-path lines that cut through other
+ *  nodes. With them, the edge follows the path that was authored.
+ *
+ *  All coordinates are in the same canvas-space as step ICON_X/Y. */
+export interface BpdTransitionMeta {
   source: string;
   target: string;
   /** "TOP" | "RIGHT" | "BOTTOM" | "LEFT" — or null when XML omits it. */
   sourceTerminal: string | null;
   targetTerminal: string | null;
+  /** Mid-line waypoints in source order. Empty array when straight. */
+  waypoints: Array<{ x: number; y: number }>;
+  /** Designer-authored condition expression, e.g. "doc/action == 'APPROVED'". */
+  conditionText: string | null;
 }
 
 export interface BpdContainerMap {
@@ -66,8 +74,8 @@ export interface BpdContainerMap {
   stepToPool: Map<string, string>;
   /** stepUid → laneId  (which lane a step lives in; absent if step is directly in a pool) */
   stepToLane: Map<string, string>;
-  /** Per-transition handle hints harvested from <transition> elements. */
-  transitionTerminals: BpdTransitionTerminal[];
+  /** Per-transition geometry + condition harvested from <transition> elements. */
+  transitionMeta: BpdTransitionMeta[];
 }
 
 /** Every BPD element that represents a "step" we want to render as a
@@ -96,8 +104,19 @@ const parser = new XMLParser({
     name === 'pool' ||
     name === 'lane' ||
     name === 'transition' ||
+    name === 'bendpoint' ||
     (STEP_ELEMENT_NAMES as readonly string[]).includes(name),
 });
+
+/** Parse webMethods' "x,y" location attribute into a point. */
+function parseLocation(raw: unknown): { x: number; y: number } | null {
+  if (typeof raw !== 'string') return null;
+  const [xs, ys] = raw.split(',');
+  const x = parseFloat(xs ?? '');
+  const y = parseFloat(ys ?? '');
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
 
 /** Coerce a child node's `@x`/`@y`/etc. attributes to numbers, with sane
  *  fallbacks. The BPD spec sometimes omits dimensions on containers. */
@@ -166,19 +185,42 @@ function computeBbox(
 }
 
 /** Collect every <transition> element under any container, recursively.
- *  webMethods nests transitions inside the pool/lane where they live. */
+ *  webMethods nests transitions inside the pool/lane where they live.
+ *  We capture terminal hints, bendpoint waypoints (in their original
+ *  index order) and the condition expression so the renderer can route
+ *  edges exactly the way the designer drew them. */
 function collectTransitions(
   container: Record<string, unknown>,
-  acc: BpdTransitionTerminal[],
+  acc: BpdTransitionMeta[],
 ): void {
   const tx = (container['transition'] ?? []) as Array<Record<string, unknown>>;
   for (const t of tx) {
     const source = typeof t['@source'] === 'string' ? t['@source'] : null;
     const target = typeof t['@target'] === 'string' ? t['@target'] : null;
     if (!source || !target) continue;
-    const st = typeof t['@sourceTerminal'] === 'string' ? t['@sourceTerminal'] : null;
-    const tt = typeof t['@targetTerminal'] === 'string' ? t['@targetTerminal'] : null;
-    acc.push({ source, target, sourceTerminal: st, targetTerminal: tt });
+
+    const bps = (t['bendpoint'] ?? []) as Array<Record<string, unknown>>;
+    // Sort by @index in case fast-xml-parser doesn't preserve doc order.
+    const waypoints = bps
+      .map((bp) => ({
+        idx: Number.parseInt(String(bp['@index'] ?? '0'), 10),
+        pt: parseLocation(bp['@location']),
+      }))
+      .filter((b): b is { idx: number; pt: { x: number; y: number } } => b.pt !== null)
+      .sort((a, b) => a.idx - b.idx)
+      .map((b) => b.pt);
+
+    acc.push({
+      source,
+      target,
+      sourceTerminal: typeof t['@sourceTerminal'] === 'string' ? (t['@sourceTerminal'] as string) : null,
+      targetTerminal: typeof t['@targetTerminal'] === 'string' ? (t['@targetTerminal'] as string) : null,
+      waypoints,
+      conditionText:
+        typeof t['@conditionText'] === 'string' && (t['@conditionText'] as string).trim() !== ''
+          ? (t['@conditionText'] as string)
+          : null,
+    });
   }
   // Recurse into nested lanes (and any other container element).
   const lanes = (container['lane'] ?? []) as Array<Record<string, unknown>>;
@@ -194,7 +236,7 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
     lanes: [],
     stepToPool: new Map(),
     stepToLane: new Map(),
-    transitionTerminals: [],
+    transitionMeta: [],
   };
   if (!xml || typeof xml !== 'string' || xml.trim() === '') return empty;
 
@@ -213,7 +255,7 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
   const lanes: BpdLane[] = [];
   const stepToPool = new Map<string, string>();
   const stepToLane = new Map<string, string>();
-  const transitionTerminals: BpdTransitionTerminal[] = [];
+  const transitionMeta: BpdTransitionMeta[] = [];
 
   // Stack pools vertically when the XML doesn't carry pool-level
   // coordinates. Use a small gap so they read as separate swimlanes.
@@ -280,9 +322,9 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
       height: poolH,
     });
     lanes.push(...laneRecords);
-    collectTransitions(poolEl, transitionTerminals);
+    collectTransitions(poolEl, transitionMeta);
     poolStackY = poolY + poolH + POOL_GAP;
   }
 
-  return { pools, lanes, stepToPool, stepToLane, transitionTerminals };
+  return { pools, lanes, stepToPool, stepToLane, transitionMeta };
 }
