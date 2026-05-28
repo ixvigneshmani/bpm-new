@@ -43,6 +43,14 @@ export interface BpdLane {
   y: number;
   width: number;
   height: number;
+  /** Layout direction:
+   *  - "horizontal" lane (a row, label on the left): wider than tall;
+   *    siblings stack downward; steps assigned by Y position.
+   *  - "vertical" lane (a column, label on top): taller than wide;
+   *    siblings stack rightward; steps assigned by X position.
+   *  Same model can mix them in different pools (AMCProcess uses
+   *  horizontal, PermitProcess uses vertical). */
+  orientation: 'horizontal' | 'vertical';
 }
 
 /** Edge metadata from the BPD XML. webMethods stores not just which
@@ -274,61 +282,96 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
     const poolSteps = stepChildren(poolEl);
 
     // Collect <swimlane> elements — the BPMN "lanes" in webMethods'
-    // vocabulary. They are direct pool children with explicit width/
-    // height. They stack vertically in document order; steps are NOT
-    // nested inside them in the XML — instead each step's Y position
-    // determines which swimlane band it visually belongs to.
+    // vocabulary. Each pool has either ALL horizontal lanes (rows that
+    // stack downward) or ALL vertical lanes (columns that stack
+    // rightward). The orientation per pool is determined by inspecting
+    // the first swimlane's aspect ratio.
     const swimlaneEls = (poolEl['swimlane'] ?? []) as Array<Record<string, unknown>>;
     const laneRecords: BpdLane[] = [];
-    let swimlaneY = 0;
+    // Stack offsets: vertical lanes accumulate X, horizontal accumulate Y.
+    let horizontalStackY = 0;
+    let verticalStackX = 0;
 
     for (const swEl of swimlaneEls) {
       const swUid = typeof swEl['@uid'] === 'string' ? swEl['@uid'] : null;
       if (!swUid) continue;
       const swLabel = (swEl['@label'] ?? swEl['@name'] ?? null) as string | null;
-      // webMethods writes explicit width + height on every swimlane.
-      // Fall back to a reasonable default if a malformed model omits them.
       const swW = num(swEl['@width'], 800);
       const swH = num(swEl['@height'], 150);
-      laneRecords.push({
-        id: swUid,
-        poolId: poolUid,
-        label: swLabel,
-        x: 0,
-        y: swimlaneY,
-        width: swW,
-        height: swH,
-      });
-      swimlaneY += swH;
+      // Per-lane orientation by aspect: taller than wide = vertical
+      // (column), wider than tall = horizontal (row). Equal => default
+      // to horizontal.
+      const orientation: 'horizontal' | 'vertical' = swH > swW ? 'vertical' : 'horizontal';
+
+      if (orientation === 'vertical') {
+        laneRecords.push({
+          id: swUid,
+          poolId: poolUid,
+          label: swLabel,
+          x: verticalStackX,
+          y: 0,
+          width: swW,
+          height: swH,
+          orientation,
+        });
+        verticalStackX += swW;
+      } else {
+        laneRecords.push({
+          id: swUid,
+          poolId: poolUid,
+          label: swLabel,
+          x: 0,
+          y: horizontalStackY,
+          width: swW,
+          height: swH,
+          orientation,
+        });
+        horizontalStackY += swH;
+      }
     }
 
-    // All steps under the pool are direct children. Assign each to a
-    // swimlane by checking which Y-band it falls in. Falls back to
-    // pool membership only if no swimlane contains its Y.
+    // Assign each step to a swimlane by the appropriate axis: X for
+    // vertical lanes (columns), Y for horizontal lanes (rows). First
+    // match wins; falls through to pool membership if no lane contains
+    // the step's coordinate.
     for (const s of poolSteps) {
       stepToPool.set(s.uid, poolUid);
       for (const sw of laneRecords) {
-        if (s.y >= sw.y && s.y < sw.y + sw.height) {
+        const inside =
+          sw.orientation === 'vertical'
+            ? s.x >= sw.x && s.x < sw.x + sw.width
+            : s.y >= sw.y && s.y < sw.y + sw.height;
+        if (inside) {
           stepToLane.set(s.uid, sw.id);
           break;
         }
       }
     }
 
-    // Pool dimensions: prefer XML; fall back to (sum of swimlane heights)
-    // for height and (max swimlane width OR step bbox) for width.
+    // Pool dimensions depend on lane orientation. Vertical lanes
+    // accumulate width and share a common height; horizontal lanes
+    // accumulate height and share a common width.
     const stepBbox = computeBbox(poolSteps);
-    const swimlanesTotalHeight = laneRecords.reduce((s, l) => s + l.height, 0);
-    const swimlanesMaxWidth = laneRecords.reduce((s, l) => Math.max(s, l.width), 0);
+    const hasVertical = laneRecords.some((l) => l.orientation === 'vertical');
+    const sumLaneWidths = laneRecords.reduce((s, l) => s + l.width, 0);
+    const sumLaneHeights = laneRecords.reduce((s, l) => s + l.height, 0);
+    const maxLaneWidth = laneRecords.reduce((s, l) => Math.max(s, l.width), 0);
+    const maxLaneHeight = laneRecords.reduce((s, l) => Math.max(s, l.height), 0);
     const poolX = num(poolEl['@x'], 0);
     const poolY = num(poolEl['@y'], poolStackY);
     const poolW = num(
       poolEl['@width'],
-      Math.max(swimlanesMaxWidth, stepBbox.width),
+      hasVertical
+        ? Math.max(sumLaneWidths, stepBbox.width)
+        : Math.max(maxLaneWidth, stepBbox.width),
     );
     const poolH = num(
       poolEl['@height'],
-      swimlanesTotalHeight > 0 ? swimlanesTotalHeight : stepBbox.height,
+      hasVertical
+        ? Math.max(maxLaneHeight, stepBbox.height)
+        : sumLaneHeights > 0
+          ? sumLaneHeights
+          : stepBbox.height,
     );
 
     pools.push({

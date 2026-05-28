@@ -65,6 +65,9 @@ export interface ExternalBpmContainer {
   height: number;
   /** For lanes: the parent pool uid. null for top-level pools. */
   parentId: string | null;
+  /** Lane direction — "horizontal" is a row (label on left), "vertical"
+   *  is a column (label on top). Undefined for pools. */
+  orientation?: 'horizontal' | 'vertical';
 }
 
 export interface ExternalBpmEdge {
@@ -277,12 +280,13 @@ export class ExternalBpmService implements OnModuleDestroy {
         swimlaneId ?? containerMap.stepToPool.get(s.STEPID) ?? null;
       const rawX = s.ICON_X ?? 0;
       const rawY = s.ICON_Y ?? 0;
-      // If parented to a swimlane, the step's stored Y is pool-relative
-      // and we need to subtract the swimlane's pool-relative Y to make
-      // it swimlane-relative (React Flow parent-child semantics).
+      // Transform pool-relative coords into swimlane-relative ones on
+      // the axis the swimlane runs along: subtract X for vertical
+      // lanes (columns), Y for horizontal lanes (rows). Leaves the
+      // other axis untouched.
       const sw = swimlaneId ? lanesById.get(swimlaneId) : null;
-      const x = rawX;
-      const y = sw ? rawY - sw.y : rawY;
+      const x = sw ? (sw.orientation === 'vertical' ? rawX - sw.x : rawX) : rawX;
+      const y = sw ? (sw.orientation === 'horizontal' ? rawY - sw.y : rawY) : rawY;
       return {
         id: s.STEPID,
         type: isImplicitStart ? 'startEvent' : mappedType,
@@ -395,6 +399,7 @@ export class ExternalBpmService implements OnModuleDestroy {
           width: l.width,
           height: l.height,
           parentId: l.poolId,
+          orientation: l.orientation,
         })),
     ];
 

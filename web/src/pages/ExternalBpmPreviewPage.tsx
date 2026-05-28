@@ -96,6 +96,8 @@ interface ExternalContainer {
   width: number;
   height: number;
   parentId: string | null;
+  /** "horizontal" = row (label on left), "vertical" = column (label on top). */
+  orientation?: "horizontal" | "vertical";
 }
 
 interface ExternalGraph {
@@ -239,7 +241,10 @@ function PreviewInner() {
     }
 
     // Swimlanes (rendered as "lane" type) — parent is their pool.
+    // Pass isHorizontal so the LaneNode chooses left-band vs top-band
+    // label placement to match the original BPD direction.
     for (const c of containers.filter((c) => c.type === "lane")) {
+      const isHorizontal = c.orientation !== "vertical";
       out.push({
         id: c.id,
         type: "lane",
@@ -250,6 +255,7 @@ function PreviewInner() {
           label: c.label ?? "",
           width: c.width * scale,
           height: c.height * scale,
+          isHorizontal,
         },
         width: c.width * scale,
         height: c.height * scale,

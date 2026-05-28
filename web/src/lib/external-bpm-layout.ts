@@ -37,6 +37,7 @@ interface LayoutContainer {
   width: number;
   height: number;
   parentId: string | null;
+  orientation?: "horizontal" | "vertical";
 }
 
 interface LayoutEdge {
@@ -81,11 +82,13 @@ function standardSizeFor(type: string): { width: number; height: number } {
   return { width: STANDARD_TASK_WIDTH, height: STANDARD_TASK_HEIGHT };
 }
 
-/** ELK layout options shared by every container. */
-function elkLayoutOptions(leftPad: number) {
+/** ELK layout options shared by every container.
+ *  `direction` flips for vertical lanes: a column-shaped lane reads
+ *  top-to-bottom, so we tell ELK to lay out DOWN inside it. */
+function elkLayoutOptions(leftPad: number, direction: 'RIGHT' | 'DOWN' = 'RIGHT') {
   return {
     "elk.algorithm": "layered",
-    "elk.direction": "RIGHT",
+    "elk.direction": direction,
     "elk.layered.spacing.nodeNodeBetweenLayers": "100",
     "elk.spacing.nodeNode": "70",
     "elk.layered.spacing.edgeNodeBetweenLayers": "40",
@@ -161,6 +164,7 @@ export async function runAutoLayout(
   async function layoutLeaf(
     leafId: string,
     leftPad: number,
+    direction: 'RIGHT' | 'DOWN' = 'RIGHT',
   ): Promise<{ width: number; height: number; placed: LayoutNode[] }> {
     const childNodes = nodes.filter((n) => leafOfNode.get(n.id) === leafId);
     const childEdges = edgesByLeaf.get(leafId) ?? [];
@@ -169,7 +173,7 @@ export async function runAutoLayout(
     }
     const elkGraph = {
       id: leafId,
-      layoutOptions: elkLayoutOptions(leftPad),
+      layoutOptions: elkLayoutOptions(leftPad, direction),
       children: childNodes.map((n) => {
         const std = standardSizeFor(n.type);
         return { id: n.id, width: std.width, height: std.height };
@@ -212,14 +216,43 @@ export async function runAutoLayout(
 
   for (const pool of pools) {
     const swimlanes = swimlanesByPool.get(pool.id) ?? [];
-    if (swimlanes.length > 0) {
-      // Pool has swimlanes — lay out each swimlane independently,
-      // stack them vertically inside the pool, then resize the pool
-      // to enclose them all.
+    const hasVertical = swimlanes.some((s) => s.orientation === "vertical");
+
+    if (swimlanes.length > 0 && hasVertical) {
+      // Pool with vertical swimlanes (columns): stack them rightward,
+      // lay out each one with direction=DOWN so steps flow top-to-bottom
+      // within the column. Pool size: sum of widths × max height.
+      let laneStackX = 0;
+      let maxLaneHeight = 0;
+      for (const sw of swimlanes) {
+        const laid = await layoutLeaf(sw.id, POOL_PADDING_X, "DOWN");
+        newContainers.push({
+          ...sw,
+          x: laneStackX,
+          y: 0,
+          width: laid.width,
+          height: laid.height,
+        });
+        for (const p of laid.placed) newNodes.push(p);
+        laneStackX += laid.width;
+        if (laid.height > maxLaneHeight) maxLaneHeight = laid.height;
+      }
+      newContainers.push({
+        ...pool,
+        x: 0,
+        y: poolStackY,
+        width: laneStackX,
+        height: maxLaneHeight,
+      });
+      poolStackY += maxLaneHeight + POOL_GAP;
+    } else if (swimlanes.length > 0) {
+      // Pool with horizontal swimlanes (rows): stack downward, normal
+      // left-to-right flow inside each row. Pool size: max width × sum
+      // of heights.
       let laneStackY = 0;
       let maxLaneWidth = 0;
       for (const sw of swimlanes) {
-        const laid = await layoutLeaf(sw.id, POOL_LABEL_BAND + 24);
+        const laid = await layoutLeaf(sw.id, POOL_LABEL_BAND + 24, "RIGHT");
         newContainers.push({
           ...sw,
           x: 0,
@@ -240,7 +273,7 @@ export async function runAutoLayout(
       });
       poolStackY += laneStackY + POOL_GAP;
     } else {
-      // Pool has no swimlanes — single ELK pass over the pool itself.
+      // Pool with no swimlanes — single ELK pass over the pool itself.
       const laid = await layoutLeaf(pool.id, POOL_LABEL_BAND + POOL_PADDING_X);
       newContainers.push({
         ...pool,
