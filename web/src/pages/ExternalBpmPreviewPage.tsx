@@ -222,12 +222,13 @@ function PreviewInner() {
         height: c.height * SCALE,
         draggable: false,
         selectable: false,
-        // Override the LaneNode's default visuals with the source colors.
-        // CSS custom properties propagate inward so the label band picks
-        // up its tint without us forking the node component.
+        // Override the LaneNode's default visuals with the source
+        // colours. CSS custom properties propagate inward; the !important
+        // overrides at the top of the page wire them onto the inner
+        // .bpmn-lane div so the BPD-authored fills actually show.
         style: {
-          background: bg,
-          ["--lane-label-bg" as string]: labelBg,
+          ["--bpd-lane-bg" as string]: bg,
+          ["--bpd-lane-label-bg" as string]: labelBg,
         },
       });
     });
@@ -356,7 +357,30 @@ function PreviewInner() {
         </div>
       </header>
 
-      <div className="flex-1 relative bg-slate-50">
+      {/* The Designer's BpmnLane component hardcodes an inline
+         background colour on its inner .bpmn-lane div, which would
+         hide whatever bg we set on the React Flow node wrapper.
+         These `!important` overrides let each lane pick up the
+         per-node CSS variables we set via the `style` prop below. */}
+      <style>{`
+        .external-bpm-canvas .react-flow__node-lane .bpmn-lane {
+          background: var(--bpd-lane-bg, transparent) !important;
+        }
+        .external-bpm-canvas .react-flow__node-lane .bpmn-lane > div:first-child {
+          background: var(--bpd-lane-label-bg, rgba(0, 0, 0, 0.04)) !important;
+        }
+        /* Bigger, more legible BPMN task labels on the preview canvas.
+           The Designer's nodes default to ~12 px which gets unreadable
+           at the fit-to-view zooms we land at for large models. */
+        .external-bpm-canvas .react-flow__node {
+          font-size: 14px;
+        }
+        .external-bpm-canvas .react-flow__edge-textwrapper {
+          font-size: 12px;
+        }
+      `}</style>
+
+      <div className="flex-1 relative bg-slate-50 external-bpm-canvas">
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500 z-10">
             Loading model from webMethods…
@@ -378,11 +402,12 @@ function PreviewInner() {
             elementsSelectable
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
             fitView
-            // Cap the zoom-out: for big multi-swimlane diagrams fitView
-            // would otherwise shrink everything to unreadable size.
-            // 0.4 keeps labels legible while still giving an overview.
-            fitViewOptions={{ padding: 0.08, minZoom: 0.4 }}
-            minZoom={0.2}
+            // Cap the zoom-out aggressively: 0.7 keeps tasks at a
+            // readable size even on large multi-swimlane diagrams. The
+            // user can pan to see whatever doesn't fit, or pinch-zoom
+            // out if they want the overview.
+            fitViewOptions={{ padding: 0.08, minZoom: 0.7 }}
+            minZoom={0.3}
             maxZoom={2.5}
             panOnDrag
             panOnScroll
