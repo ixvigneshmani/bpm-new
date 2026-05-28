@@ -40,6 +40,25 @@ import { edgeTypes } from "../components/canvas/edges";
  *  enough room to breathe without losing the original spatial layout. */
 const SCALE = 2.6;
 
+/** Reserved bounding-box per node type — independent of webMethods'
+ *  ICON_ dimensions, which are tiny (60×60) and don't reflect the
+ *  rendered BPMN component size. Pairing these with the CSS overrides
+ *  below makes nodes render large enough to be readable at any zoom
+ *  without us having to push the viewport zoom up. */
+const NODE_SIZE: Record<string, { width: number; height: number }> = {
+  startEvent: { width: 90, height: 90 },
+  endEvent: { width: 90, height: 90 },
+  intermediateCatchEvent: { width: 90, height: 90 },
+  exclusiveGateway: { width: 100, height: 100 },
+  // Tasks + subprocesses: longer labels need wider boxes.
+  userTask: { width: 240, height: 130 },
+  serviceTask: { width: 240, height: 130 },
+  callActivity: { width: 240, height: 130 },
+};
+function sizeFor(type: string): { width: number; height: number } {
+  return NODE_SIZE[type] ?? { width: 240, height: 130 };
+}
+
 /** Fallback fill when a swimlane's BPD XML didn't carry a colour. Soft
  *  alternating greys keep adjacent lanes visually distinct. */
 const FALLBACK_LANE_FILLS = ["#FAFBFC", "#F4F6F8"];
@@ -235,7 +254,13 @@ function PreviewInner() {
 
     // Steps last (z-stack top). When the step is in a swimlane, its
     // position has already been transformed to be lane-relative.
+    //
+    // We explicitly set the React Flow bbox size per node type — not
+    // the webMethods ICON_ dims (which are tiny) — so the BPMN node
+    // visuals can grow to a readable size via the CSS overrides below.
+    // RF uses this size for edge attach points and parent clipping.
     for (const n of graph.nodes) {
+      const sz = sizeFor(n.type);
       out.push({
         id: n.id,
         type: n.type,
@@ -243,6 +268,8 @@ function PreviewInner() {
         extent: n.parentId ? "parent" : undefined,
         position: { x: n.x * SCALE, y: n.y * SCALE },
         data: { label: n.label ?? "" },
+        width: sz.width,
+        height: sz.height,
         draggable: false,
         selectable: true,
         connectable: false,
@@ -357,24 +384,58 @@ function PreviewInner() {
         </div>
       </header>
 
-      {/* The Designer's BpmnLane component hardcodes an inline
-         background colour on its inner .bpmn-lane div, which would
-         hide whatever bg we set on the React Flow node wrapper.
-         These `!important` overrides let each lane pick up the
-         per-node CSS variables we set via the `style` prop below. */}
+      {/* Designer's BpmnLane hardcodes a background on its inner
+         div; these !important overrides let our per-node CSS vars
+         (`--bpd-lane-bg`, `--bpd-lane-label-bg`) actually take effect.
+         The same scoped block also enlarges the BPMN node visuals so
+         tasks render readable at any zoom — no zoom-floor cheat. */}
       <style>{`
+        /* Lane bg overrides */
         .external-bpm-canvas .react-flow__node-lane .bpmn-lane {
           background: var(--bpd-lane-bg, transparent) !important;
         }
         .external-bpm-canvas .react-flow__node-lane .bpmn-lane > div:first-child {
           background: var(--bpd-lane-label-bg, rgba(0, 0, 0, 0.04)) !important;
         }
-        /* Bigger, more legible BPMN task labels on the preview canvas.
-           The Designer's nodes default to ~12 px which gets unreadable
-           at the fit-to-view zooms we land at for large models. */
-        .external-bpm-canvas .react-flow__node {
-          font-size: 14px;
+
+        /* Force the inner BPMN component to fill the React Flow bbox
+           we set per node type. Designer components have their own
+           fixed widths; width/height: 100% with !important lets the
+           bbox dictate, so our sizeFor() values actually drive the
+           visible size. */
+        .external-bpm-canvas .react-flow__node-userTask > div,
+        .external-bpm-canvas .react-flow__node-serviceTask > div,
+        .external-bpm-canvas .react-flow__node-scriptTask > div,
+        .external-bpm-canvas .react-flow__node-businessRuleTask > div,
+        .external-bpm-canvas .react-flow__node-sendTask > div,
+        .external-bpm-canvas .react-flow__node-receiveTask > div,
+        .external-bpm-canvas .react-flow__node-manualTask > div,
+        .external-bpm-canvas .react-flow__node-callActivity > div,
+        .external-bpm-canvas .react-flow__node-subProcess > div {
+          width: 100% !important;
+          height: 100% !important;
+          min-width: 0 !important;
+          min-height: 0 !important;
+          font-size: 15px !important;
+          line-height: 1.25 !important;
         }
+        .external-bpm-canvas .react-flow__node-exclusiveGateway > div,
+        .external-bpm-canvas .react-flow__node-parallelGateway > div,
+        .external-bpm-canvas .react-flow__node-inclusiveGateway > div,
+        .external-bpm-canvas .react-flow__node-eventBasedGateway > div {
+          width: 100% !important;
+          height: 100% !important;
+          font-size: 13px !important;
+        }
+        .external-bpm-canvas .react-flow__node-startEvent > div,
+        .external-bpm-canvas .react-flow__node-endEvent > div,
+        .external-bpm-canvas .react-flow__node-intermediateCatchEvent > div,
+        .external-bpm-canvas .react-flow__node-intermediateThrowEvent > div {
+          width: 100% !important;
+          height: 100% !important;
+          font-size: 13px !important;
+        }
+        /* Edge labels (condition text) — bump from default 11. */
         .external-bpm-canvas .react-flow__edge-textwrapper {
           font-size: 12px;
         }
@@ -402,12 +463,11 @@ function PreviewInner() {
             elementsSelectable
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
             fitView
-            // Cap the zoom-out aggressively: 0.7 keeps tasks at a
-            // readable size even on large multi-swimlane diagrams. The
-            // user can pan to see whatever doesn't fit, or pinch-zoom
-            // out if they want the overview.
-            fitViewOptions={{ padding: 0.08, minZoom: 0.7 }}
-            minZoom={0.3}
+            // fitView is allowed to choose freely — the per-node bbox
+            // sizing above ensures shapes are large enough at most
+            // zoom levels without needing a zoom floor.
+            fitViewOptions={{ padding: 0.08 }}
+            minZoom={0.15}
             maxZoom={2.5}
             panOnDrag
             panOnScroll
