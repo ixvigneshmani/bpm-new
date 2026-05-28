@@ -23,6 +23,7 @@ import {
   Background,
   BackgroundVariant,
   Controls,
+  MarkerType,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
@@ -43,6 +44,20 @@ import { runAutoLayout } from "../lib/external-bpm-layout";
  *  emits coords in standard pixel space, so we use 1×. */
 const SOURCE_SCALE = 2;
 const AUTO_SCALE = 1;
+
+/** Match the Designer's edge defaults so transitions render with the
+ *  same arrow style — sequence-flow filled arrowhead in slate-400.
+ *  Mirrors DEFAULT_EDGE_OPTIONS in DesignCanvasPage.tsx. */
+const DEFAULT_EDGE_OPTIONS = {
+  type: "sequence" as const,
+  style: { stroke: "#94A3B8", strokeWidth: 1.5 },
+  markerEnd: {
+    type: MarkerType.ArrowClosed,
+    width: 18,
+    height: 18,
+    color: "#94A3B8",
+  },
+};
 
 interface ExternalNode {
   id: string;
@@ -442,6 +457,7 @@ function PreviewInner() {
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable
+            defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
             fitView
             fitViewOptions={{ padding: 0.08 }}
             minZoom={0.1}
