@@ -23,24 +23,8 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
         icon: <polygon points="9,5 18,12 9,19" fill="#16A34A" stroke="none" />,
       },
       {
-        type: "timerEvent", label: "Timer", color: "#0EA5E9", shape: "circle",
-        icon: <><circle cx="12" cy="12" r="7" fill="none" stroke="#0EA5E9" strokeWidth="1.5" /><path d="M12 9v3l2 1" stroke="#0EA5E9" strokeWidth="1.5" fill="none" strokeLinecap="round" /></>,
-      },
-      {
-        type: "messageStartEvent", label: "Msg Start", color: "#8B5CF6", shape: "circle",
-        icon: <><rect x="6" y="8" width="12" height="8" rx="1" fill="none" stroke="#8B5CF6" strokeWidth="1.5" /><polyline points="6 8 12 13 18 8" fill="none" stroke="#8B5CF6" strokeWidth="1.5" /></>,
-      },
-      {
-        type: "signalEvent", label: "Signal", color: "#F59E0B", shape: "circle",
-        icon: <polygon points="12,6 18,17 6,17" fill="none" stroke="#F59E0B" strokeWidth="1.5" strokeLinejoin="round" />,
-      },
-      {
         type: "endEvent", label: "End", color: "#DC2626", shape: "circle-bold",
         icon: <rect x="9" y="9" width="6" height="6" rx="1" fill="#DC2626" stroke="none" />,
-      },
-      {
-        type: "terminateEvent", label: "Termint", color: "#DC2626", shape: "circle-bold",
-        icon: <circle cx="12" cy="12" r="5" fill="#DC2626" stroke="none" />,
       },
       {
         type: "intermediateCatchEvent", label: "Catch", color: "#0D9488", shape: "circle",

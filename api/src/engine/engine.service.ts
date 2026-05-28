@@ -2650,6 +2650,138 @@ export class EngineService {
         };
       }
 
+      // No boundary — check for an ERROR event subprocess child of this
+      // scope's host. BPMN: error event subprocesses are always
+      // interrupting (kill scope siblings, host scope token survives
+      // to host the event subprocess execution). Match by errorCode;
+      // empty/null on the inner start = catch-all (Camunda-style).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const espMatch = (args.canvas.nodes as any[]).find((n) => {
+        if (n.type !== "eventSubProcess") return false;
+        if ((n as { parentId?: string }).parentId !== hostNodeId) return false;
+        const inner = (args.canvas.nodes as any[]).find(
+          (m) =>
+            m.type === "startEvent" &&
+            (m as { parentId?: string }).parentId === n.id,
+        );
+        const def = inner?.data?.eventDefinition;
+        if (def?.kind !== "error") return false;
+        const wanted = (def.errorCode ?? "").trim();
+        return wanted === "" || wanted === args.errorCode;
+      });
+      if (espMatch) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const innerStart = (args.canvas.nodes as any[]).find(
+          (m) =>
+            m.type === "startEvent" &&
+            (m as { parentId?: string }).parentId === espMatch.id,
+        );
+        if (innerStart) {
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: scopeTok.id as string,
+            nodeId: hostNodeId,
+            eventType: "event-subprocess-fired",
+            payload: {
+              eventSubProcessId: espMatch.id,
+              innerStartId: innerStart.id,
+              kind: "error",
+              errorCode: args.errorCode,
+              interrupting: true,
+            },
+          });
+          // Kill intermediate scope tokens we walked through (and
+          // their direct siblings) so the whole sub-tree is torn down,
+          // mirroring the boundary-interrupting path above.
+          for (const intermediate of chain) {
+            if (intermediate.status === "waiting" || intermediate.status === "active") {
+              await this.updateTokenWithLock(
+                args.tx, intermediate.id, intermediate.version,
+                {
+                  status: "failed",
+                  errorMessage: `Cancelled by error event subprocess ${espMatch.id} (code "${args.errorCode}").`,
+                },
+              );
+            }
+            if (intermediate.scopeTokenId) {
+              await args.tx
+                .update(instanceTokens)
+                .set({
+                  status: "failed",
+                  errorMessage: `Cancelled by error event subprocess ${espMatch.id} on enclosing scope.`,
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(instanceTokens.scopeTokenId, intermediate.scopeTokenId),
+                    ne(instanceTokens.id, intermediate.id),
+                    inArray(instanceTokens.status, ["active", "waiting"] as const),
+                  ),
+                );
+            }
+          }
+          // Kill the host scope's live children (sibling branches
+          // inside the host activity). Host scope token stays alive
+          // to host the event subprocess execution.
+          await args.tx
+            .update(instanceTokens)
+            .set({
+              status: "failed",
+              errorMessage: `Cancelled by error event subprocess ${espMatch.id} on enclosing host.`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(instanceTokens.scopeTokenId, scopeTok.id as string),
+                inArray(instanceTokens.status, ["active", "waiting"] as const),
+              ),
+            );
+          await this.timerScheduler?.cancelTimer(scopeTok.id as string, args.tx);
+
+          // Spawn the inner-start child token inside the host scope.
+          const childRows = await args.tx
+            .insert(instanceTokens)
+            .values({
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              currentNodeId: innerStart.id,
+              status: "active",
+              parentTokenId: scopeTok.id as string,
+              scopeTokenId: scopeTok.id as string,
+            })
+            .returning({ id: instanceTokens.id, version: instanceTokens.version });
+          const child = childRows[0];
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: child.id,
+            nodeId: innerStart.id,
+            eventType: "token-created",
+            payload: {
+              parentTokenId: scopeTok.id,
+              scopeTokenId: scopeTok.id,
+              via: "error-event-subprocess",
+            },
+          });
+          const adv = await this.advanceToken({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: child.id,
+            tokenVersion: child.version ?? 0,
+            currentNodeId: innerStart.id,
+            canvas: args.canvas,
+            variables: args.variables,
+          });
+          return {
+            tokenStatus: adv.tokenStatus,
+            hops: args.hops + adv.hops,
+            errorMessage: adv.errorMessage,
+          };
+        }
+      }
+
       // No match at this scope — push into the chain so a deeper
       // catcher can tear us down too, then walk up.
       chain.push({
@@ -2660,6 +2792,106 @@ export class EngineService {
         status: scopeTok.status as string,
       });
       cursor = (scopeTok.scopeTokenId as string | null) ?? null;
+    }
+
+    // Cursor walked to null — root scope. Check ROOT-LEVEL error event
+    // subprocesses (parentId === undefined/null) before declaring the
+    // error uncaught. Mirrors the per-scope check above. Interrupting
+    // at root kills every other live token in the instance, then
+    // spawns the inner-start fresh.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rootEsp = (args.canvas.nodes as any[]).find((n) => {
+      if (n.type !== "eventSubProcess") return false;
+      if ((n as { parentId?: string }).parentId) return false;
+      const inner = (args.canvas.nodes as any[]).find(
+        (m) =>
+          m.type === "startEvent" &&
+          (m as { parentId?: string }).parentId === n.id,
+      );
+      const def = inner?.data?.eventDefinition;
+      if (def?.kind !== "error") return false;
+      const wanted = (def.errorCode ?? "").trim();
+      return wanted === "" || wanted === args.errorCode;
+    });
+    if (rootEsp) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const innerStart = (args.canvas.nodes as any[]).find(
+        (m) =>
+          m.type === "startEvent" &&
+          (m as { parentId?: string }).parentId === rootEsp.id,
+      );
+      if (innerStart) {
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.throwingTokenId,
+          nodeId: args.throwNodeId,
+          eventType: "event-subprocess-fired",
+          payload: {
+            eventSubProcessId: rootEsp.id,
+            innerStartId: innerStart.id,
+            kind: "error",
+            errorCode: args.errorCode,
+            interrupting: true,
+            atRoot: true,
+          },
+        });
+        // Root-interrupting: kill every other live token in the
+        // instance. The event subprocess inner-start becomes the
+        // only survivor.
+        await args.tx
+          .update(instanceTokens)
+          .set({
+            status: "failed",
+            errorMessage: `Cancelled by root error event subprocess ${rootEsp.id} (code "${args.errorCode}").`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(instanceTokens.instanceId, args.instanceId),
+              inArray(instanceTokens.status, ["active", "waiting"] as const),
+            ),
+          );
+        const childRows = await args.tx
+          .insert(instanceTokens)
+          .values({
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            currentNodeId: innerStart.id,
+            status: "active",
+            parentTokenId: null,
+            scopeTokenId: null,
+          })
+          .returning({ id: instanceTokens.id, version: instanceTokens.version });
+        const child = childRows[0];
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          nodeId: innerStart.id,
+          eventType: "token-created",
+          payload: {
+            scopeTokenId: null,
+            via: "error-event-subprocess",
+            atRoot: true,
+          },
+        });
+        const adv = await this.advanceToken({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          tokenVersion: child.version ?? 0,
+          currentNodeId: innerStart.id,
+          canvas: args.canvas,
+          variables: args.variables,
+        });
+        return {
+          tokenStatus: adv.tokenStatus,
+          hops: args.hops + adv.hops,
+          errorMessage: adv.errorMessage,
+        };
+      }
     }
 
     // Uncaught — chain exhausted. Fail.
