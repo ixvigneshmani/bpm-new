@@ -10,6 +10,7 @@ import { AiModule } from "./ai/ai.module";
 import { ConnectorsModule } from "./connectors/connectors.module";
 import { EngineModule } from "./engine/engine.module";
 import { RolesModule } from "./roles/roles.module";
+import { ExternalBpmModule } from "./external-bpm/external-bpm.module";
 import { VersionController } from "./common/version.controller";
 import { CorrelationContext } from "./common/observability/correlation-context";
 
@@ -19,7 +20,10 @@ const env = process.env.NODE_ENV || "development";
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: `.env.${env}`,
+      // First file wins per-key. .env.webmethods holds the read-only
+      // creds for the External BPM (webMethods) integration and is
+      // gitignored — see api/.env.webmethods.
+      envFilePath: [`.env.${env}`, ".env.webmethods"],
     }),
     // OS4 — Structured logging + correlation IDs. nestjs-pino wraps the
     // NestJS Logger interface so all existing `Logger.log/.warn/.error`
@@ -96,6 +100,7 @@ const env = process.env.NODE_ENV || "development";
     EngineModule,
     ConnectorsModule,
     RolesModule,
+    ExternalBpmModule,
   ],
   controllers: [VersionController],
 })

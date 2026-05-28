@@ -10,6 +10,8 @@ import DashboardLayout from "./pages/DashboardLayout";
 import DashboardPage from "./pages/DashboardPage";
 import ProcessListPage from "./pages/ProcessListPage";
 import DesignCanvasPage from "./pages/DesignCanvasPage";
+import ExternalBpmListPage from "./pages/ExternalBpmListPage";
+import ExternalBpmPreviewPage from "./pages/ExternalBpmPreviewPage";
 import ProcessPermissionsPage from "./pages/ProcessPermissionsPage";
 import TasksInboxPage from "./pages/TasksInboxPage";
 import InstancesListPage from "./pages/InstancesListPage";
@@ -49,6 +51,8 @@ export function App() {
         <Route path="designer/:id/permissions" element={guarded(<ProcessPermissionsPage />)} />
         <Route path="tasks" element={guarded(<TasksInboxPage />)} />
         <Route path="running" element={guarded(<InstancesListPage />)} />
+        <Route path="external-bpm" element={guarded(<ExternalBpmListPage />)} />
+        <Route path="external-bpm/preview" element={guarded(<ExternalBpmPreviewPage />)} />
         <Route path="instances/:id" element={guarded(<InstanceDetailPage />)} />
         <Route path="settings/security" element={guarded(<SecuritySettingsPage />)} />
         <Route path="settings/connections" element={guarded(<ConnectionsSettingsPage />)} />
