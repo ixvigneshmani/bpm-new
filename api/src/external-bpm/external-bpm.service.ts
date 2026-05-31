@@ -53,6 +53,19 @@ export interface ExternalBpmNode {
   height: number;
   /** Pool or lane uid this step belongs to, when extractable from the BPD XML. */
   parentId: string | null;
+  /** Raw WMSTEPDEFINITION.TYPE smallint — kept alongside the mapped BPMN
+   *  kind so the details panel can show the original webMethods code. */
+  rawType: number | null;
+  /** Designer-authored free-text notes from WMSTEPDEFINITION.DESCRIPTION.
+   *  Populated on ~12% of rows in the DOE sample. */
+  description: string | null;
+  /** Behavior pointer: TASKID||<uuid> for user tasks, IS service-folder
+   *  path for service tasks, subprocess key for call activities. Comes
+   *  from WMSTEPDEFINITION.COMPONENT (~92% populated). */
+  component: string | null;
+  /** webMethods IS host this step runs on, when set. From
+   *  WMSTEPDEFINITION.SERVER. */
+  server: string | null;
 }
 
 export interface ExternalBpmContainer {
@@ -246,7 +259,8 @@ export class ExternalBpmService implements OnModuleDestroy {
     stepsReq.input('dep', sql.Int, deploymentVersion);
     const stepsRes = await stepsReq.query(`
       SELECT STEPID, STEPLABEL, TYPE,
-             ICON_X, ICON_Y, ICON_WIDTH, ICON_HEIGHT
+             ICON_X, ICON_Y, ICON_WIDTH, ICON_HEIGHT,
+             DESCRIPTION, COMPONENT, SERVER
       FROM WMSTEPDEFINITION
       WHERE PROCESSKEY = @key AND MODELVERSION = @ver AND DEPLOYMENTVERSION = @dep;
     `);
@@ -301,6 +315,17 @@ export class ExternalBpmService implements OnModuleDestroy {
         width: s.ICON_WIDTH ?? 60,
         height: s.ICON_HEIGHT ?? 60,
         parentId,
+        rawType: s.TYPE ?? null,
+        description:
+          typeof s.DESCRIPTION === 'string' && s.DESCRIPTION.trim()
+            ? s.DESCRIPTION
+            : null,
+        component:
+          typeof s.COMPONENT === 'string' && s.COMPONENT.trim()
+            ? s.COMPONENT
+            : null,
+        server:
+          typeof s.SERVER === 'string' && s.SERVER.trim() ? s.SERVER : null,
       };
     });
 

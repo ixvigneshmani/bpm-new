@@ -17,7 +17,14 @@
  *    (webMethods' soft yellow #ffffcc).
  * ────────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Background,
@@ -100,6 +107,16 @@ interface ExternalNode {
   width: number;
   height: number;
   parentId: string | null;
+  /** Raw WMSTEPDEFINITION.TYPE smallint — shown in the details drawer's
+   *  "Identifiers" section alongside the mapped BPMN kind. */
+  rawType?: number | null;
+  /** Designer-authored notes; surfaced as a Description section when set. */
+  description?: string | null;
+  /** Behavior pointer — TASKID for user tasks, IS service path for service
+   *  tasks, subprocess key for call activities. */
+  component?: string | null;
+  /** IS host this step runs on. */
+  server?: string | null;
 }
 
 interface ExternalEdge {
@@ -167,9 +184,431 @@ function pickHandles(
     : { sourceHandle: "s-top", targetHandle: "t-bottom" };
 }
 
+/** Human-readable label for a BPMN kind, shown in the details drawer
+ *  pill and section copy. Falls back to the raw key so unknown types
+ *  still render gracefully. */
+const KIND_LABELS: Record<string, string> = {
+  startEvent: "Start Event",
+  endEvent: "End Event",
+  userTask: "User Task",
+  serviceTask: "Service Task",
+  exclusiveGateway: "Decision",
+  callActivity: "Call Activity",
+  intermediateCatchEvent: "Intermediate Event",
+};
+
+/** Pull the TASKID portion out of a webMethods user-task COMPONENT string.
+ *  webMethods stores user tasks as "TASKID||<uuid>"; surfacing just the
+ *  UUID is friendlier than the full prefix. Returns the raw string when
+ *  the format doesn't match. */
+function extractTaskId(component: string | null | undefined): string | null {
+  if (!component) return null;
+  const m = component.match(/^TASKID\|\|(.+)$/);
+  return m ? m[1] : component;
+}
+
+/** Right-side drawer showing the selected step's key details. Sourced
+ *  entirely from data already on the client (the preview API payload +
+ *  the in-memory graph) — no per-click round trip. Sections collapse
+ *  themselves when their underlying data is empty so the drawer stays
+ *  short on plain steps and grows only when there's something to show. */
+function StepDetailsDrawer(props: {
+  node: ExternalNode;
+  allNodes: ExternalNode[];
+  allEdges: ExternalEdge[];
+  onClose: () => void;
+}) {
+  const { node, allNodes, allEdges, onClose } = props;
+  const kindLabel = KIND_LABELS[node.type] ?? node.type;
+  const taskId = extractTaskId(node.component);
+  const incoming = useMemo(
+    () => allEdges.filter((e) => e.target === node.id),
+    [allEdges, node.id],
+  );
+  const outgoing = useMemo(
+    () => allEdges.filter((e) => e.source === node.id),
+    [allEdges, node.id],
+  );
+  const nodeLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of allNodes) m.set(n.id, n.label || n.id);
+    return m;
+  }, [allNodes]);
+  const [identifiersOpen, setIdentifiersOpen] = useState(false);
+  const [positionOpen, setPositionOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const onCopyStepId = useCallback(() => {
+    void navigator.clipboard?.writeText(node.id).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    });
+  }, [node.id]);
+
+  // Behavior section content depends on the BPMN kind.
+  let behaviorRows: Array<{ label: string; value: string }> = [];
+  if (node.type === "userTask" && taskId) {
+    behaviorRows.push({ label: "Task ID", value: taskId });
+  } else if (node.type === "serviceTask") {
+    if (node.component) behaviorRows.push({ label: "Service", value: node.component });
+    if (node.server) behaviorRows.push({ label: "Server", value: node.server });
+  } else if (node.type === "callActivity") {
+    if (node.component) behaviorRows.push({ label: "Subprocess", value: node.component });
+  } else if (node.component) {
+    behaviorRows.push({ label: "Component", value: node.component });
+  }
+
+  return (
+    <aside
+      role="dialog"
+      aria-label={`Step details: ${node.label ?? node.id}`}
+      style={{
+        position: "absolute",
+        top: 12,
+        right: 12,
+        bottom: 12,
+        width: 380,
+        background: "#fff",
+        border: "1px solid #E5E7EB",
+        borderRadius: 10,
+        boxShadow: "0 10px 30px rgba(15, 23, 42, 0.08)",
+        display: "flex",
+        flexDirection: "column",
+        zIndex: 20,
+        fontSize: 13,
+        color: "#0F172A",
+      }}
+    >
+      {/* Sticky header */}
+      <header
+        style={{
+          padding: "12px 14px 10px",
+          borderBottom: "1px solid #F1F5F9",
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 10,
+        }}
+      >
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div
+            style={{
+              fontWeight: 600,
+              fontSize: 14,
+              lineHeight: 1.3,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={node.label ?? ""}
+          >
+            {node.label || "(no label)"}
+          </div>
+          <div
+            style={{
+              marginTop: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              type="button"
+              onClick={onCopyStepId}
+              title="Copy step ID"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "2px 6px 2px 8px",
+                borderRadius: 4,
+                border: "1px solid #E2E8F0",
+                background: "#F8FAFC",
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                fontSize: 11,
+                color: "#475569",
+                cursor: "pointer",
+              }}
+            >
+              {node.id}
+              <span style={{ color: copied ? "#16A34A" : "#94A3B8" }}>
+                {copied ? "✓" : "⧉"}
+              </span>
+            </button>
+            <span
+              style={{
+                padding: "2px 8px",
+                borderRadius: 999,
+                background: "#EEF2FF",
+                color: "#4338CA",
+                fontSize: 11,
+                fontWeight: 500,
+              }}
+            >
+              {kindLabel}
+            </span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          style={{
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            color: "#64748B",
+            fontSize: 18,
+            lineHeight: 1,
+            padding: 4,
+          }}
+        >
+          ×
+        </button>
+      </header>
+
+      {/* Body */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
+        {node.description && (
+          <Section title="Description">
+            <p style={{ margin: 0, lineHeight: 1.5, color: "#334155" }}>
+              {node.description}
+            </p>
+          </Section>
+        )}
+
+        {behaviorRows.length > 0 && (
+          <Section title="Behavior">
+            <dl
+              style={{
+                margin: 0,
+                display: "grid",
+                gridTemplateColumns: "max-content 1fr",
+                rowGap: 6,
+                columnGap: 10,
+              }}
+            >
+              {behaviorRows.map((r) => (
+                <Fragment key={r.label}>
+                  <dt style={{ color: "#64748B", fontSize: 12 }}>{r.label}</dt>
+                  <dd
+                    style={{
+                      margin: 0,
+                      fontFamily:
+                        r.label === "Task ID"
+                          ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+                          : "inherit",
+                      fontSize: r.label === "Task ID" ? 11 : 13,
+                      wordBreak: "break-all",
+                      color: "#0F172A",
+                    }}
+                  >
+                    {r.value}
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
+          </Section>
+        )}
+
+        <Section title={`Connections (${incoming.length} in · ${outgoing.length} out)`}>
+          {incoming.length === 0 && outgoing.length === 0 ? (
+            <p style={{ margin: 0, color: "#94A3B8" }}>
+              No incoming or outgoing flows.
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {incoming.length > 0 && (
+                <div>
+                  <div style={{ color: "#64748B", fontSize: 11, marginBottom: 4 }}>
+                    ← Incoming
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 14 }}>
+                    {incoming.map((e) => (
+                      <li key={e.id} style={{ marginBottom: 2 }}>
+                        {nodeLabelById.get(e.source) ?? e.source}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {outgoing.length > 0 && (
+                <div>
+                  <div style={{ color: "#64748B", fontSize: 11, marginBottom: 4 }}>
+                    → Outgoing
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 14 }}>
+                    {outgoing.map((e) => {
+                      const label = nodeLabelById.get(e.target) ?? e.target;
+                      const cond = e.conditionText?.trim();
+                      return (
+                        <li key={e.id} style={{ marginBottom: 4 }}>
+                          {label}
+                          {cond && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                padding: "1px 6px",
+                                borderRadius: 4,
+                                background: "#F1F5F9",
+                                color: "#475569",
+                                fontSize: 11,
+                                fontFamily:
+                                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                              }}
+                            >
+                              {cond}
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </Section>
+
+        <Section
+          title="Position"
+          collapsible
+          open={positionOpen}
+          onToggle={() => setPositionOpen((v) => !v)}
+        >
+          <dl
+            style={{
+              margin: 0,
+              display: "grid",
+              gridTemplateColumns: "max-content 1fr",
+              rowGap: 4,
+              columnGap: 10,
+              color: "#475569",
+              fontSize: 12,
+            }}
+          >
+            <dt>Parent</dt>
+            <dd style={{ margin: 0 }}>{node.parentId ?? "—"}</dd>
+            <dt>x, y</dt>
+            <dd style={{ margin: 0 }}>
+              {Math.round(node.x)}, {Math.round(node.y)}
+            </dd>
+            <dt>Size</dt>
+            <dd style={{ margin: 0 }}>
+              {Math.round(node.width)} × {Math.round(node.height)}
+            </dd>
+          </dl>
+        </Section>
+
+        <Section
+          title="Identifiers"
+          collapsible
+          open={identifiersOpen}
+          onToggle={() => setIdentifiersOpen((v) => !v)}
+        >
+          <dl
+            style={{
+              margin: 0,
+              display: "grid",
+              gridTemplateColumns: "max-content 1fr",
+              rowGap: 4,
+              columnGap: 10,
+              color: "#475569",
+              fontSize: 12,
+            }}
+          >
+            <dt>Step ID</dt>
+            <dd
+              style={{
+                margin: 0,
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              }}
+            >
+              {node.id}
+            </dd>
+            <dt>BPMN kind</dt>
+            <dd style={{ margin: 0 }}>{node.type}</dd>
+            <dt>webMethods TYPE</dt>
+            <dd style={{ margin: 0 }}>{node.rawType ?? "—"}</dd>
+          </dl>
+        </Section>
+      </div>
+
+      {/* Footer — keeps the no-write contract visible. */}
+      <footer
+        style={{
+          padding: "8px 14px",
+          borderTop: "1px solid #F1F5F9",
+          color: "#94A3B8",
+          fontSize: 11,
+        }}
+      >
+        Read-only — sourced from webMethods
+      </footer>
+    </aside>
+  );
+}
+
+/** Tiny section primitive used by StepDetailsDrawer — keeps spacing and
+ *  the optional collapse affordance consistent across sections without
+ *  pulling in a UI lib. */
+function Section(props: {
+  title: string;
+  children: ReactNode;
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: () => void;
+}) {
+  const { title, children, collapsible, open, onToggle } = props;
+  return (
+    <section style={{ marginBottom: 14 }}>
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: 0,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: "#0F172A",
+            fontSize: 12,
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: 0.4,
+            marginBottom: 6,
+          }}
+        >
+          <span style={{ color: "#94A3B8", fontSize: 10 }}>{open ? "▾" : "▸"}</span>
+          {title}
+        </button>
+      ) : (
+        <div
+          style={{
+            color: "#0F172A",
+            fontSize: 12,
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: 0.4,
+            marginBottom: 6,
+          }}
+        >
+          {title}
+        </div>
+      )}
+      {(!collapsible || open) && <div>{children}</div>}
+    </section>
+  );
+}
+
 function PreviewInner() {
   const navigate = useNavigate();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const processKey = params.get("processKey") ?? "";
   const modelVersion = params.get("modelVersion") ?? "";
   const deploymentVersion = params.get("deploymentVersion") ?? "";
@@ -177,6 +616,43 @@ function PreviewInner() {
   const [graph, setGraph] = useState<ExternalGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Step-details drawer — driven by ?stepId=… in the URL so the open
+  // panel survives reload and is shareable (useful for the future
+  // KPI-definition workflow the user described, where step IDs travel
+  // across apps). Selecting a node patches the URL; clicking empty
+  // canvas or hitting Esc clears it. Reading the value off the URL on
+  // every render keeps drawer state and URL state in lock-step.
+  const selectedStepId = params.get("stepId");
+  const setSelectedStepId = useCallback(
+    (id: string | null) => {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (id) next.set("stepId", id);
+          else next.delete("stepId");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
+  useEffect(() => {
+    if (!selectedStepId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedStepId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedStepId, setSelectedStepId]);
+  const selectedNode = useMemo(
+    () =>
+      selectedStepId && graph
+        ? (graph.nodes.find((n) => n.id === selectedStepId) ?? null)
+        : null,
+    [selectedStepId, graph],
+  );
 
   // Measured per-node SHAPE boxes (handle-extent bounding boxes in flow
   // coords). The webMethods node bbox we reserve (NODE_SIZE) is bigger
@@ -489,9 +965,33 @@ function PreviewInner() {
         <div className="min-w-0">
           <button
             onClick={() => navigate("/external-bpm")}
-            className="text-xs text-indigo-600 hover:text-indigo-800 mb-1 cursor-pointer"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "4px 10px 4px 8px",
+              borderRadius: 6,
+              border: "1px solid #E5E7EB",
+              background: "#fff",
+              fontSize: 12,
+              color: "#475467",
+              fontWeight: 500,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              marginBottom: 10,
+            }}
           >
-            ← Back to External Processes
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+            Back to External Processes
           </button>
           <h1 className="text-lg font-semibold text-slate-800 truncate">
             {graph?.model.label ?? "Loading…"}
@@ -652,6 +1152,13 @@ function PreviewInner() {
             nodesConnectable={false}
             elementsSelectable
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
+            onNodeClick={(_, node) => {
+              // Ignore pool / lane background clicks — they aren't real
+              // BPMN steps and don't carry stepId-level detail.
+              if (node.type === "pool" || node.type === "lane") return;
+              setSelectedStepId(node.id);
+            }}
+            onPaneClick={() => setSelectedStepId(null)}
             fitView
             // Open at a READABLE zoom rather than fitting the whole
             // (often very wide/tall) diagram into the viewport, which on
@@ -687,6 +1194,14 @@ function PreviewInner() {
               }}
             />
           </ReactFlow>
+        )}
+        {selectedNode && graph && (
+          <StepDetailsDrawer
+            node={selectedNode}
+            allNodes={graph.nodes}
+            allEdges={graph.edges}
+            onClose={() => setSelectedStepId(null)}
+          />
         )}
       </div>
     </div>
