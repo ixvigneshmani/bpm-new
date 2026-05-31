@@ -1,12 +1,34 @@
 import { useState, useRef, useEffect, type DragEvent } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { nodeTypes } from "./nodes";
+import {
+  NoneStartIcon,
+  NoneEndIcon,
+  UserTaskIcon,
+  ServiceTaskIcon,
+  ScriptTaskIcon,
+  SendTaskIcon,
+  ReceiveTaskIcon,
+  ManualTaskIcon,
+  BusinessRuleTaskIcon,
+  CallActivityIcon,
+  ExclusiveGatewayIcon,
+  ParallelGatewayIcon,
+  InclusiveGatewayIcon,
+  EventBasedGatewayIcon,
+} from "./nodes/icons/event-icons";
+
+/** Icon = a function that produces the same React element the canvas
+ *  node renders. Lets ShapeIcon size it and the drag-ghost renderer
+ *  inline the markup without duplicating SVG paths. */
+type IconRenderer = (color: string, size: number) => React.ReactElement;
 
 type PaletteItem = {
   type: string;
   label: string;
   color: string;
   shape: "circle" | "circle-bold" | "rect" | "diamond" | "rect-dash";
-  icon: React.ReactNode;
+  icon: IconRenderer;
 };
 
 /** Types registered as first-class renderable nodes. Palette entries not in this
@@ -20,23 +42,23 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     items: [
       {
         type: "startEvent", label: "Start", color: "#16A34A", shape: "circle",
-        icon: <polygon points="9,5 18,12 9,19" fill="#16A34A" stroke="none" />,
+        icon: (color, size) => <NoneStartIcon color={color} size={size} />,
       },
       {
         type: "endEvent", label: "End", color: "#DC2626", shape: "circle-bold",
-        icon: <rect x="9" y="9" width="6" height="6" rx="1" fill="#DC2626" stroke="none" />,
+        icon: (color, size) => <NoneEndIcon color={color} size={size} />,
       },
       {
         type: "intermediateCatchEvent", label: "Catch", color: "#0D9488", shape: "circle",
-        icon: <circle cx="12" cy="12" r="5" fill="none" stroke="#0D9488" strokeWidth="1.5" />,
+        icon: (color, size) => <NoneStartIcon color={color} size={size} />,
       },
       {
         type: "intermediateThrowEvent", label: "Throw", color: "#9333EA", shape: "circle",
-        icon: <circle cx="12" cy="12" r="5" fill="#9333EA" stroke="none" />,
+        icon: (color, size) => <NoneStartIcon color={color} size={size} />,
       },
       {
         type: "boundaryEvent", label: "Boundary", color: "#C2410C", shape: "circle",
-        icon: <circle cx="12" cy="12" r="5" fill="none" stroke="#C2410C" strokeWidth="1.5" strokeDasharray="2 1.5" />,
+        icon: (color, size) => <NoneStartIcon color={color} size={size} />,
       },
     ],
   },
@@ -45,35 +67,35 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     items: [
       {
         type: "userTask", label: "User Task", color: "#6366F1", shape: "rect",
-        icon: <><circle cx="12" cy="8" r="3" fill="none" stroke="#6366F1" strokeWidth="1.5" /><path d="M6 18v-1a6 6 0 0112 0v1" fill="none" stroke="#6366F1" strokeWidth="1.5" /></>,
+        icon: (color, size) => <UserTaskIcon color={color} size={size} />,
       },
       {
         type: "serviceTask", label: "Service", color: "#EA580C", shape: "rect",
-        icon: <><circle cx="12" cy="12" r="3" fill="none" stroke="#EA580C" strokeWidth="1.5" /><path d="M12 5v2M12 17v2M5 12h2M17 12h2" stroke="#EA580C" strokeWidth="1.5" strokeLinecap="round" /></>,
+        icon: (color, size) => <ServiceTaskIcon color={color} size={size} />,
       },
       {
         type: "scriptTask", label: "Script Task", color: "#0891B2", shape: "rect",
-        icon: <><path d="M8 6h8l-2 12H6z" fill="none" stroke="#0891B2" strokeWidth="1.5" strokeLinejoin="round" /><path d="M7 10h7M8 14h5" stroke="#0891B2" strokeWidth="1.2" strokeLinecap="round" /></>,
+        icon: (color, size) => <ScriptTaskIcon color={color} size={size} />,
       },
       {
         type: "sendTask", label: "Send Task", color: "#7C3AED", shape: "rect",
-        icon: <><rect x="5" y="7" width="14" height="10" rx="1.5" fill="none" stroke="#7C3AED" strokeWidth="1.5" /><polyline points="5 7 12 13 19 7" fill="none" stroke="#7C3AED" strokeWidth="1.5" /></>,
+        icon: (color, size) => <SendTaskIcon color={color} size={size} />,
       },
       {
         type: "receiveTask", label: "Receive", color: "#2563EB", shape: "rect",
-        icon: <><rect x="5" y="7" width="14" height="10" rx="1.5" fill="none" stroke="#2563EB" strokeWidth="1.5" /><polyline points="5 17 12 12 19 17" fill="none" stroke="#2563EB" strokeWidth="1.5" /></>,
+        icon: (color, size) => <ReceiveTaskIcon color={color} size={size} />,
       },
       {
         type: "manualTask", label: "Manual", color: "#059669", shape: "rect",
-        icon: <path d="M6 13c0-1 1-2 2-2h1l2-2h3l1 1h2a1.5 1.5 0 010 3h-2v1h2.5a1 1 0 010 2h-3l-2 1H8a2 2 0 01-2-2z" fill="none" stroke="#059669" strokeWidth="1.3" />,
+        icon: (color, size) => <ManualTaskIcon color={color} size={size} />,
       },
       {
         type: "businessRuleTask", label: "Biz Rule", color: "#B45309", shape: "rect",
-        icon: <><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="#B45309" strokeWidth="1.5" /><line x1="6" y1="10" x2="18" y2="10" stroke="#B45309" strokeWidth="1.2" /><line x1="11" y1="10" x2="11" y2="18" stroke="#B45309" strokeWidth="1.2" /></>,
+        icon: (color, size) => <BusinessRuleTaskIcon color={color} size={size} />,
       },
       {
         type: "callActivity", label: "Call", color: "#475467", shape: "rect",
-        icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#475467" strokeWidth="2.5" /><path d="M10 9v6l4-3z" fill="#475467" stroke="none" /></>,
+        icon: (color, size) => <CallActivityIcon color={color} size={size} />,
       },
     ],
   },
@@ -82,19 +104,19 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     items: [
       {
         type: "exclusiveGateway", label: "Exclusive", color: "#CA8A04", shape: "diamond",
-        icon: <><line x1="8" y1="8" x2="16" y2="16" stroke="#CA8A04" strokeWidth="2.5" strokeLinecap="round" /><line x1="16" y1="8" x2="8" y2="16" stroke="#CA8A04" strokeWidth="2.5" strokeLinecap="round" /></>,
+        icon: (color, size) => <ExclusiveGatewayIcon color={color} size={size} />,
       },
       {
         type: "parallelGateway", label: "Parallel", color: "#0284C7", shape: "diamond",
-        icon: <><line x1="12" y1="7" x2="12" y2="17" stroke="#0284C7" strokeWidth="2.5" strokeLinecap="round" /><line x1="7" y1="12" x2="17" y2="12" stroke="#0284C7" strokeWidth="2.5" strokeLinecap="round" /></>,
+        icon: (color, size) => <ParallelGatewayIcon color={color} size={size} />,
       },
       {
         type: "inclusiveGateway", label: "Inclusive", color: "#7C3AED", shape: "diamond",
-        icon: <circle cx="12" cy="12" r="4.5" fill="none" stroke="#7C3AED" strokeWidth="2.5" />,
+        icon: (color, size) => <InclusiveGatewayIcon color={color} size={size} />,
       },
       {
         type: "eventBasedGateway", label: "Event", color: "#059669", shape: "diamond",
-        icon: <><circle cx="12" cy="12" r="4.5" fill="none" stroke="#059669" strokeWidth="1.5" /><polygon points="12,8 15,14 9,14" fill="none" stroke="#059669" strokeWidth="1.5" /></>,
+        icon: (color, size) => <EventBasedGatewayIcon color={color} size={size} />,
       },
     ],
   },
@@ -103,19 +125,40 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     items: [
       {
         type: "subProcess", label: "Sub", color: "#475467", shape: "rect-dash",
-        icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#475467" strokeWidth="1.5" strokeDasharray="3 1.5" /><line x1="12" y1="10" x2="12" y2="14" stroke="#475467" strokeWidth="1.5" strokeLinecap="round" /><line x1="10" y1="12" x2="14" y2="12" stroke="#475467" strokeWidth="1.5" strokeLinecap="round" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+            <line x1="12" y1="10" x2="12" y2="14" />
+            <line x1="10" y1="12" x2="14" y2="12" />
+          </svg>
+        ),
       },
       {
         type: "transaction", label: "Transact", color: "#0F766E", shape: "rect-dash",
-        icon: <><rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="#0F766E" strokeWidth="1.2" /><rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="#0F766E" strokeWidth="1.2" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <rect x="5" y="5" width="14" height="14" rx="2" />
+            <rect x="7" y="7" width="10" height="10" rx="1.5" />
+          </svg>
+        ),
       },
       {
         type: "eventSubProcess", label: "Event Sub", color: "#7C3AED", shape: "rect-dash",
-        icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#7C3AED" strokeWidth="1.5" strokeDasharray="2 1.5" /><circle cx="12" cy="12" r="2.5" fill="none" stroke="#7C3AED" strokeWidth="1.2" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <rect x="6" y="6" width="12" height="12" rx="2" strokeDasharray="2 1.5" />
+            <circle cx="12" cy="12" r="2.5" />
+          </svg>
+        ),
       },
       {
         type: "adHocSubProcess", label: "Ad-hoc", color: "#B45309", shape: "rect-dash",
-        icon: <><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="#B45309" strokeWidth="1.5" strokeDasharray="3 1.5" /><path d="M8 13c1.5-3 3-3 4 0s2.5 3 4 0" stroke="#B45309" strokeWidth="1.2" fill="none" strokeLinecap="round" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round">
+            <rect x="6" y="6" width="12" height="12" rx="2" strokeDasharray="3 1.5" />
+            <path d="M8 13c1.5-3 3-3 4 0s2.5 3 4 0" />
+          </svg>
+        ),
       },
     ],
   },
@@ -124,11 +167,21 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     items: [
       {
         type: "pool", label: "Pool", color: "#1D4ED8", shape: "rect",
-        icon: <><rect x="4" y="4" width="16" height="16" rx="1.5" fill="none" stroke="#1D4ED8" strokeWidth="1.5" /><line x1="8" y1="4" x2="8" y2="20" stroke="#1D4ED8" strokeWidth="1.2" /><text x="6" y="13" fontSize="5" fill="#1D4ED8" fontWeight="700" textAnchor="middle" transform="rotate(-90 6 13)">P</text></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <rect x="4" y="4" width="16" height="16" rx="1.5" />
+            <line x1="8" y1="4" x2="8" y2="20" />
+          </svg>
+        ),
       },
       {
         type: "lane", label: "Lane", color: "#1D4ED8", shape: "rect",
-        icon: <><rect x="4" y="4" width="16" height="16" rx="1.5" fill="none" stroke="#1D4ED8" strokeWidth="1.5" /><line x1="4" y1="12" x2="20" y2="12" stroke="#1D4ED8" strokeWidth="1" strokeDasharray="2 1.5" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <rect x="4" y="4" width="16" height="16" rx="1.5" />
+            <line x1="4" y1="12" x2="20" y2="12" strokeDasharray="2 1.5" />
+          </svg>
+        ),
       },
     ],
   },
@@ -137,15 +190,29 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
     items: [
       {
         type: "dataStore", label: "Store", color: "#475467", shape: "rect",
-        icon: <><ellipse cx="12" cy="7" rx="6" ry="3" fill="none" stroke="#475467" strokeWidth="1.5" /><path d="M6 7v10c0 1.66 2.69 3 6 3s6-1.34 6-3V7" fill="none" stroke="#475467" strokeWidth="1.5" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <ellipse cx="12" cy="7" rx="6" ry="3" />
+            <path d="M6 7v10c0 1.66 2.69 3 6 3s6-1.34 6-3V7" />
+          </svg>
+        ),
       },
       {
         type: "textAnnotation", label: "Note", color: "#92400E", shape: "rect",
-        icon: <><path d="M10 5h8v14h-8" fill="none" stroke="#92400E" strokeWidth="1.5" /><path d="M10 5v14" stroke="#92400E" strokeWidth="1.5" /><line x1="12" y1="9" x2="16" y2="9" stroke="#92400E" strokeWidth="1.2" /><line x1="12" y1="12" x2="16" y2="12" stroke="#92400E" strokeWidth="1.2" /><line x1="12" y1="15" x2="15" y2="15" stroke="#92400E" strokeWidth="1.2" /></>,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <path d="M10 5h8v14h-8" />
+            <path d="M10 5v14" />
+          </svg>
+        ),
       },
       {
         type: "group", label: "Group", color: "#475467", shape: "rect-dash",
-        icon: <rect x="4" y="5" width="16" height="14" rx="3" fill="none" stroke="#475467" strokeWidth="1.5" strokeDasharray="3 2" />,
+        icon: (color, size) => (
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+            <rect x="4" y="5" width="16" height="14" rx="3" strokeDasharray="3 2" />
+          </svg>
+        ),
       },
     ],
   },
@@ -154,12 +221,7 @@ const PALETTE_GROUPS: { label: string; items: PaletteItem[] }[] = [
 /* ─── Tiny shape renderer for palette icons ─── */
 function ShapeIcon({ item }: { item: PaletteItem }) {
   const s = 24;
-  // Hidden SVG for drag ghost to clone from
-  const hiddenSvg = (
-    <svg data-drag-icon-svg={item.type} width={0} height={0} viewBox="0 0 24 24" fill="none" style={{ position: "absolute", overflow: "hidden" }}>
-      {item.icon}
-    </svg>
-  );
+  const inner = item.icon(item.color, 14);
 
   if (item.shape === "circle" || item.shape === "circle-bold") {
     return (
@@ -170,8 +232,7 @@ function ShapeIcon({ item }: { item: PaletteItem }) {
         display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
         position: "relative",
       }}>
-        <svg width={14} height={14} viewBox="0 0 24 24" fill="none">{item.icon}</svg>
-        {hiddenSvg}
+        {inner}
       </div>
     );
   }
@@ -186,9 +247,8 @@ function ShapeIcon({ item }: { item: PaletteItem }) {
           border: `1.5px solid ${item.color}30`, background: `${item.color}08`,
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
-          <svg width={12} height={12} viewBox="0 0 24 24" fill="none" style={{ transform: "rotate(-45deg)" }}>{item.icon}</svg>
+          <div style={{ transform: "rotate(-45deg)", display: "flex" }}>{item.icon(item.color, 12)}</div>
         </div>
-        {hiddenSvg}
       </div>
     );
   }
@@ -201,8 +261,7 @@ function ShapeIcon({ item }: { item: PaletteItem }) {
       display: "flex", alignItems: "center", justifyContent: "center",
       position: "relative",
     }}>
-      <svg width={14} height={14} viewBox="0 0 24 24" fill="none">{item.icon}</svg>
-      {hiddenSvg}
+      {inner}
     </div>
   );
 }
@@ -253,7 +312,9 @@ export default function ElementPalette({ disabled = false }: { disabled?: boolea
         background:${item.color}12;border:1.5px solid ${item.color}25;
         display:flex;align-items:center;justify-content:center;flex-shrink:0;
       `;
-      iconWrap.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">${(document.querySelector(`[data-drag-icon-svg="${item.type}"]`) as HTMLElement)?.innerHTML || ""}</svg>`;
+      // Render the SAME icon component the canvas node uses, as static
+      // markup, so the drag ghost mirrors the palette pill exactly.
+      iconWrap.innerHTML = renderToStaticMarkup(item.icon(item.color, 14));
       card.appendChild(iconWrap);
 
       // Label
