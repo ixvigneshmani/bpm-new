@@ -17,7 +17,7 @@
  *    (webMethods' soft yellow #ffffcc).
  * ────────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Background,
@@ -27,7 +27,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
-  useStore,
+  useReactFlow,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -36,6 +36,14 @@ import "@xyflow/react/dist/style.css";
 import { apiGet } from "../lib/api";
 import { nodeTypes } from "../components/canvas/nodes";
 import { edgeTypes } from "../components/canvas/edges";
+import {
+  type Box,
+  handleToSide,
+  routeEdge,
+  type Side,
+  sideToSourceHandle,
+  sideToTargetHandle,
+} from "./external-bpm-routing";
 
 /** webMethods → BPMN coordinate scale. 2.6× gives the BPMN-sized nodes
  *  enough room to breathe without losing the original spatial layout. */
@@ -159,26 +167,6 @@ function pickHandles(
     : { sourceHandle: "s-top", targetHandle: "t-bottom" };
 }
 
-/** Lives inside <ReactFlow> so it can subscribe to the React Flow store.
- *  Reads the current viewport zoom and writes it onto `--rf-zoom` on
- *  the canvas wrapper, so our CSS rules can counter-scale text via
- *  `calc(base / var(--rf-zoom))` and keep it at a constant on-screen
- *  size regardless of how zoomed-out the canvas is. This is the same
- *  trick bpmn-js uses for label legibility. */
-function ZoomCssBridge({
-  targetRef,
-}: {
-  targetRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  const zoom = useStore((s) => s.transform[2]);
-  useEffect(() => {
-    const el = targetRef.current;
-    if (!el) return;
-    el.style.setProperty("--rf-zoom", String(zoom || 1));
-  }, [zoom, targetRef]);
-  return null;
-}
-
 function PreviewInner() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -189,8 +177,81 @@ function PreviewInner() {
   const [graph, setGraph] = useState<ExternalGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  /** Ref to the canvas wrapper — the CSS-var target for counter-scaling. */
-  const canvasRef = useRef<HTMLDivElement | null>(null);
+
+  // Measured per-node SHAPE boxes (handle-extent bounding boxes in flow
+  // coords). The webMethods node bbox we reserve (NODE_SIZE) is bigger
+  // than the visual BPMN shape for gateways/events — their diamond/circle
+  // sits top-centre with the label below, and the connection handles
+  // attach to the shape, not the bbox. Routing against the reserved bbox
+  // (with handles assumed at its side-centres) mis-places endpoints by up
+  // to ~half a box and lets long edges clip a neighbour. Once the canvas
+  // mounts we read the real handle positions and re-route against those,
+  // which exactly matches where edges actually attach — fully generic, no
+  // per-node-type magic numbers.
+  const rf = useReactFlow();
+  const [shapeBoxes, setShapeBoxes] = useState<Map<string, Box> | null>(null);
+
+  // After the canvas mounts, read each node's real connection-handle
+  // positions (in flow coords) and use their bounding box as the routing
+  // shape. The handles attach to the visible BPMN glyph — which for
+  // gateways/events is smaller than and offset within the reserved
+  // NODE_SIZE bbox — so this exactly matches where edges actually leave
+  // and enter, with no per-node-type constants. We poll across a few
+  // animation frames because the handle DOM (and React Flow's fitView
+  // transform) settle a tick after the nodes first render.
+  useEffect(() => {
+    if (!graph) return;
+    setShapeBoxes(null);
+    let raf = 0;
+    let attempts = 0;
+    const measure = () => {
+      attempts += 1;
+      const map = new Map<string, Box>();
+      for (const n of graph.nodes) {
+        let el: Element | null = null;
+        try {
+          el = document.querySelector(
+            `.react-flow__node[data-id="${CSS.escape(n.id)}"]`,
+          );
+        } catch {
+          el = null;
+        }
+        const handles = el?.querySelectorAll(".react-flow__handle");
+        if (!handles || handles.length === 0) continue;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const h of handles) {
+          const r = h.getBoundingClientRect();
+          const f = rf.screenToFlowPosition({
+            x: r.left + r.width / 2,
+            y: r.top + r.height / 2,
+          });
+          minX = Math.min(minX, f.x);
+          minY = Math.min(minY, f.y);
+          maxX = Math.max(maxX, f.x);
+          maxY = Math.max(maxY, f.y);
+        }
+        if (!Number.isFinite(minX)) continue;
+        map.set(n.id, {
+          x: minX,
+          y: minY,
+          w: Math.max(maxX - minX, 1),
+          h: Math.max(maxY - minY, 1),
+        });
+      }
+      // Commit once every node is measured, or after we've given the DOM
+      // enough frames to settle (whichever comes first).
+      if (map.size >= graph.nodes.length || (map.size > 0 && attempts >= 12)) {
+        setShapeBoxes(map);
+        return;
+      }
+      if (attempts < 40) raf = requestAnimationFrame(measure);
+    };
+    raf = requestAnimationFrame(measure);
+    return () => cancelAnimationFrame(raf);
+  }, [graph, rf]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -322,52 +383,105 @@ function PreviewInner() {
       }
       return { x, y };
     }
-    const stepCenter = new Map<string, { x: number; y: number }>();
+    // Node bounding boxes in the SAME absolute flow space React Flow
+    // positions nodes/handles in. We use the RENDERED sizeFor() box (not
+    // the tiny webMethods ICON_ dims) so the obstacle router reasons
+    // about the boxes the user actually sees.
+    const boxFor = new Map<string, Box>();
+    const centerFor = new Map<string, { x: number; y: number }>();
     for (const n of graph.nodes) {
+      // Prefer the measured shape box (exact handle geometry) once the
+      // canvas has mounted; fall back to the reserved NODE_SIZE box on the
+      // very first render before measurement lands.
+      const measured = shapeBoxes?.get(n.id);
+      if (measured) {
+        boxFor.set(n.id, measured);
+        centerFor.set(n.id, {
+          x: measured.x + measured.w / 2,
+          y: measured.y + measured.h / 2,
+        });
+        continue;
+      }
       const origin = absoluteOrigin(n.parentId);
-      const baseX = origin.x + n.x * SCALE;
-      const baseY = origin.y + n.y * SCALE;
-      stepCenter.set(n.id, {
-        x: baseX + (n.width * SCALE) / 2,
-        y: baseY + (n.height * SCALE) / 2,
-      });
+      const sz = sizeFor(n.type);
+      const x = origin.x + n.x * SCALE;
+      const y = origin.y + n.y * SCALE;
+      boxFor.set(n.id, { x, y, w: sz.width, h: sz.height });
+      centerFor.set(n.id, { x: x + sz.width / 2, y: y + sz.height / 2 });
     }
 
     return graph.edges.map((e) => {
-      // Prefer API-supplied handles (BPD terminal hints); fall back to
-      // a geometric guess when the XML omitted them.
-      let sourceHandle = e.sourceHandle;
-      let targetHandle = e.targetHandle;
-      if (!sourceHandle || !targetHandle) {
-        const src = stepCenter.get(e.source);
-        const tgt = stepCenter.get(e.target);
-        const guess =
-          src && tgt
-            ? pickHandles(src, tgt)
-            : { sourceHandle: "s-right", targetHandle: "t-left" };
-        sourceHandle ??= guess.sourceHandle;
-        targetHandle ??= guess.targetHandle;
+      const sBox = boxFor.get(e.source);
+      const tBox = boxFor.get(e.target);
+
+      // Without geometry for both endpoints we can't route; fall back to
+      // the authored handles and a straight auto-route.
+      if (!sBox || !tBox) {
+        return {
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle ?? "s-right",
+          targetHandle: e.targetHandle ?? "t-left",
+          type: "sequence",
+          label: e.label ?? undefined,
+          style: e.conditional ? { strokeDasharray: "5 4" } : undefined,
+          data: {
+            isConditional: e.conditional,
+            waypoints: [],
+            conditionText: e.conditionText,
+          },
+        } satisfies Edge;
       }
-      const scaledWaypoints = e.waypoints?.length
-        ? e.waypoints.map((p) => ({ x: p.x * SCALE, y: p.y * SCALE }))
-        : [];
+
+      // Authored entry/exit sides (BPD terminal hints), or a geometric
+      // guess when the XML omitted them.
+      let sSide = handleToSide(e.sourceHandle);
+      let tSide = handleToSide(e.targetHandle);
+      if (!sSide || !tSide) {
+        const guess = pickHandles(
+          centerFor.get(e.source)!,
+          centerFor.get(e.target)!,
+        );
+        sSide ??= handleToSide(guess.sourceHandle);
+        tSide ??= handleToSide(guess.targetHandle);
+      }
+
+      const obstacles: Box[] = [];
+      for (const [id, b] of boxFor) {
+        if (id !== e.source && id !== e.target) obstacles.push(b);
+      }
+
+      // "GPS" pass: keep the authored route when it's already clean,
+      // otherwise steer around the boxes in the way (and re-pick the
+      // target entry side if the authored one is unreachable). webMethods
+      // bendpoints are intentionally ignored — they were authored for
+      // tiny icons and are unreliable at full BPMN box size.
+      const routed = routeEdge({
+        source: sBox,
+        target: tBox,
+        sourceSide: (sSide ?? "right") as Side,
+        targetSide: (tSide ?? "left") as Side,
+        obstacles,
+      });
+
       return {
         id: e.id,
         source: e.source,
         target: e.target,
-        sourceHandle,
-        targetHandle,
+        sourceHandle: sideToSourceHandle(routed.sourceSide),
+        targetHandle: sideToTargetHandle(routed.targetSide),
         type: "sequence",
         label: e.label ?? undefined,
         style: e.conditional ? { strokeDasharray: "5 4" } : undefined,
         data: {
           isConditional: e.conditional,
-          waypoints: scaledWaypoints,
+          waypoints: routed.waypoints,
           conditionText: e.conditionText,
         },
-      };
+      } satisfies Edge;
     });
-  }, [graph]);
+  }, [graph, shapeBoxes]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -449,26 +563,48 @@ function PreviewInner() {
           min-height: 0 !important;
         }
 
-        /* Counter-scale text against the viewport zoom so labels stay
-           at a constant on-screen pixel size regardless of how
-           zoomed-out the canvas is. Same trick bpmn-js uses.
+        /* Decision/gateway diamonds: the shared Designer gateway component
+           rounds its rotated square (borderRadius: 5 on a 50px box ≈ 10%),
+           which blunts the points so it reads as a tilted rounded square
+           rather than a crisp BPMN rhombus. Sharpen the corners here only
+           (scoped to the read-only preview, Designer untouched). The
+           rotated background div carries the .rounded class. */
+        .external-bpm-canvas .react-flow__node-exclusiveGateway .bpmn-gateway-node > .relative > div.rounded,
+        .external-bpm-canvas .react-flow__node-parallelGateway .bpmn-gateway-node > .relative > div.rounded,
+        .external-bpm-canvas .react-flow__node-inclusiveGateway .bpmn-gateway-node > .relative > div.rounded,
+        .external-bpm-canvas .react-flow__node-eventBasedGateway .bpmn-gateway-node > .relative > div.rounded {
+          border-radius: 0 !important;
+        }
 
-           --rf-zoom is updated in real time by <ZoomCssBridge> on every
-           viewport change. clamp() caps the counter-scale so text
-           doesn't grow absurdly when zooming way out (--rf-zoom
-           approaches 0) nor become microscopic when zooming way in.
+        /* Keep the diamond a true square. The gateway wrapper is a flex
+           column (diamond + label); inside our fixed-height preview node
+           the long webMethods labels wrap and the flex container shrinks
+           the 50×50 diamond box vertically (offsetHeight collapsed to ~29),
+           rendering a flattened rhombus. Pin the diamond container so it
+           never shrinks and stays square. */
+        .external-bpm-canvas .react-flow__node-exclusiveGateway .bpmn-gateway-node,
+        .external-bpm-canvas .react-flow__node-parallelGateway .bpmn-gateway-node,
+        .external-bpm-canvas .react-flow__node-inclusiveGateway .bpmn-gateway-node,
+        .external-bpm-canvas .react-flow__node-eventBasedGateway .bpmn-gateway-node {
+          justify-content: center !important;
+        }
+        .external-bpm-canvas .react-flow__node-exclusiveGateway .bpmn-gateway-node > .relative,
+        .external-bpm-canvas .react-flow__node-parallelGateway .bpmn-gateway-node > .relative,
+        .external-bpm-canvas .react-flow__node-inclusiveGateway .bpmn-gateway-node > .relative,
+        .external-bpm-canvas .react-flow__node-eventBasedGateway .bpmn-gateway-node > .relative {
+          flex-shrink: 0 !important;
+          flex-grow: 0 !important;
+          align-self: center !important;
+        }
 
-           The viewport's CSS transform: scale(zoom) is then applied
-           to this counter-scaled font, producing constant on-screen
-           pixels: scale × (base / scale) = base.
-
-           Base sizes (on-screen):
-             tasks         14 px
-             gateways/events 13 px
-             lane labels    14 px
-             edge labels    12 px */
+        /* Make ALL text inside step nodes bigger. The Designer's BPMN
+           components render labels in deeply nested spans/divs, so we
+           use a universal selector with !important to win against
+           their own font-size declarations. Use big numbers (18 / 20
+           px) so the text stays legible even when fitView zooms out
+           to 0.3-0.5 on wide diagrams. */
         .external-bpm-canvas .react-flow__node:not(.react-flow__node-pool):not(.react-flow__node-lane) * {
-          font-size: clamp(11px, calc(14px / var(--rf-zoom, 1)), 56px) !important;
+          font-size: 18px !important;
           line-height: 1.2 !important;
         }
         .external-bpm-canvas .react-flow__node-exclusiveGateway *,
@@ -479,23 +615,23 @@ function PreviewInner() {
         .external-bpm-canvas .react-flow__node-endEvent *,
         .external-bpm-canvas .react-flow__node-intermediateCatchEvent *,
         .external-bpm-canvas .react-flow__node-intermediateThrowEvent * {
-          font-size: clamp(10px, calc(13px / var(--rf-zoom, 1)), 52px) !important;
+          font-size: 16px !important;
         }
 
         /* Lane labels (vertical text on swimlane bands). */
         .external-bpm-canvas .react-flow__node-lane * {
-          font-size: clamp(11px, calc(14px / var(--rf-zoom, 1)), 56px) !important;
+          font-size: 18px !important;
         }
 
         /* Edge labels (condition text). */
         .external-bpm-canvas .react-flow__edge-textwrapper,
         .external-bpm-canvas .react-flow__edge-text {
-          font-size: clamp(9px, calc(12px / var(--rf-zoom, 1)), 48px) !important;
+          font-size: 16px !important;
           font-weight: 500;
         }
       `}</style>
 
-      <div ref={canvasRef} className="flex-1 relative bg-slate-50 external-bpm-canvas">
+      <div className="flex-1 relative bg-slate-50 external-bpm-canvas">
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500 z-10">
             Loading model from webMethods…
@@ -517,11 +653,19 @@ function PreviewInner() {
             elementsSelectable
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
             fitView
-            // fitView is allowed to choose freely — the per-node bbox
-            // sizing above ensures shapes are large enough at most
-            // zoom levels without needing a zoom floor.
-            fitViewOptions={{ padding: 0.08 }}
-            minZoom={0.15}
+            // Open at a READABLE zoom rather than fitting the whole
+            // (often very wide/tall) diagram into the viewport, which on
+            // big webMethods models drives the fit zoom down to ~0.13 and
+            // makes everything microscopic on load. Clamping fitView's
+            // own zoom to [0.5, 1] means:
+            //   • huge diagrams open at 0.5 anchored on the content; the
+            //     user pans to explore the rest (same as webMethods'
+            //     Designer, which opens at ~100% and scrolls);
+            //   • small diagrams don't balloon past 1× either.
+            // The component minZoom stays low so the user can still pinch
+            // all the way out to see the whole model at once when they want.
+            fitViewOptions={{ padding: 0.12, minZoom: 0.5, maxZoom: 1 }}
+            minZoom={0.1}
             maxZoom={2.5}
             panOnDrag
             panOnScroll
@@ -530,7 +674,6 @@ function PreviewInner() {
             zoomActivationKeyCode="Meta"
             proOptions={{ hideAttribution: true }}
           >
-            <ZoomCssBridge targetRef={canvasRef} />
             <Background color="#A5B4FC" gap={20} size={1.2} variant={BackgroundVariant.Dots} />
             <Controls showInteractive={false} />
             <MiniMap

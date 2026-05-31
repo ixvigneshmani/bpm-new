@@ -15,8 +15,9 @@
 import { Injectable, Logger, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import * as sql from 'mssql';
 import { ConfigService } from '@nestjs/config';
-import { mapWmTypeToBpmn, type BpmnNodeKind } from './wm-type-mapping';
+import { resolveNodeKind, type BpmnNodeKind } from './wm-type-mapping';
 import { parseBpdXml } from './bpd-xml-parser';
+import { compactLayout } from './layout-compaction';
 
 /** Map webMethods' uppercase terminal name (RIGHT / LEFT / TOP / BOTTOM)
  *  to the React Flow handle id exposed by the Designer's BPMN nodes
@@ -275,7 +276,7 @@ export class ExternalBpmService implements OnModuleDestroy {
     for (const l of containerMap.lanes) lanesById.set(l.id, l);
 
     const nodes: ExternalBpmNode[] = stepsRes.recordset.map((s) => {
-      const mappedType = mapWmTypeToBpmn(s.TYPE);
+      const mappedType = resolveNodeKind(s.TYPE, s.ICON_WIDTH, s.ICON_HEIGHT);
       const isImplicitStart = !incoming.has(s.STEPID) && mappedType !== 'endEvent';
       // Prefer swimlane membership; fall back to pool only when the
       // step's Y didn't land in any swimlane band.
@@ -379,45 +380,54 @@ export class ExternalBpmService implements OnModuleDestroy {
       }
     }
 
-    const containers: ExternalBpmContainer[] = [
-      ...containerMap.pools
-        .filter((p) => usedPoolIds.has(p.id))
-        .map<ExternalBpmContainer>((p) => ({
-          type: 'pool',
-          id: p.id,
-          label: p.label,
-          x: p.x,
-          y: p.y,
-          width: p.width,
-          height: p.height,
-          parentId: null,
-        })),
-      ...containerMap.lanes
-        .filter((l) => usedLaneIds.has(l.id))
-        .map<ExternalBpmContainer>((l) => ({
-          type: 'lane',
-          id: l.id,
-          label: l.label,
-          x: l.x,
-          y: l.y,
-          width: l.width,
-          height: l.height,
-          parentId: l.poolId,
-          orientation: l.orientation,
-          bgColor: l.bgColor,
-          labelBgColor: l.labelBgColor,
-        })),
-    ];
+    // Keep only the containers that actually hold steps.
+    const usedPools = containerMap.pools.filter((p) => usedPoolIds.has(p.id));
+    const usedLanes = containerMap.lanes.filter((l) => usedLaneIds.has(l.id));
 
     // If a node's parentId refers to a container we just dropped (lane
     // exists in XML but isn't used by any DB step, etc.), null out the
-    // parentId so the node doesn't end up orphaned at render time.
-    const keptContainerIds = new Set(containers.map((c) => c.id));
+    // parentId so the node doesn't end up orphaned — and isn't pulled
+    // into a pool's compaction set — at render time.
+    const keptContainerIds = new Set<string>([
+      ...usedPools.map((p) => p.id),
+      ...usedLanes.map((l) => l.id),
+    ]);
     for (const n of nodes) {
       if (n.parentId && !keptContainerIds.has(n.parentId)) {
         n.parentId = null;
       }
     }
+
+    // Squeeze out the sparse webMethods whitespace so the model opens at
+    // a readable size instead of a tiny speck. Mutates the kept pools /
+    // lanes / nodes / edge-waypoints in place. See layout-compaction.ts.
+    compactLayout(usedPools, usedLanes, nodes, edges);
+
+    const containers: ExternalBpmContainer[] = [
+      ...usedPools.map<ExternalBpmContainer>((p) => ({
+        type: 'pool',
+        id: p.id,
+        label: p.label,
+        x: p.x,
+        y: p.y,
+        width: p.width,
+        height: p.height,
+        parentId: null,
+      })),
+      ...usedLanes.map<ExternalBpmContainer>((l) => ({
+        type: 'lane',
+        id: l.id,
+        label: l.label,
+        x: l.x,
+        y: l.y,
+        width: l.width,
+        height: l.height,
+        parentId: l.poolId,
+        orientation: l.orientation,
+        bgColor: l.bgColor,
+        labelBgColor: l.labelBgColor,
+      })),
+    ];
 
     return { model, containers, nodes, edges };
   }
