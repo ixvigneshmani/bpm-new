@@ -17,7 +17,7 @@
  *    (webMethods' soft yellow #ffffcc).
  * ────────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Background,
@@ -27,6 +27,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  useStore,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -158,6 +159,26 @@ function pickHandles(
     : { sourceHandle: "s-top", targetHandle: "t-bottom" };
 }
 
+/** Lives inside <ReactFlow> so it can subscribe to the React Flow store.
+ *  Reads the current viewport zoom and writes it onto `--rf-zoom` on
+ *  the canvas wrapper, so our CSS rules can counter-scale text via
+ *  `calc(base / var(--rf-zoom))` and keep it at a constant on-screen
+ *  size regardless of how zoomed-out the canvas is. This is the same
+ *  trick bpmn-js uses for label legibility. */
+function ZoomCssBridge({
+  targetRef,
+}: {
+  targetRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const zoom = useStore((s) => s.transform[2]);
+  useEffect(() => {
+    const el = targetRef.current;
+    if (!el) return;
+    el.style.setProperty("--rf-zoom", String(zoom || 1));
+  }, [zoom, targetRef]);
+  return null;
+}
+
 function PreviewInner() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -168,6 +189,8 @@ function PreviewInner() {
   const [graph, setGraph] = useState<ExternalGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Ref to the canvas wrapper — the CSS-var target for counter-scaling. */
+  const canvasRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -426,14 +449,26 @@ function PreviewInner() {
           min-height: 0 !important;
         }
 
-        /* Make ALL text inside step nodes bigger. The Designer's BPMN
-           components render labels in deeply nested spans/divs, so we
-           use a universal selector with !important to win against
-           their own font-size declarations. Use big numbers (18 / 20
-           px) so the text stays legible even when fitView zooms out
-           to 0.3-0.5 on wide diagrams. */
+        /* Counter-scale text against the viewport zoom so labels stay
+           at a constant on-screen pixel size regardless of how
+           zoomed-out the canvas is. Same trick bpmn-js uses.
+
+           --rf-zoom is updated in real time by <ZoomCssBridge> on every
+           viewport change. clamp() caps the counter-scale so text
+           doesn't grow absurdly when zooming way out (--rf-zoom
+           approaches 0) nor become microscopic when zooming way in.
+
+           The viewport's CSS transform: scale(zoom) is then applied
+           to this counter-scaled font, producing constant on-screen
+           pixels: scale × (base / scale) = base.
+
+           Base sizes (on-screen):
+             tasks         14 px
+             gateways/events 13 px
+             lane labels    14 px
+             edge labels    12 px */
         .external-bpm-canvas .react-flow__node:not(.react-flow__node-pool):not(.react-flow__node-lane) * {
-          font-size: 18px !important;
+          font-size: clamp(11px, calc(14px / var(--rf-zoom, 1)), 56px) !important;
           line-height: 1.2 !important;
         }
         .external-bpm-canvas .react-flow__node-exclusiveGateway *,
@@ -444,23 +479,23 @@ function PreviewInner() {
         .external-bpm-canvas .react-flow__node-endEvent *,
         .external-bpm-canvas .react-flow__node-intermediateCatchEvent *,
         .external-bpm-canvas .react-flow__node-intermediateThrowEvent * {
-          font-size: 16px !important;
+          font-size: clamp(10px, calc(13px / var(--rf-zoom, 1)), 52px) !important;
         }
 
         /* Lane labels (vertical text on swimlane bands). */
         .external-bpm-canvas .react-flow__node-lane * {
-          font-size: 18px !important;
+          font-size: clamp(11px, calc(14px / var(--rf-zoom, 1)), 56px) !important;
         }
 
         /* Edge labels (condition text). */
         .external-bpm-canvas .react-flow__edge-textwrapper,
         .external-bpm-canvas .react-flow__edge-text {
-          font-size: 16px !important;
+          font-size: clamp(9px, calc(12px / var(--rf-zoom, 1)), 48px) !important;
           font-weight: 500;
         }
       `}</style>
 
-      <div className="flex-1 relative bg-slate-50 external-bpm-canvas">
+      <div ref={canvasRef} className="flex-1 relative bg-slate-50 external-bpm-canvas">
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500 z-10">
             Loading model from webMethods…
@@ -495,6 +530,7 @@ function PreviewInner() {
             zoomActivationKeyCode="Meta"
             proOptions={{ hideAttribution: true }}
           >
+            <ZoomCssBridge targetRef={canvasRef} />
             <Background color="#A5B4FC" gap={20} size={1.2} variant={BackgroundVariant.Dots} />
             <Controls showInteractive={false} />
             <MiniMap
