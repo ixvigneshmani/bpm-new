@@ -34,6 +34,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.module";
 import {
+  compensationHandlers,
   engineJobs,
   instanceEvents,
   instanceTokens,
@@ -235,6 +236,13 @@ export class EngineService {
     this.timerScheduler?.registerCallback(
       "process-start-timer",
       (t) => this.fireProcessStartTimer(t),
+    );
+    // P4 event-closure — intermediate timer-catch dispatcher. Token
+    // parks at the catch node with waitingFor='timer-catch'; this
+    // callback resumes it when the timer fires.
+    this.timerScheduler?.registerCallback(
+      "intermediate-catch-timer",
+      (t) => this.fireIntermediateCatchTimer(t),
     );
   }
 
@@ -734,6 +742,29 @@ export class EngineService {
             });
             return adv;
           }
+          // P4 event-closure — compensation end event. Fires all
+          // compensation handlers in the throwing scope (root or
+          // subprocess), then drains the throwing token.
+          if (endDef?.kind === "compensation") {
+            const scopeRows = await args.tx
+              .select({ scopeTokenId: instanceTokens.scopeTokenId })
+              .from(instanceTokens)
+              .where(eq(instanceTokens.id, args.tokenId))
+              .limit(1);
+            const throwScopeTokenId =
+              (scopeRows[0]?.scopeTokenId as string | null) ?? null;
+            await this.fireCompensation({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: args.instanceId,
+              throwScopeTokenId,
+              throwNodeId: nodeId,
+              throwingTokenId: args.tokenId,
+              canvas: args.canvas,
+              variables: args.variables,
+            });
+            // Fall through to drain the throwing token (end event).
+          }
           await recordEvent(args.tx, {
             tenantId: args.tenantId,
             instanceId: args.instanceId,
@@ -957,6 +988,16 @@ export class EngineService {
             hostNodeId: nodeId,
             canvas: args.canvas,
           });
+          // P4 event-closure — subscribe non-timer boundaries
+          // (message/signal/conditional) attached to this host.
+          await this.subscribeNonTimerBoundaries({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            hostTokenId: args.tokenId,
+            hostNodeId: nodeId,
+            canvas: args.canvas,
+          });
           return { tokenStatus: "waiting", hops };
         }
 
@@ -1142,6 +1183,59 @@ export class EngineService {
         // condition is already true when the token enters, fall through
         // immediately without parking. This is the BPMN spec behavior
         // and saves a write-then-fire round trip.
+        // P4 event-closure — intermediate timer-catch. Token parks
+        // mid-flow until the timer fires (vs. start-event timer which
+        // SPAWNS a fresh instance, and boundary timer which interrupts
+        // its HOST). Token's currentNodeId stays on the catch node;
+        // SCHEDULED_TIMERS row points to the parked token; the fire
+        // callback wakes it and advances past the catch.
+        if (
+          node.type === "intermediateCatchEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "timer")
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const def = (node as any).data.eventDefinition as {
+            timerType?: string;
+            value?: string;
+          };
+          const fireAt = resolveTimerFireAt(def);
+          if (!fireAt) {
+            const m = `intermediateCatchEvent ${nodeId}: kind=timer but value "${def.value ?? ""}" could not be parsed.`;
+            await this.markTokenFailed(
+              args.tx, args.tenantId, args.instanceId, args.tokenId,
+              version, nodeId, m,
+            );
+            return { tokenStatus: "failed", hops, errorMessage: m };
+          }
+          version = await this.updateTokenWithLock(
+            args.tx, args.tokenId, version,
+            { status: "waiting", waitingFor: "timer-catch", currentNodeId: nodeId },
+          );
+          if (this.timerScheduler) {
+            await this.timerScheduler.scheduleTimer(
+              {
+                tenantId: args.tenantId,
+                instanceId: args.instanceId,
+                tokenId: args.tokenId,
+                fireAt,
+                kind: "intermediate-catch-timer",
+                payload: { nodeId, value: def.value ?? "" },
+              },
+              args.tx,
+            );
+          }
+          await recordEvent(args.tx, {
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            tokenId: args.tokenId,
+            nodeId,
+            eventType: "token-waiting",
+            payload: { waitingFor: "timer-catch", fireAt: fireAt.toISOString() },
+          });
+          return { tokenStatus: "waiting", hops };
+        }
+
         if (
           node.type === "intermediateCatchEvent" &&
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1150,8 +1244,12 @@ export class EngineService {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const def = (node as any).data.eventDefinition as {
             conditionExpression?: string;
+            // Legacy: older Designer wrote `condition` instead of
+            // `conditionExpression`. Read both so pre-fix canvases
+            // keep working until republish.
+            condition?: string;
           };
-          const expr = (def.conditionExpression ?? "").trim();
+          const expr = (def.conditionExpression ?? def.condition ?? "").trim();
           if (!expr) {
             const m = `intermediateCatchEvent ${nodeId}: kind=conditional but no conditionExpression configured.`;
             await this.markTokenFailed(
@@ -1441,6 +1539,34 @@ export class EngineService {
           // Fall through to default outgoing-edge handling.
         }
 
+        // P4 event-closure — intermediate compensation throw. Fires
+        // handlers in the throwing scope; token then continues past
+        // the throw (compensation is non-blocking in this implementation).
+        if (
+          node.type === "intermediateThrowEvent" &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ((node as any).data?.eventDefinition?.kind === "compensation")
+        ) {
+          const scopeRows = await args.tx
+            .select({ scopeTokenId: instanceTokens.scopeTokenId })
+            .from(instanceTokens)
+            .where(eq(instanceTokens.id, args.tokenId))
+            .limit(1);
+          const throwScopeTokenId =
+            (scopeRows[0]?.scopeTokenId as string | null) ?? null;
+          await this.fireCompensation({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            throwScopeTokenId,
+            throwNodeId: nodeId,
+            throwingTokenId: args.tokenId,
+            canvas: args.canvas,
+            variables: args.variables,
+          });
+          // Fall through.
+        }
+
         // Wait state: service task suspends the token until the
         // worker handler completes the job and calls back into
         // completeServiceTask. Topic resolution: the canvas's
@@ -1510,6 +1636,16 @@ export class EngineService {
             hostNodeId: nodeId,
             canvas: args.canvas,
           });
+          // P4 event-closure — subscribe non-timer boundaries
+          // (message/signal/conditional) attached to this host.
+          await this.subscribeNonTimerBoundaries({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            hostTokenId: args.tokenId,
+            hostNodeId: nodeId,
+            canvas: args.canvas,
+          });
           return { tokenStatus: "waiting", hops };
         }
 
@@ -1569,6 +1705,16 @@ export class EngineService {
           // subscribe here. Interrupting fire later kills the parent
           // + all scoped descendants.
           await this.subscribeBoundaryTimers({
+            tx: args.tx,
+            tenantId: args.tenantId,
+            instanceId: args.instanceId,
+            hostTokenId: args.tokenId,
+            hostNodeId: nodeId,
+            canvas: args.canvas,
+          });
+          // P4 event-closure — subscribe non-timer boundaries
+          // (message/signal/conditional) attached to this host.
+          await this.subscribeNonTimerBoundaries({
             tx: args.tx,
             tenantId: args.tenantId,
             instanceId: args.instanceId,
@@ -2152,6 +2298,355 @@ export class EngineService {
    *  the canvas. Cancellation is implicit: cancelTimer(hostTokenId)
    *  deletes every row keyed by token_id — including these — at host
    *  exit, alongside the task-due reminder. */
+  /** P4 event-closure — at host-activity-enter, subscribe attached
+   *  non-timer boundaries (message/signal/conditional) so that when
+   *  those events fire, they interrupt this host. Mirrors
+   *  subscribeBoundaryTimers' shape but writes into the relevant
+   *  subscription tables with BOUNDARY_NODE_ID set. Boundary-fire
+   *  semantics (interrupting vs non-interrupting) are read at dispatch
+   *  time, not at subscribe time. */
+  private async subscribeNonTimerBoundaries(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    hostTokenId: string;
+    hostNodeId: string;
+    canvas: EngineCanvas;
+  }): Promise<void> {
+    const boundaries = args.canvas.nodes.filter((n) => {
+      if (n.type !== "boundaryEvent") return false;
+      const d = n.data as
+        | { attachedToRef?: string; eventDefinition?: { kind?: string } }
+        | undefined;
+      if (d?.attachedToRef !== args.hostNodeId) return false;
+      const k = d?.eventDefinition?.kind;
+      return k === "message" || k === "signal" || k === "conditional";
+    });
+    for (const bnd of boundaries) {
+      const d = bnd.data as {
+        eventDefinition?: {
+          kind?: string;
+          messageName?: string;
+          correlationKey?: string;
+          signalName?: string;
+          conditionExpression?: string;
+          condition?: string;
+        };
+      };
+      const kind = d.eventDefinition?.kind;
+      if (kind === "message" && this.messageSubscriptions) {
+        const messageName = (d.eventDefinition?.messageName ?? "").trim();
+        if (!messageName) {
+          this.logger.warn(
+            `Boundary message ${bnd.id}: no messageName configured; skipping.`,
+          );
+          continue;
+        }
+        let correlationKey = (d.eventDefinition?.correlationKey ?? "").trim();
+        if (!correlationKey) {
+          const bkRows = await args.tx
+            .select({ businessKey: processInstances.businessKey })
+            .from(processInstances)
+            .where(eq(processInstances.id, args.instanceId))
+            .limit(1);
+          correlationKey = (bkRows[0]?.businessKey ?? "").trim();
+        }
+        if (!correlationKey) {
+          this.logger.warn(
+            `Boundary message ${bnd.id}: no correlation key (no eventDefinition.correlationKey + no instance.businessKey); skipping.`,
+          );
+          continue;
+        }
+        await this.messageSubscriptions.subscribe({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          scopeTokenId: null,
+          messageName,
+          correlationKey,
+          boundaryNodeId: bnd.id,
+          tx: args.tx,
+        });
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          nodeId: args.hostNodeId,
+          eventType: "boundary-subscribed",
+          payload: { boundaryNodeId: bnd.id, kind: "message", messageName, correlationKey },
+        });
+      } else if (kind === "signal" && this.signalSubscriptions) {
+        const signalName = (d.eventDefinition?.signalName ?? "").trim();
+        if (!signalName) {
+          this.logger.warn(
+            `Boundary signal ${bnd.id}: no signalName configured; skipping.`,
+          );
+          continue;
+        }
+        await this.signalSubscriptions.subscribeCatch({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          scopeTokenId: null,
+          signalName,
+          boundaryNodeId: bnd.id,
+          tx: args.tx,
+        });
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          nodeId: args.hostNodeId,
+          eventType: "boundary-subscribed",
+          payload: { boundaryNodeId: bnd.id, kind: "signal", signalName },
+        });
+      } else if (kind === "conditional" && this.conditionalSubscriptions) {
+        const expr = (
+          d.eventDefinition?.conditionExpression ??
+          d.eventDefinition?.condition ?? ""
+        ).trim();
+        if (!expr) {
+          this.logger.warn(
+            `Boundary conditional ${bnd.id}: no conditionExpression configured; skipping.`,
+          );
+          continue;
+        }
+        await this.conditionalSubscriptions.subscribeCatch({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          scopeTokenId: null,
+          conditionExpression: expr,
+          boundaryNodeId: bnd.id,
+          tx: args.tx,
+        });
+        await recordEvent(args.tx, {
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: args.hostTokenId,
+          nodeId: args.hostNodeId,
+          eventType: "boundary-subscribed",
+          payload: { boundaryNodeId: bnd.id, kind: "conditional", expression: expr },
+        });
+      }
+    }
+  }
+
+  /** P4 event-closure — register compensation handlers attached to a
+   *  freshly-completed activity. Eager registration matches Camunda 7:
+   *  the row exists from the moment the activity completes, so a later
+   *  compensation throw can find it without re-scanning history.
+   *
+   *  An activity has a compensation handler if a boundaryEvent with
+   *  kind="compensation" is attached. The handler's "undo" runs at the
+   *  boundary's outgoing edge target. */
+  private async registerCompensationHandlersForActivity(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    activityNodeId: string;
+    scopeTokenId: string | null;
+    canvas: EngineCanvas;
+  }): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handlers = (args.canvas.nodes as any[]).filter((n) => {
+      if (n.type !== "boundaryEvent") return false;
+      if (n.data?.attachedToRef !== args.activityNodeId) return false;
+      return n.data?.eventDefinition?.kind === "compensation";
+    });
+    for (const bnd of handlers) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outgoing = (args.canvas.edges as any[]).find((e) => e.source === bnd.id);
+      if (!outgoing) {
+        this.logger.warn(
+          `Compensation handler ${bnd.id}: no outgoing edge — handler will not be registered.`,
+        );
+        continue;
+      }
+      await args.tx
+        .insert(compensationHandlers)
+        .values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          scopeTokenId: args.scopeTokenId,
+          activityNodeId: args.activityNodeId,
+          handlerBoundaryId: bnd.id,
+          handlerActivityId: outgoing.target,
+        });
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        nodeId: args.activityNodeId,
+        eventType: "compensation-handler-registered",
+        payload: {
+          handlerBoundaryId: bnd.id,
+          handlerActivityId: outgoing.target,
+          scopeTokenId: args.scopeTokenId,
+        },
+      });
+    }
+  }
+
+  /** P4 event-closure — fire compensation in the throwing scope.
+   *  Queries COMPENSATION_HANDLERS scoped to the throw (root or
+   *  subprocess), fires each in reverse-of-completion order
+   *  (Saga / Camunda semantics), then DELETEs them so a second throw
+   *  doesn't double-fire.
+   *
+   *  Handler firing model: spawn a token at the handler activity's
+   *  ID and advance. The handler is typically a serviceTask (synchronous
+   *  undo) — for those, advanceToken completes inline. For async
+   *  handler activities (userTask), this fires the handler but does
+   *  NOT wait for it to complete — the throw event continues. This is
+   *  fire-and-forget semantics; spec-compliant "wait for all handlers"
+   *  is a future enhancement.
+   *
+   *  Returns the number of handlers fired (for the throw event's audit). */
+  private async fireCompensation(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    /** Scope where the compensation throw lives. Null = root scope. */
+    throwScopeTokenId: string | null;
+    throwNodeId: string;
+    throwingTokenId: string;
+    canvas: EngineCanvas;
+    variables: Record<string, unknown>;
+  }): Promise<{ fired: number }> {
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "compensation-thrown",
+      payload: { scopeTokenId: args.throwScopeTokenId },
+    });
+
+    // Query handlers in the throwing scope. Root-scope throw → handlers
+    // with scope_token_id IS NULL. Subprocess-scope throw → handlers
+    // with scope_token_id = throw scope.
+    const handlers = await args.tx
+      .select({
+        id: compensationHandlers.id,
+        activityNodeId: compensationHandlers.activityNodeId,
+        handlerBoundaryId: compensationHandlers.handlerBoundaryId,
+        handlerActivityId: compensationHandlers.handlerActivityId,
+        completedAt: compensationHandlers.completedAt,
+      })
+      .from(compensationHandlers)
+      .where(
+        and(
+          eq(compensationHandlers.instanceId, args.instanceId),
+          args.throwScopeTokenId === null
+            ? isNull(compensationHandlers.scopeTokenId)
+            : eq(compensationHandlers.scopeTokenId, args.throwScopeTokenId),
+        ),
+      )
+      .orderBy(desc(compensationHandlers.completedAt));
+
+    let fired = 0;
+    for (const h of handlers as Array<{
+      id: string;
+      activityNodeId: string;
+      handlerBoundaryId: string;
+      handlerActivityId: string;
+    }>) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlerNode = (args.canvas.nodes as any[]).find((n) => n.id === h.handlerActivityId);
+      if (!handlerNode) {
+        this.logger.warn(
+          `fireCompensation: handler activity ${h.handlerActivityId} not on canvas; skipping.`,
+        );
+        continue;
+      }
+      // Spawn handler token. scopeTokenId = throw scope (handler runs
+      // in same scope as throw). parentTokenId = throwing token for
+      // audit-tree clarity.
+      const childRows = await args.tx
+        .insert(instanceTokens)
+        .values({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          currentNodeId: h.handlerActivityId,
+          status: "active",
+          parentTokenId: args.throwingTokenId,
+          scopeTokenId: args.throwScopeTokenId,
+        })
+        .returning({ id: instanceTokens.id, version: instanceTokens.version });
+      const child = childRows[0];
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: child.id,
+        nodeId: h.handlerActivityId,
+        eventType: "token-created",
+        payload: {
+          parentTokenId: args.throwingTokenId,
+          scopeTokenId: args.throwScopeTokenId,
+          via: "compensation-handler",
+          handlerForActivity: h.activityNodeId,
+        },
+      });
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        tokenId: child.id,
+        nodeId: h.handlerActivityId,
+        eventType: "compensation-handler-fired",
+        payload: {
+          handlerBoundaryId: h.handlerBoundaryId,
+          handlerActivityId: h.handlerActivityId,
+          forActivity: h.activityNodeId,
+        },
+      });
+      // Advance the handler token. For sync handlers (serviceTask
+      // with sync impl) it completes inline; for async handlers
+      // (userTask) it parks and runs eventually — throw event
+      // continues regardless (fire-and-forget).
+      try {
+        await this.advanceToken({
+          tx: args.tx,
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          tokenId: child.id,
+          tokenVersion: child.version ?? 0,
+          currentNodeId: h.handlerActivityId,
+          canvas: args.canvas,
+          variables: args.variables,
+        });
+      } catch (e) {
+        this.logger.warn(
+          `fireCompensation: handler ${h.handlerActivityId} failed: ${(e as Error).message}`,
+        );
+      }
+      fired++;
+    }
+
+    // Delete fired handlers so a second compensation throw in the same
+    // scope doesn't re-fire them.
+    if (handlers.length > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlerIds = (handlers as Array<{ id: string }>).map((h) => h.id);
+      await args.tx
+        .delete(compensationHandlers)
+        .where(inArray(compensationHandlers.id, handlerIds));
+    }
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.throwingTokenId,
+      nodeId: args.throwNodeId,
+      eventType: "compensation-completed",
+      payload: { handlersFired: fired, scopeTokenId: args.throwScopeTokenId },
+    });
+
+    return { fired };
+  }
+
   private async subscribeBoundaryTimers(args: {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tx: any;
@@ -4916,6 +5411,340 @@ export class EngineService {
    *  scope siblings before the spawn (root scope = the whole instance;
    *  subprocess scope = direct scope children). Non-interrupting just
    *  spawns alongside running siblings. */
+  /** P4 event-closure — dispatcher for the `intermediate-catch-timer`
+   *  kind. Loads the parked token, verifies still waiting on
+   *  `timer-catch`, flips it to active, advances past the catch.
+   *  Mid-flow wait — distinct from boundary (which interrupts a host)
+   *  and start-event (which spawns a fresh instance). */
+  /** P4 event-closure — boundary signal wrapper. Loads host + canvas
+   *  + boundary metadata, then delegates to fireNonTimerBoundary. */
+  private async fireSignalBoundary(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    hostTokenId: string;
+    boundaryNodeId: string;
+    signalName: string;
+  }): Promise<void> {
+    const tokRows = await args.tx
+      .select({
+        currentNodeId: instanceTokens.currentNodeId,
+        status: instanceTokens.status,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.hostTokenId))
+      .limit(1);
+    const host = tokRows[0];
+    if (!host || host.status === "completed" || host.status === "failed") return;
+    const instRow = await this.loadInstanceById(args.tx, args.instanceId, args.tenantId);
+    const canvas = await this.loadCanvasForInstance(args.tx, instRow);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const boundary = (canvas.nodes as any[]).find((n) => n.id === args.boundaryNodeId);
+    if (!boundary) return;
+    const interrupting = boundary.data?.cancelActivity !== false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const outgoing = (canvas.edges as any[]).find((e) => e.source === args.boundaryNodeId);
+    if (!outgoing) {
+      this.logger.warn(`Boundary signal ${args.boundaryNodeId} has no outgoing flow.`);
+      return;
+    }
+    await this.fireNonTimerBoundary({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      hostTokenId: args.hostTokenId,
+      hostNodeId: host.currentNodeId as string,
+      boundaryNodeId: args.boundaryNodeId,
+      interrupting,
+      outgoingTarget: outgoing.target,
+      kind: "signal",
+      payload: { signalName: args.signalName },
+      canvas,
+      variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+    });
+  }
+
+  /** P4 event-closure — shared fire path for non-timer boundaries
+   *  (message/signal/conditional). Interrupting: mark host failed +
+   *  bulk-kill scope children; spawn recovery token at boundary's
+   *  outgoing edge inheriting host's parent scope. Non-interrupting:
+   *  leave host running; spawn sibling token at outgoing edge with
+   *  host's PARENT scope (matches Session 6a timer-boundary
+   *  semantics). Returns the same delivery-result shape as
+   *  deliverMessage so callers can plumb it through. */
+  private async fireNonTimerBoundary(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    hostTokenId: string;
+    hostNodeId: string;
+    boundaryNodeId: string;
+    interrupting: boolean;
+    outgoingTarget: string;
+    kind: "message" | "signal" | "conditional";
+    payload: Record<string, unknown>;
+    canvas: EngineCanvas;
+    variables: Record<string, unknown>;
+  }): Promise<{
+    outcome: "delivered";
+    instanceId: string;
+    instanceStatus: "running" | "completed" | "failed";
+    tokenStatus: "completed" | "waiting" | "failed";
+  }> {
+    // Read host token's parent scope (for non-interrupting sibling
+    // OR interrupting recovery — both inherit the host's parent scope).
+    const hostRows = await args.tx
+      .select({
+        version: instanceTokens.version,
+        scopeTokenId: instanceTokens.scopeTokenId,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.hostTokenId))
+      .limit(1);
+    const host = hostRows[0];
+    if (!host) {
+      throw new Error(`Boundary fire: host token ${args.hostTokenId} disappeared mid-fire.`);
+    }
+    const parentScopeId = (host.scopeTokenId as string | null) ?? null;
+
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: args.hostTokenId,
+      nodeId: args.hostNodeId,
+      eventType: "boundary-fired",
+      payload: {
+        boundaryNodeId: args.boundaryNodeId,
+        kind: args.kind,
+        interrupting: args.interrupting,
+        target: args.outgoingTarget,
+        ...args.payload,
+      },
+    });
+
+    if (args.interrupting) {
+      await this.updateTokenWithLock(
+        args.tx, args.hostTokenId, host.version as number,
+        {
+          status: "failed",
+          errorMessage: `Interrupted by ${args.kind} boundary ${args.boundaryNodeId}.`,
+        },
+      );
+      await args.tx
+        .update(instanceTokens)
+        .set({
+          status: "failed",
+          errorMessage: `Cancelled by ${args.kind} boundary ${args.boundaryNodeId} on enclosing host.`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(instanceTokens.scopeTokenId, args.hostTokenId),
+            inArray(instanceTokens.status, ["active", "waiting"] as const),
+          ),
+        );
+      // Cancel sibling timers + non-timer subscriptions on the host.
+      await this.timerScheduler?.cancelTimer(args.hostTokenId, args.tx);
+      await this.messageSubscriptions?.unsubscribe(args.hostTokenId, args.tx);
+      await this.signalSubscriptions?.unsubscribeToken(args.hostTokenId, args.tx);
+      await this.conditionalSubscriptions?.unsubscribeToken(args.hostTokenId, args.tx);
+    } else {
+      // Non-interrupting: just unsubscribe THIS boundary so it doesn't
+      // re-fire on the next message/signal/condition. Other boundaries
+      // attached to the host stay subscribed. Simplest implementation:
+      // unsubscribe by token AND boundaryNodeId — delete row tied to
+      // this specific boundary.
+      if (args.kind === "message") {
+        await args.tx.execute(sql`
+          DELETE FROM "MESSAGE_SUBSCRIPTIONS"
+          WHERE "TOKEN_ID" = ${args.hostTokenId}
+            AND "BOUNDARY_NODE_ID" = ${args.boundaryNodeId}
+        `);
+      } else if (args.kind === "signal") {
+        await args.tx.execute(sql`
+          DELETE FROM "SIGNAL_SUBSCRIPTIONS"
+          WHERE "TOKEN_ID" = ${args.hostTokenId}
+            AND "BOUNDARY_NODE_ID" = ${args.boundaryNodeId}
+        `);
+      } else if (args.kind === "conditional") {
+        await args.tx.execute(sql`
+          DELETE FROM "CONDITIONAL_SUBSCRIPTIONS"
+          WHERE "TOKEN_ID" = ${args.hostTokenId}
+            AND "BOUNDARY_NODE_ID" = ${args.boundaryNodeId}
+        `);
+      }
+    }
+
+    // Spawn the recovery / sibling token at the boundary's outgoing
+    // edge target. Inherits host's PARENT scope.
+    const childRows = await args.tx
+      .insert(instanceTokens)
+      .values({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        currentNodeId: args.outgoingTarget,
+        status: "active",
+        parentTokenId: args.hostTokenId,
+        scopeTokenId: parentScopeId,
+      })
+      .returning({ id: instanceTokens.id, version: instanceTokens.version });
+    const child = childRows[0];
+    await recordEvent(args.tx, {
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: child.id,
+      nodeId: args.outgoingTarget,
+      eventType: "token-created",
+      payload: {
+        parentTokenId: args.hostTokenId,
+        scopeTokenId: parentScopeId,
+        via: `${args.kind}-boundary${args.interrupting ? "" : "-non-interrupting"}`,
+      },
+    });
+    const adv = await this.advanceToken({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      tokenId: child.id,
+      tokenVersion: child.version ?? 0,
+      currentNodeId: args.outgoingTarget,
+      canvas: args.canvas,
+      variables: args.variables,
+    });
+
+    let instanceStatus: "running" | "completed" | "failed" = "running";
+    if (adv.tokenStatus === "completed" && (await this.countLiveTokens(args.tx, args.instanceId)) === 0) {
+      await args.tx
+        .update(processInstances)
+        .set({ status: "completed", completedAt: new Date() })
+        .where(eq(processInstances.id, args.instanceId));
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-completed",
+        payload: { via: `${args.kind}-boundary`, hops: adv.hops },
+      });
+      instanceStatus = "completed";
+      await this.maybeResumeParentFromChild({
+        tx: args.tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+        childStatus: "completed", childErrorMessage: null, hops: adv.hops,
+      });
+    } else if (adv.tokenStatus === "failed") {
+      await args.tx
+        .update(processInstances)
+        .set({ status: "failed", errorMessage: adv.errorMessage ?? null, completedAt: new Date() })
+        .where(eq(processInstances.id, args.instanceId));
+      await recordEvent(args.tx, {
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        eventType: "instance-failed",
+        payload: { via: `${args.kind}-boundary`, hops: adv.hops, message: adv.errorMessage },
+      });
+      instanceStatus = "failed";
+      await this.maybeResumeParentFromChild({
+        tx: args.tx, tenantId: args.tenantId, childInstanceId: args.instanceId,
+        childStatus: "failed", childErrorMessage: adv.errorMessage ?? null, hops: adv.hops,
+      });
+    }
+
+    return {
+      outcome: "delivered",
+      instanceId: args.instanceId,
+      instanceStatus,
+      tokenStatus: adv.tokenStatus,
+    };
+  }
+
+  private async fireIntermediateCatchTimer(t: ClaimedTimer): Promise<void> {
+    if (!t.tokenId) return;
+    const payload = t.payload as { nodeId?: string } | null;
+    const tokenId = t.tokenId;
+    await this.db.transaction(async (tx) => {
+      const tokRows = await tx
+        .select({
+          id: instanceTokens.id,
+          version: instanceTokens.version,
+          status: instanceTokens.status,
+          waitingFor: instanceTokens.waitingFor,
+          currentNodeId: instanceTokens.currentNodeId,
+          instanceId: instanceTokens.instanceId,
+          tenantId: instanceTokens.tenantId,
+        })
+        .from(instanceTokens)
+        .where(eq(instanceTokens.id, tokenId))
+        .limit(1);
+      const tok = tokRows[0];
+      if (!tok || tok.status !== "waiting" || tok.waitingFor !== "timer-catch") {
+        // Token already moved or was cancelled. Drop silently.
+        return;
+      }
+      const instRow = await this.loadInstanceById(tx, tok.instanceId as string, tok.tenantId as string);
+      const canvas = await this.loadCanvasForInstance(tx, instRow);
+      const newVer = await this.updateTokenWithLock(
+        tx, tokenId, tok.version as number,
+        { status: "active", waitingFor: null },
+      );
+      await recordEvent(tx, {
+        tenantId: tok.tenantId as string,
+        instanceId: tok.instanceId as string,
+        tokenId,
+        nodeId: tok.currentNodeId as string,
+        eventType: "token-resumed",
+        payload: { via: "intermediate-catch-timer", nodeId: payload?.nodeId },
+      });
+      const adv = await this.advanceToken({
+        tx,
+        tenantId: tok.tenantId as string,
+        instanceId: tok.instanceId as string,
+        tokenId,
+        tokenVersion: newVer,
+        currentNodeId: tok.currentNodeId as string,
+        canvas,
+        variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+        resumeFromWait: true,
+      });
+      if (adv.tokenStatus === "completed" && (await this.countLiveTokens(tx, tok.instanceId as string)) === 0) {
+        await tx
+          .update(processInstances)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(processInstances.id, tok.instanceId as string));
+        await recordEvent(tx, {
+          tenantId: tok.tenantId as string,
+          instanceId: tok.instanceId as string,
+          eventType: "instance-completed",
+          payload: { via: "intermediate-catch-timer", hops: adv.hops },
+        });
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: tok.tenantId as string,
+          childInstanceId: tok.instanceId as string,
+          childStatus: "completed", childErrorMessage: null, hops: adv.hops,
+        });
+      } else if (adv.tokenStatus === "failed") {
+        await tx
+          .update(processInstances)
+          .set({
+            status: "failed",
+            errorMessage: adv.errorMessage ?? null,
+            completedAt: new Date(),
+          })
+          .where(eq(processInstances.id, tok.instanceId as string));
+        await recordEvent(tx, {
+          tenantId: tok.tenantId as string,
+          instanceId: tok.instanceId as string,
+          eventType: "instance-failed",
+          payload: { via: "intermediate-catch-timer", hops: adv.hops, message: adv.errorMessage },
+        });
+        await this.maybeResumeParentFromChild({
+          tx, tenantId: tok.tenantId as string,
+          childInstanceId: tok.instanceId as string,
+          childStatus: "failed", childErrorMessage: adv.errorMessage ?? null, hops: adv.hops,
+        });
+      }
+    });
+  }
+
   private async fireEventSubProcessStart(t: ClaimedTimer): Promise<void> {
     if (!t.tokenId) return;
     const payload = t.payload as
@@ -5309,6 +6138,13 @@ export class EngineService {
       if (this.timerScheduler) {
         await this.timerScheduler.cancelTimer(args.tokenId, tx);
       }
+      // P4 event-closure — also cancel any boundary message/signal/
+      // conditional subscriptions attached to this host. Without this,
+      // stale subscriptions could survive after the host completes
+      // and (defensively) be matched by a later event arrival.
+      await this.messageSubscriptions?.unsubscribe(args.tokenId, tx);
+      await this.signalSubscriptions?.unsubscribeToken(args.tokenId, tx);
+      await this.conditionalSubscriptions?.unsubscribeToken(args.tokenId, tx);
 
       // 1. Audit task-completed FIRST so it acts as the user-facing
       //    anchor in any timeline replay — the variable-set rows that
@@ -5334,6 +6170,17 @@ export class EngineService {
           completedBy: args.userId,
           ...(args.actingBy ? { actingBy: args.actingBy } : {}),
         },
+      });
+
+      // P4 event-closure — register compensation handlers for this
+      // completed userTask (BPMN allows comp handlers on userTask too).
+      await this.registerCompensationHandlersForActivity({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        activityNodeId: tokenRow.currentNodeId,
+        scopeTokenId: (tokenRow as { scopeTokenId?: string | null }).scopeTokenId ?? null,
+        canvas,
       });
 
       // 2. Shallow-merge form output into the instance variable bag.
@@ -5569,10 +6416,17 @@ export class EngineService {
         .where(eq(instanceTokens.id, sub.tokenId))
         .limit(1);
       const tokenRow = tokenRows[0];
+      // P4 event-closure — boundary subscriptions point at the HOST
+      // token, which won't be waiting on `message`. Stale-check only
+      // applies to plain intermediate-catch subscriptions.
+      const isBoundary = !!sub.boundaryNodeId;
+      if (!tokenRow || tokenRow.status === "completed" || tokenRow.status === "failed") {
+        await this.messageSubscriptions!.unsubscribe(sub.tokenId, tx);
+        return { outcome: "no-subscription" as const };
+      }
       if (
-        !tokenRow ||
-        tokenRow.status !== "waiting" ||
-        tokenRow.waitingFor !== "message"
+        !isBoundary &&
+        (tokenRow.status !== "waiting" || tokenRow.waitingFor !== "message")
       ) {
         // Stale subscription row pointing at a token that's already
         // moved on. Delete + report no-subscription.
@@ -5585,6 +6439,40 @@ export class EngineService {
         args.tenantId,
       );
       const canvas = await this.loadCanvasForInstance(tx, instRow);
+
+      // P4 event-closure — boundary message: interrupt host (if
+      // interrupting) and spawn token at boundary's outgoing edge.
+      if (isBoundary) {
+        const boundaryNodeId = sub.boundaryNodeId as string;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const boundary = (canvas.nodes as any[]).find((n) => n.id === boundaryNodeId);
+        if (!boundary) {
+          await this.messageSubscriptions!.unsubscribe(sub.tokenId, tx);
+          return { outcome: "no-subscription" as const };
+        }
+        const interrupting = boundary.data?.cancelActivity !== false;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const outgoing = (canvas.edges as any[]).find((e) => e.source === boundaryNodeId);
+        if (!outgoing) {
+          this.logger.warn(`Boundary message ${boundaryNodeId} has no outgoing flow.`);
+          await this.messageSubscriptions!.unsubscribe(sub.tokenId, tx);
+          return { outcome: "no-subscription" as const };
+        }
+        return await this.fireNonTimerBoundary({
+          tx,
+          tenantId: args.tenantId,
+          instanceId: tokenRow.instanceId,
+          hostTokenId: tokenRow.id,
+          hostNodeId: tokenRow.currentNodeId,
+          boundaryNodeId,
+          interrupting,
+          outgoingTarget: outgoing.target,
+          kind: "message",
+          payload: { messageName: args.messageName, correlationKey: args.correlationKey },
+          canvas,
+          variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+        });
+      }
 
       // Merge payload into instance.variables. Shallow merge — same
       // contract as completeTask.formData. Empty/undefined payload =
@@ -5796,6 +6684,22 @@ export class EngineService {
     for (const sub of subs) {
       if (!sub.tokenId) continue;
       if (!evaluateConditionalExpression(sub.conditionExpression, variables)) continue;
+      // P4 event-closure — boundary conditional: fire the boundary.
+      if (sub.boundaryNodeId) {
+        try {
+          await this.fireConditionalBoundary({
+            tx, tenantId, instanceId,
+            hostTokenId: sub.tokenId,
+            boundaryNodeId: sub.boundaryNodeId,
+            expression: sub.conditionExpression,
+          });
+        } catch (e) {
+          this.logger.warn(
+            `evaluatePendingConditions: boundary fire failed for ${sub.boundaryNodeId}: ${(e as Error).message}`,
+          );
+        }
+        continue;
+      }
       try {
         await this.resumeTokenFromCondition({
           tx, tenantId, instanceId, tokenId: sub.tokenId,
@@ -5807,6 +6711,54 @@ export class EngineService {
         );
       }
     }
+  }
+
+  /** P4 event-closure — conditional boundary wrapper. */
+  private async fireConditionalBoundary(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any;
+    tenantId: string;
+    instanceId: string;
+    hostTokenId: string;
+    boundaryNodeId: string;
+    expression: string;
+  }): Promise<void> {
+    const tokRows = await args.tx
+      .select({
+        currentNodeId: instanceTokens.currentNodeId,
+        status: instanceTokens.status,
+      })
+      .from(instanceTokens)
+      .where(eq(instanceTokens.id, args.hostTokenId))
+      .limit(1);
+    const host = tokRows[0];
+    if (!host || host.status === "completed" || host.status === "failed") return;
+    const instRow = await this.loadInstanceById(args.tx, args.instanceId, args.tenantId);
+    const canvas = await this.loadCanvasForInstance(args.tx, instRow);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const boundary = (canvas.nodes as any[]).find((n) => n.id === args.boundaryNodeId);
+    if (!boundary) return;
+    const interrupting = boundary.data?.cancelActivity !== false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const outgoing = (canvas.edges as any[]).find((e) => e.source === args.boundaryNodeId);
+    if (!outgoing) {
+      this.logger.warn(`Boundary conditional ${args.boundaryNodeId} has no outgoing flow.`);
+      return;
+    }
+    await this.fireNonTimerBoundary({
+      tx: args.tx,
+      tenantId: args.tenantId,
+      instanceId: args.instanceId,
+      hostTokenId: args.hostTokenId,
+      hostNodeId: host.currentNodeId as string,
+      boundaryNodeId: args.boundaryNodeId,
+      interrupting,
+      outgoingTarget: outgoing.target,
+      kind: "conditional",
+      payload: { expression: args.expression },
+      canvas,
+      variables: (instRow.variables as Record<string, unknown> | null) ?? {},
+    });
   }
 
   /** Same shape as resumeTokenFromSignal — terminal: completes the
@@ -6009,6 +6961,26 @@ export class EngineService {
       if (sub.tokenId && sub.instanceId) {
         if (args.throwingInstanceId && sub.instanceId === args.throwingInstanceId) {
           skippedSelf++;
+          continue;
+        }
+        // P4 event-closure — boundary signal: interrupt host instead
+        // of resuming a parked catcher.
+        if (sub.boundaryNodeId) {
+          try {
+            await this.fireSignalBoundary({
+              tx: args.tx,
+              tenantId: args.tenantId,
+              instanceId: sub.instanceId,
+              hostTokenId: sub.tokenId,
+              boundaryNodeId: sub.boundaryNodeId,
+              signalName: args.signalName,
+            });
+            catchesResumed++;
+          } catch (e) {
+            this.logger.warn(
+              `Signal boundary fan-out: failed to fire boundary ${sub.boundaryNodeId} on ${args.signalName}: ${(e as Error).message}`,
+            );
+          }
           continue;
         }
         try {
@@ -6261,6 +7233,18 @@ export class EngineService {
         tokenId: args.tokenId,
         nodeId: tokenRow.currentNodeId,
         eventType: "token-resumed",
+      });
+
+      // P4 event-closure — register compensation handlers for this
+      // completed serviceTask (Saga's canonical "book hotel" → "cancel
+      // hotel" pattern).
+      await this.registerCompensationHandlersForActivity({
+        tx,
+        tenantId: args.tenantId,
+        instanceId: tokenRow.instanceId,
+        activityNodeId: tokenRow.currentNodeId,
+        scopeTokenId: (tokenRow as { scopeTokenId?: string | null }).scopeTokenId ?? null,
+        canvas,
       });
 
       const advance = await this.advanceToken({
@@ -7002,6 +7986,11 @@ export class EngineService {
       if (this.timerScheduler) {
         await this.timerScheduler.cancelTimer(args.tokenId, tx);
       }
+      // P4 event-closure — cancel boundary message/signal/conditional
+      // subscriptions on this host (skipTask path).
+      await this.messageSubscriptions?.unsubscribe(args.tokenId, tx);
+      await this.signalSubscriptions?.unsubscribeToken(args.tokenId, tx);
+      await this.conditionalSubscriptions?.unsubscribeToken(args.tokenId, tx);
 
       await recordEvent(tx, {
         tenantId: args.tenantId,

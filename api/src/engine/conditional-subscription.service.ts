@@ -26,6 +26,8 @@ export interface SubscribeCatchArgs {
   tokenId: string;
   scopeTokenId?: string | null;
   conditionExpression: string;
+  /** P4 event-closure — set for conditional BOUNDARY catchers. */
+  boundaryNodeId?: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx?: any;
 }
@@ -46,6 +48,7 @@ export interface ListedSubscription {
   scopeTokenId: string | null;
   processId: string | null;
   conditionExpression: string;
+  boundaryNodeId: string | null;
 }
 
 @Injectable()
@@ -65,6 +68,7 @@ export class ConditionalSubscriptionService {
         scopeTokenId: args.scopeTokenId ?? null,
         conditionExpression: args.conditionExpression,
         processId: null,
+        boundaryNodeId: args.boundaryNodeId ?? null,
       })
       .returning({ id: conditionalSubscriptions.id });
     return { id: rows[0].id };
@@ -104,6 +108,7 @@ export class ConditionalSubscriptionService {
         scopeTokenId: conditionalSubscriptions.scopeTokenId,
         processId: conditionalSubscriptions.processId,
         conditionExpression: conditionalSubscriptions.conditionExpression,
+        boundaryNodeId: conditionalSubscriptions.boundaryNodeId,
       })
       .from(conditionalSubscriptions)
       .where(eq(conditionalSubscriptions.instanceId, instanceId));

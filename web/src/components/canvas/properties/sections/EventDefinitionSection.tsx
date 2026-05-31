@@ -89,7 +89,7 @@ export default function EventDefinitionSection({ definition, onChange, variant }
       case "timer":        onChange({ kind: "timer", timerType: "duration", value: "" }); break;
       case "message":      onChange({ kind: "message", messageName: "" }); break;
       case "signal":       onChange({ kind: "signal", signalName: "" }); break;
-      case "conditional":  onChange({ kind: "conditional", condition: "" }); break;
+      case "conditional":  onChange({ kind: "conditional", conditionExpression: "" }); break;
       case "error":        onChange({ kind: "error", errorCode: "" }); break;
       case "terminate":    onChange({ kind: "terminate" }); break;
       case "escalation":   onChange({ kind: "escalation", escalationCode: "" }); break;
@@ -326,8 +326,8 @@ export default function EventDefinitionSection({ definition, onChange, variant }
         <div style={configBox}>
           <FeelExpressionInput
             label="Condition"
-            value={definition.condition}
-            onChange={(v) => onChange({ ...definition, condition: v })}
+            value={definition.conditionExpression}
+            onChange={(v) => onChange({ ...definition, conditionExpression: v })}
             placeholder="= order.status = 'pending'"
           />
         </div>

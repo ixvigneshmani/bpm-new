@@ -36,6 +36,10 @@ export interface SubscribeArgs {
   scopeTokenId?: string | null;
   messageName: string;
   correlationKey: string;
+  /** P4 event-closure — when set, this subscription represents a
+   *  message BOUNDARY catcher attached to a host activity (tokenId =
+   *  host token). Null for intermediate-catch subscriptions. */
+  boundaryNodeId?: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx?: any;
 }
@@ -48,6 +52,7 @@ export interface LockedSubscription {
   scopeTokenId: string | null;
   messageName: string;
   correlationKey: string;
+  boundaryNodeId: string | null;
 }
 
 @Injectable()
@@ -69,6 +74,7 @@ export class MessageSubscriptionService {
         scopeTokenId: args.scopeTokenId ?? null,
         messageName: args.messageName,
         correlationKey: args.correlationKey,
+        boundaryNodeId: args.boundaryNodeId ?? null,
       })
       .returning({ id: messageSubscriptions.id });
     return { id: rows[0].id };
@@ -95,7 +101,8 @@ export class MessageSubscriptionService {
              "TOKEN_ID" AS "tokenId",
              "SCOPE_TOKEN_ID" AS "scopeTokenId",
              "MESSAGE_NAME" AS "messageName",
-             "CORRELATION_KEY" AS "correlationKey"
+             "CORRELATION_KEY" AS "correlationKey",
+             "BOUNDARY_NODE_ID" AS "boundaryNodeId"
       FROM "MESSAGE_SUBSCRIPTIONS"
       WHERE "TENANT_ID" = ${tenantId}
         AND "MESSAGE_NAME" = ${messageName}

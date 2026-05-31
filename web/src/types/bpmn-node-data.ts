@@ -43,7 +43,11 @@ export type SignalDefinition = {
 
 export type ConditionalDefinition = {
   kind: "conditional";
-  condition: FeelExpression;
+  /** FEEL expression. Canonical key is `conditionExpression` to match
+   *  the engine + DB column (CONDITIONAL_SUBSCRIPTIONS.CONDITION_EXPRESSION).
+   *  Legacy `condition` is read by the engine as a fallback so existing
+   *  pre-fix canvases keep working until republish. */
+  conditionExpression: FeelExpression;
 };
 
 export type ErrorDefinition = {

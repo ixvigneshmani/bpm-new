@@ -1242,6 +1242,11 @@ export const instanceEventTypeEnum = pgEnum("INSTANCE_EVENT_TYPE", [
   "child-instance-completed",
   "child-instance-failed",
   "call-completed",
+  // P4 event-closure — compensation lifecycle.
+  "compensation-thrown",
+  "compensation-handler-registered",
+  "compensation-handler-fired",
+  "compensation-completed",
 ]);
 
 export const instanceEvents = pgTable(
@@ -1418,6 +1423,12 @@ export const messageSubscriptions = pgTable(
     }),
     messageName: varchar("MESSAGE_NAME", { length: 255 }).notNull(),
     correlationKey: varchar("CORRELATION_KEY", { length: 255 }).notNull(),
+    /** P4 event-closure — when set, this subscription is a BOUNDARY
+     *  catcher attached to a host activity (tokenId points to the host
+     *  token). When NULL, it's a regular intermediate-catch park.
+     *  Dispatcher branches on this to fire the boundary (interrupting
+     *  vs non-interrupting) instead of normal resume. */
+    boundaryNodeId: varchar("BOUNDARY_NODE_ID", { length: 255 }),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1468,6 +1479,8 @@ export const signalSubscriptions = pgTable(
       onDelete: "cascade",
     }),
     signalName: varchar("SIGNAL_NAME", { length: 255 }).notNull(),
+    /** P4 event-closure — boundary catcher marker (see MESSAGE_SUBSCRIPTIONS). */
+    boundaryNodeId: varchar("BOUNDARY_NODE_ID", { length: 255 }),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1550,6 +1563,8 @@ export const conditionalSubscriptions = pgTable(
       onDelete: "cascade",
     }),
     conditionExpression: varchar("CONDITION_EXPRESSION", { length: 4096 }).notNull(),
+    /** P4 event-closure — boundary catcher marker (see MESSAGE_SUBSCRIPTIONS). */
+    boundaryNodeId: varchar("BOUNDARY_NODE_ID", { length: 255 }),
     createdAt: timestamp("CREATED_AT", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1559,5 +1574,54 @@ export const conditionalSubscriptions = pgTable(
     index("CONDITIONAL_SUB_INSTANCE_IDX").on(t.instanceId),
     index("CONDITIONAL_SUB_TOKEN_IDX").on(t.tokenId),
     index("CONDITIONAL_SUB_PROCESS_IDX").on(t.processId),
+  ],
+);
+
+/* ─── COMPENSATION_HANDLERS ──────────────────────────────────────────
+ *
+ * P4 event-closure. INSERTed when an activity with a
+ * `compensateBoundaryEvent` attached completes successfully. The
+ * compensation throw event walks these rows in reverse-of-completion
+ * order within the throwing scope and spawns a token at each
+ * handler's compensation activity.
+ *
+ * Pattern matches Camunda 7: handlers are registered eagerly at
+ * activity-completion (not lazily at throw time) so any later state
+ * change in the activity row doesn't break handler discovery.
+ * ──────────────────────────────────────────────────────────────────── */
+export const compensationHandlers = pgTable(
+  "COMPENSATION_HANDLERS",
+  {
+    id: uuid("ID").primaryKey().defaultRandom(),
+    tenantId: uuid("TENANT_ID")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: uuid("INSTANCE_ID")
+      .notNull()
+      .references(() => processInstances.id, { onDelete: "cascade" }),
+    /** Scope token of the parent scope (subprocess parent token, or
+     *  null for root scope). Compensation throw scopes its query here. */
+    scopeTokenId: uuid("SCOPE_TOKEN_ID").references(() => instanceTokens.id, {
+      onDelete: "cascade",
+    }),
+    /** The activity that completed and has compensation attached. */
+    activityNodeId: varchar("ACTIVITY_NODE_ID", { length: 255 }).notNull(),
+    /** The compensateBoundaryEvent. */
+    handlerBoundaryId: varchar("HANDLER_BOUNDARY_ID", { length: 255 }).notNull(),
+    /** The activity at the boundary's outgoing edge — what actually
+     *  runs as the undo. */
+    handlerActivityId: varchar("HANDLER_ACTIVITY_ID", { length: 255 }).notNull(),
+    completedAt: timestamp("COMPLETED_AT", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("COMP_HANDLERS_INSTANCE_IDX").on(t.instanceId),
+    // Scope-filtered + reverse-time-ordered query (the firing order).
+    index("COMP_HANDLERS_SCOPE_COMPLETED_IDX").on(
+      t.instanceId,
+      t.scopeTokenId,
+      t.completedAt.desc(),
+    ),
   ],
 );

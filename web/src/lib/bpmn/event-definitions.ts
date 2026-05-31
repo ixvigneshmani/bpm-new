@@ -174,8 +174,8 @@ export function buildEventDefinitionElements(
       return [moddle.create("bpmn:CancelEventDefinition", {}) as unknown as ModdleElement];
     case "conditional": {
       const el = moddle.create("bpmn:ConditionalEventDefinition", {}) as unknown as ModdleElement;
-      if (def.condition) {
-        el.condition = moddle.create("bpmn:FormalExpression", { body: def.condition });
+      if (def.conditionExpression) {
+        el.condition = moddle.create("bpmn:FormalExpression", { body: def.conditionExpression });
       }
       return [el];
     }
@@ -289,7 +289,7 @@ export function readEventDefinition(
       return { kind: "cancel" };
     case "bpmn:ConditionalEventDefinition": {
       const cond = d.condition as ModdleElement | undefined;
-      return { kind: "conditional", condition: (cond?.body as string) || "" };
+      return { kind: "conditional", conditionExpression: (cond?.body as string) || "" };
     }
     case "bpmn:LinkEventDefinition":
       return { kind: "link", linkName: (d.name as string) || "" };

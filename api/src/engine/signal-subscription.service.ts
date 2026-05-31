@@ -27,6 +27,8 @@ export interface SubscribeCatchArgs {
   tokenId: string;
   scopeTokenId?: string | null;
   signalName: string;
+  /** P4 event-closure — set for signal BOUNDARY catchers. */
+  boundaryNodeId?: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx?: any;
 }
@@ -47,6 +49,7 @@ export interface ListedSubscription {
   scopeTokenId: string | null;
   processId: string | null;
   signalName: string;
+  boundaryNodeId: string | null;
 }
 
 @Injectable()
@@ -67,6 +70,7 @@ export class SignalSubscriptionService {
         scopeTokenId: args.scopeTokenId ?? null,
         signalName: args.signalName,
         processId: null,
+        boundaryNodeId: args.boundaryNodeId ?? null,
       })
       .returning({ id: signalSubscriptions.id });
     return { id: rows[0].id };
@@ -106,6 +110,7 @@ export class SignalSubscriptionService {
         scopeTokenId: signalSubscriptions.scopeTokenId,
         processId: signalSubscriptions.processId,
         signalName: signalSubscriptions.signalName,
+        boundaryNodeId: signalSubscriptions.boundaryNodeId,
       })
       .from(signalSubscriptions)
       .where(
