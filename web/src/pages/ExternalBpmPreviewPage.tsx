@@ -960,66 +960,114 @@ function PreviewInner() {
   }, [graph, shapeBoxes]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      <header className="flex items-center justify-between gap-4 px-6 py-3 border-b border-slate-200 bg-white">
-        <div className="min-w-0">
-          <button
-            onClick={() => navigate("/external-bpm")}
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        gap: 12,
+        overflow: "hidden",
+      }}
+    >
+      {/* Back button on the AppShell gray, like InstanceDetailPage —
+          gives the page its first breathing line before the title. */}
+      <div>
+        <button
+          onClick={() => navigate("/external-bpm")}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "4px 10px 4px 8px",
+            borderRadius: 6,
+            border: "1px solid #E5E7EB",
+            background: "#fff",
+            fontSize: 12,
+            color: "#475467",
+            fontWeight: 500,
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+          Back to External Processes
+        </button>
+      </div>
+
+      {/* Title row — uses the same h1 + caption typography as the
+          ExternalBpmListPage so the two screens feel like one product. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h1
+            className="truncate"
             style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "4px 10px 4px 8px",
-              borderRadius: 6,
-              border: "1px solid #E5E7EB",
-              background: "#fff",
-              fontSize: 12,
-              color: "#475467",
-              fontWeight: 500,
-              cursor: "pointer",
-              fontFamily: "inherit",
-              marginBottom: 10,
+              fontSize: 22,
+              fontWeight: 700,
+              color: "#101828",
+              letterSpacing: "-0.02em",
+              margin: 0,
             }}
           >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <polyline points="15 18 9 12 15 6" />
-            </svg>
-            Back to External Processes
-          </button>
-          <h1 className="text-lg font-semibold text-slate-800 truncate">
             {graph?.model.label ?? "Loading…"}
           </h1>
-          <p className="text-xs text-slate-500 font-mono truncate">
+          <p
+            className="truncate font-mono"
+            style={{
+              fontSize: 12,
+              color: "#667085",
+              margin: "4px 0 0",
+            }}
+          >
             {processKey} · v{modelVersion} · deploy {deploymentVersion}
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs text-slate-400">
-          {graph && (
-            <>
-              <span>
-                {(graph.containers ?? []).filter((c) => c.type === "pool").length} pool
-                {(graph.containers ?? []).filter((c) => c.type === "pool").length === 1 ? "" : "s"}
-              </span>
-              <span>·</span>
-              <span>
-                {(graph.containers ?? []).filter((c) => c.type === "lane").length}{" "}
-                swimlanes
-              </span>
-              <span>·</span>
-              <span>{graph.nodes.length} nodes</span>
-              <span>·</span>
-              <span>{graph.edges.length} edges</span>
-            </>
-          )}
-        </div>
-      </header>
+        {graph && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              fontSize: 12,
+              color: "#667085",
+              flexShrink: 0,
+            }}
+          >
+            <span>
+              {(graph.containers ?? []).filter((c) => c.type === "pool").length}{" "}
+              pool
+              {(graph.containers ?? []).filter((c) => c.type === "pool").length === 1
+                ? ""
+                : "s"}
+            </span>
+            <span>·</span>
+            <span>
+              {(graph.containers ?? []).filter((c) => c.type === "lane").length}{" "}
+              swimlanes
+            </span>
+            <span>·</span>
+            <span>{graph.nodes.length} nodes</span>
+            <span>·</span>
+            <span>{graph.edges.length} edges</span>
+          </div>
+        )}
+      </div>
 
       {/* Designer's BpmnLane hardcodes a background on its inner
          div; these !important overrides let our per-node CSS vars
@@ -1131,7 +1179,16 @@ function PreviewInner() {
         }
       `}</style>
 
-      <div className="flex-1 relative bg-slate-50 external-bpm-canvas">
+      <div
+        className="flex-1 relative external-bpm-canvas"
+        style={{
+          background: "#fff",
+          border: "1px solid #E5E7EB",
+          borderRadius: 10,
+          overflow: "hidden",
+          minHeight: 0,
+        }}
+      >
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500 z-10">
             Loading model from webMethods…
