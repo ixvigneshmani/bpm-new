@@ -124,6 +124,12 @@ interface ExternalNode {
   pipelineOut?: PipelineDoc[];
 }
 
+/** Drawer tab identity. Persisted in the URL as `?tab=…` so a teammate's
+ *  link drops them in the same view (Overview / Pipeline / Connections /
+ *  More). The "More" bucket holds Position + Identifiers — small enough
+ *  not to deserve their own tab. */
+type DrawerTab = "overview" | "pipeline" | "connections" | "more";
+
 /** One pipeline document slot on a step. `label` strips the
  *  `{namespace}` prefix for friendly display; `typeFqn` is the
  *  Document Type the IS Admin client resolves on demand. */
@@ -240,18 +246,36 @@ function extractTaskId(component: string | null | undefined): string | null {
 
 /** Right-side drawer showing the selected step's key details. Sourced
  *  entirely from data already on the client (the preview API payload +
- *  the in-memory graph) — no per-click round trip. Sections collapse
- *  themselves when their underlying data is empty so the drawer stays
- *  short on plain steps and grows only when there's something to show. */
+ *  the in-memory graph) — except the Pipeline tab, which lazy-loads
+ *  Document Type schemas via the IS Admin API on click.
+ *
+ *  Layout is tabbed (Overview / Pipeline / Connections / More) so big
+ *  schemas don't stack on top of the small step metadata. The Pipeline
+ *  tab uses a master-detail pattern: list of IN/OUT docs by default,
+ *  schema viewer (breadcrumb + search + field grid) once a doc is
+ *  picked — nested recrefs push another segment onto the breadcrumb,
+ *  keeping the visible surface focused on one level at a time. */
 function StepDetailsDrawer(props: {
   node: ExternalNode;
   allNodes: ExternalNode[];
   allEdges: ExternalEdge[];
+  tab: DrawerTab;
+  setTab: (tab: DrawerTab) => void;
+  drillPath: string[];
+  setDrillPath: (path: string[]) => void;
   onClose: () => void;
 }) {
-  const { node, allNodes, allEdges, onClose } = props;
+  const {
+    node,
+    allNodes,
+    allEdges,
+    tab,
+    setTab,
+    drillPath,
+    setDrillPath,
+    onClose,
+  } = props;
   const kindLabel = KIND_LABELS[node.type] ?? node.type;
-  const taskId = extractTaskId(node.component);
   const incoming = useMemo(
     () => allEdges.filter((e) => e.target === node.id),
     [allEdges, node.id],
@@ -265,26 +289,12 @@ function StepDetailsDrawer(props: {
     for (const n of allNodes) m.set(n.id, n.label || n.id);
     return m;
   }, [allNodes]);
-  const [identifiersOpen, setIdentifiersOpen] = useState(false);
-  const [positionOpen, setPositionOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  // Pipeline expansion state — a set of dot-path keys ("in:0",
-  // "in:0:taskConfig", "in:0:taskConfig:actions", …) so the same UI
-  // primitive handles top-level docs AND recursive recref drilldowns.
-  // Lives inside the drawer so it resets when a different step is
-  // selected, while module-level TYPE_SCHEMA_CACHE keeps already-
-  // fetched schemas so re-expanding is instant.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  // Trigger to nudge re-renders when async type fetches resolve;
-  // module cache returns the same Promise so we can't useState on it
-  // directly. Bumped after each successful fetch.
+  // Re-render tick when an async type schema fetch resolves; the module
+  // cache returns the same Promise across renders so we can't useState
+  // on it directly. Bumped after each fetch settles.
   const [, setTick] = useState(0);
   const onTypeLoaded = useCallback(() => setTick((t) => t + 1), []);
-  const hasPipeline =
-    (node.pipelineIn?.length ?? 0) > 0 || (node.pipelineOut?.length ?? 0) > 0;
-  // Auto-widen the drawer once anything in the pipeline tree opens —
-  // 380 reads cramped at 3+ levels of indent, 440 stays comfortable.
-  const drawerWidth = expanded.size > 0 ? 440 : 380;
   const onCopyStepId = useCallback(() => {
     void navigator.clipboard?.writeText(node.id).then(() => {
       setCopied(true);
@@ -292,18 +302,14 @@ function StepDetailsDrawer(props: {
     });
   }, [node.id]);
 
-  // Behavior section content depends on the BPMN kind.
-  let behaviorRows: Array<{ label: string; value: string }> = [];
-  if (node.type === "userTask" && taskId) {
-    behaviorRows.push({ label: "Task ID", value: taskId });
-  } else if (node.type === "serviceTask") {
-    if (node.component) behaviorRows.push({ label: "Service", value: node.component });
-    if (node.server) behaviorRows.push({ label: "Server", value: node.server });
-  } else if (node.type === "callActivity") {
-    if (node.component) behaviorRows.push({ label: "Subprocess", value: node.component });
-  } else if (node.component) {
-    behaviorRows.push({ label: "Component", value: node.component });
-  }
+  const inCount = node.pipelineIn?.length ?? 0;
+  const outCount = node.pipelineOut?.length ?? 0;
+  const hasPipeline = inCount + outCount > 0;
+  const connectionCount = incoming.length + outgoing.length;
+  // If the user clicks the Pipeline tab on a step that has none, fall
+  // back to Overview so we don't render an empty pane.
+  const effectiveTab: DrawerTab =
+    tab === "pipeline" && !hasPipeline ? "overview" : tab;
 
   return (
     <aside
@@ -314,8 +320,7 @@ function StepDetailsDrawer(props: {
         top: 12,
         right: 12,
         bottom: 12,
-        width: drawerWidth,
-        transition: "width 200ms ease-out",
+        width: 460,
         background: "#fff",
         border: "1px solid #E5E7EB",
         borderRadius: 10,
@@ -416,227 +421,47 @@ function StepDetailsDrawer(props: {
         </button>
       </header>
 
-      {/* Body */}
+      {/* Tab bar — sticky between header and body. */}
+      <DrawerTabBar
+        active={effectiveTab}
+        onChange={setTab}
+        tabs={[
+          { id: "overview", label: "Overview" },
+          {
+            id: "pipeline",
+            label: `Pipeline (${inCount + outCount})`,
+            disabled: !hasPipeline,
+            title: hasPipeline
+              ? `${inCount} input · ${outCount} output`
+              : "No pipeline IN/OUT on this step",
+          },
+          {
+            id: "connections",
+            label: `Connections (${connectionCount})`,
+          },
+          { id: "more", label: "More" },
+        ]}
+      />
+
+      {/* Body — one of four tab panes. */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
-        {node.description && (
-          <Section title="Description">
-            <p style={{ margin: 0, lineHeight: 1.5, color: "#334155" }}>
-              {node.description}
-            </p>
-          </Section>
+        {effectiveTab === "overview" && <OverviewTab node={node} />}
+        {effectiveTab === "pipeline" && hasPipeline && (
+          <PipelineTab
+            node={node}
+            drillPath={drillPath}
+            setDrillPath={setDrillPath}
+            onTypeLoaded={onTypeLoaded}
+          />
         )}
-
-        {behaviorRows.length > 0 && (
-          <Section title="Behavior">
-            <dl
-              style={{
-                margin: 0,
-                display: "grid",
-                gridTemplateColumns: "max-content 1fr",
-                rowGap: 6,
-                columnGap: 10,
-              }}
-            >
-              {behaviorRows.map((r) => (
-                <Fragment key={r.label}>
-                  <dt style={{ color: "#64748B", fontSize: 12 }}>{r.label}</dt>
-                  <dd
-                    style={{
-                      margin: 0,
-                      fontFamily:
-                        r.label === "Task ID"
-                          ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
-                          : "inherit",
-                      fontSize: r.label === "Task ID" ? 11 : 13,
-                      wordBreak: "break-all",
-                      color: "#0F172A",
-                    }}
-                  >
-                    {r.value}
-                  </dd>
-                </Fragment>
-              ))}
-            </dl>
-          </Section>
+        {effectiveTab === "connections" && (
+          <ConnectionsTab
+            incoming={incoming}
+            outgoing={outgoing}
+            nodeLabelById={nodeLabelById}
+          />
         )}
-
-        {hasPipeline && (
-          <Section
-            title={`Pipeline (${node.pipelineIn?.length ?? 0} in · ${node.pipelineOut?.length ?? 0} out)`}
-          >
-            {(node.pipelineIn?.length ?? 0) > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div
-                  style={{
-                    color: "#64748B",
-                    fontSize: 11,
-                    marginBottom: 4,
-                  }}
-                >
-                  Input
-                </div>
-                {node.pipelineIn!.map((doc, i) => (
-                  <PipelineDocRow
-                    key={`in-${i}`}
-                    doc={doc}
-                    pathKey={`in:${i}`}
-                    expanded={expanded}
-                    setExpanded={setExpanded}
-                    onTypeLoaded={onTypeLoaded}
-                    depth={0}
-                  />
-                ))}
-              </div>
-            )}
-            {(node.pipelineOut?.length ?? 0) > 0 && (
-              <div>
-                <div
-                  style={{
-                    color: "#64748B",
-                    fontSize: 11,
-                    marginBottom: 4,
-                  }}
-                >
-                  Output
-                </div>
-                {node.pipelineOut!.map((doc, i) => (
-                  <PipelineDocRow
-                    key={`out-${i}`}
-                    doc={doc}
-                    pathKey={`out:${i}`}
-                    expanded={expanded}
-                    setExpanded={setExpanded}
-                    onTypeLoaded={onTypeLoaded}
-                    depth={0}
-                  />
-                ))}
-              </div>
-            )}
-          </Section>
-        )}
-
-        <Section title={`Connections (${incoming.length} in · ${outgoing.length} out)`}>
-          {incoming.length === 0 && outgoing.length === 0 ? (
-            <p style={{ margin: 0, color: "#94A3B8" }}>
-              No incoming or outgoing flows.
-            </p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {incoming.length > 0 && (
-                <div>
-                  <div style={{ color: "#64748B", fontSize: 11, marginBottom: 4 }}>
-                    ← Incoming
-                  </div>
-                  <ul style={{ margin: 0, paddingLeft: 14 }}>
-                    {incoming.map((e) => (
-                      <li key={e.id} style={{ marginBottom: 2 }}>
-                        {nodeLabelById.get(e.source) ?? e.source}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {outgoing.length > 0 && (
-                <div>
-                  <div style={{ color: "#64748B", fontSize: 11, marginBottom: 4 }}>
-                    → Outgoing
-                  </div>
-                  <ul style={{ margin: 0, paddingLeft: 14 }}>
-                    {outgoing.map((e) => {
-                      const label = nodeLabelById.get(e.target) ?? e.target;
-                      const cond = e.conditionText?.trim();
-                      return (
-                        <li key={e.id} style={{ marginBottom: 4 }}>
-                          {label}
-                          {cond && (
-                            <span
-                              style={{
-                                marginLeft: 6,
-                                padding: "1px 6px",
-                                borderRadius: 4,
-                                background: "#F1F5F9",
-                                color: "#475569",
-                                fontSize: 11,
-                                fontFamily:
-                                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                              }}
-                            >
-                              {cond}
-                            </span>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </Section>
-
-        <Section
-          title="Position"
-          collapsible
-          open={positionOpen}
-          onToggle={() => setPositionOpen((v) => !v)}
-        >
-          <dl
-            style={{
-              margin: 0,
-              display: "grid",
-              gridTemplateColumns: "max-content 1fr",
-              rowGap: 4,
-              columnGap: 10,
-              color: "#475569",
-              fontSize: 12,
-            }}
-          >
-            <dt>Parent</dt>
-            <dd style={{ margin: 0 }}>{node.parentId ?? "—"}</dd>
-            <dt>x, y</dt>
-            <dd style={{ margin: 0 }}>
-              {Math.round(node.x)}, {Math.round(node.y)}
-            </dd>
-            <dt>Size</dt>
-            <dd style={{ margin: 0 }}>
-              {Math.round(node.width)} × {Math.round(node.height)}
-            </dd>
-          </dl>
-        </Section>
-
-        <Section
-          title="Identifiers"
-          collapsible
-          open={identifiersOpen}
-          onToggle={() => setIdentifiersOpen((v) => !v)}
-        >
-          <dl
-            style={{
-              margin: 0,
-              display: "grid",
-              gridTemplateColumns: "max-content 1fr",
-              rowGap: 4,
-              columnGap: 10,
-              color: "#475569",
-              fontSize: 12,
-            }}
-          >
-            <dt>Step ID</dt>
-            <dd
-              style={{
-                margin: 0,
-                fontFamily:
-                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-              }}
-            >
-              {node.id}
-            </dd>
-            <dt>BPMN kind</dt>
-            <dd style={{ margin: 0 }}>{node.type}</dd>
-            <dt>webMethods TYPE</dt>
-            <dd style={{ margin: 0 }}>{node.rawType ?? "—"}</dd>
-          </dl>
-        </Section>
+        {effectiveTab === "more" && <MoreTab node={node} />}
       </div>
 
       {/* Footer — keeps the no-write contract visible. */}
@@ -746,167 +571,726 @@ function fieldTypeLabel(f: IsField): string {
   return f.type + (f.isArray ? "[]" : "");
 }
 
-interface ExpansionProps {
-  expanded: Set<string>;
-  setExpanded: (updater: (prev: Set<string>) => Set<string>) => void;
-  onTypeLoaded: () => void;
-}
-
-/** One row in the Input or Output list — the top-level entry. Click
- *  the chevron → lazy-fetch the Document Type schema and expand the
- *  field list underneath. */
-function PipelineDocRow(
-  props: { doc: PipelineDoc; pathKey: string; depth: number } & ExpansionProps,
-) {
-  const { doc, pathKey, depth, expanded, setExpanded, onTypeLoaded } = props;
-  const open = expanded.has(pathKey);
-  const canExpand = !!doc.typeFqn;
-
-  const toggle = () => {
-    if (!canExpand) return;
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(pathKey)) next.delete(pathKey);
-      else {
-        next.add(pathKey);
-        // Kick the fetch off if we've never seen this type before; the
-        // cache returns the same Promise next time.
-        if (doc.typeFqn) {
-          fetchTypeSchema(doc.typeFqn)
-            .then(() => onTypeLoaded())
-            .catch(() => onTypeLoaded());
-        }
-      }
-      return next;
-    });
-  };
-
+// ── Drawer tab strip ─────────────────────────────────────────────
+// Underline-style tabs, click swaps the body pane below. Disabled
+// state is used for the Pipeline tab on steps that have no IN/OUT.
+function DrawerTabBar(props: {
+  active: DrawerTab;
+  onChange: (tab: DrawerTab) => void;
+  tabs: Array<{
+    id: DrawerTab;
+    label: string;
+    disabled?: boolean;
+    title?: string;
+  }>;
+}) {
   return (
-    <div style={{ marginLeft: depth * 16, marginBottom: 2 }}>
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={!canExpand}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "baseline",
-          gap: 6,
-          padding: "2px 0",
-          background: "transparent",
-          border: "none",
-          cursor: canExpand ? "pointer" : "default",
-          color: "#0F172A",
-          fontSize: 13,
-          textAlign: "left",
-        }}
-      >
-        <span style={{ color: "#94A3B8", fontSize: 10, width: 10, flexShrink: 0 }}>
-          {canExpand ? (open ? "▾" : "▸") : ""}
-        </span>
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {doc.label}
-        </span>
-        {doc.typeFqn && (
-          <span
-            title={doc.typeFqn}
+    <div
+      role="tablist"
+      aria-label="Step details sections"
+      style={{
+        display: "flex",
+        alignItems: "stretch",
+        gap: 0,
+        padding: "0 14px",
+        borderBottom: "1px solid #F1F5F9",
+        background: "#FAFBFC",
+      }}
+    >
+      {props.tabs.map((t) => {
+        const isActive = props.active === t.id;
+        return (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={isActive}
+            disabled={t.disabled}
+            title={t.title}
+            onClick={() => !t.disabled && props.onChange(t.id)}
             style={{
-              color: "#94A3B8",
-              fontSize: 11,
-              fontFamily:
-                "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-              flexShrink: 0,
+              padding: "8px 10px",
+              border: "none",
+              background: "transparent",
+              cursor: t.disabled ? "default" : "pointer",
+              fontSize: 12,
+              fontWeight: isActive ? 600 : 500,
+              color: t.disabled
+                ? "#CBD5E1"
+                : isActive
+                  ? "#0F172A"
+                  : "#64748B",
+              borderBottom: isActive
+                ? "2px solid #4338CA"
+                : "2px solid transparent",
+              marginBottom: -1,
             }}
           >
-            {prettyFqn(doc.typeFqn)}
-          </span>
-        )}
-      </button>
-      {open && doc.typeFqn && (
-        <TypeFieldList
-          typeFqn={doc.typeFqn}
-          pathKey={pathKey}
-          depth={depth + 1}
-          expanded={expanded}
-          setExpanded={setExpanded}
-          onTypeLoaded={onTypeLoaded}
-        />
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Tab: Overview ───────────────────────────────────────────────
+// Description + Behavior (kind-aware). Stays short — fits one screen.
+function OverviewTab(props: { node: ExternalNode }) {
+  const { node } = props;
+  const taskId = extractTaskId(node.component);
+  const rows: Array<{ label: string; value: string; mono?: boolean }> = [];
+  if (node.type === "userTask" && taskId) {
+    rows.push({ label: "Task ID", value: taskId, mono: true });
+  } else if (node.type === "serviceTask") {
+    if (node.component) rows.push({ label: "Service", value: node.component });
+    if (node.server) rows.push({ label: "Server", value: node.server });
+  } else if (node.type === "callActivity") {
+    if (node.component) rows.push({ label: "Subprocess", value: node.component });
+  } else if (node.component) {
+    rows.push({ label: "Component", value: node.component });
+  }
+
+  return (
+    <>
+      {node.description && (
+        <Section title="Description">
+          <p style={{ margin: 0, lineHeight: 1.5, color: "#334155" }}>
+            {node.description}
+          </p>
+        </Section>
+      )}
+      {rows.length > 0 ? (
+        <Section title="Behavior">
+          <dl
+            style={{
+              margin: 0,
+              display: "grid",
+              gridTemplateColumns: "max-content 1fr",
+              rowGap: 6,
+              columnGap: 10,
+            }}
+          >
+            {rows.map((r) => (
+              <Fragment key={r.label}>
+                <dt style={{ color: "#64748B", fontSize: 12 }}>{r.label}</dt>
+                <dd
+                  style={{
+                    margin: 0,
+                    fontFamily: r.mono
+                      ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+                      : "inherit",
+                    fontSize: r.mono ? 11 : 13,
+                    wordBreak: "break-all",
+                    color: "#0F172A",
+                  }}
+                >
+                  {r.value}
+                </dd>
+              </Fragment>
+            ))}
+          </dl>
+        </Section>
+      ) : (
+        !node.description && (
+          <p style={{ margin: 0, color: "#94A3B8" }}>
+            No description or behavior metadata on this step.
+          </p>
+        )
+      )}
+    </>
+  );
+}
+
+// ── Tab: Connections ────────────────────────────────────────────
+function ConnectionsTab(props: {
+  incoming: ExternalEdge[];
+  outgoing: ExternalEdge[];
+  nodeLabelById: Map<string, string>;
+}) {
+  const { incoming, outgoing, nodeLabelById } = props;
+  if (incoming.length === 0 && outgoing.length === 0) {
+    return (
+      <p style={{ margin: 0, color: "#94A3B8" }}>
+        No incoming or outgoing flows.
+      </p>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {incoming.length > 0 && (
+        <div>
+          <div style={{ color: "#64748B", fontSize: 11, marginBottom: 4 }}>
+            ← Incoming
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 14 }}>
+            {incoming.map((e) => (
+              <li key={e.id} style={{ marginBottom: 2 }}>
+                {nodeLabelById.get(e.source) ?? e.source}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {outgoing.length > 0 && (
+        <div>
+          <div style={{ color: "#64748B", fontSize: 11, marginBottom: 4 }}>
+            → Outgoing
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 14 }}>
+            {outgoing.map((e) => {
+              const label = nodeLabelById.get(e.target) ?? e.target;
+              const cond = e.conditionText?.trim();
+              return (
+                <li key={e.id} style={{ marginBottom: 4 }}>
+                  {label}
+                  {cond && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        padding: "1px 6px",
+                        borderRadius: 4,
+                        background: "#F1F5F9",
+                        color: "#475569",
+                        fontSize: 11,
+                        fontFamily:
+                          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                      }}
+                    >
+                      {cond}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </div>
   );
 }
 
-/** Resolved-or-loading list of fields under a type FQN. Reads from
- *  the module cache (always populated by the time the parent renders
- *  this — we kicked the fetch off in the toggle handler). */
-function TypeFieldList(
-  props: {
-    typeFqn: string;
-    pathKey: string;
-    depth: number;
-  } & ExpansionProps,
-) {
-  const { typeFqn, pathKey, depth, expanded, setExpanded, onTypeLoaded } = props;
-  const promise = TYPE_SCHEMA_CACHE.get(typeFqn);
-  // Read the cache's settled value synchronously via the embedded `.then`
-  // result tracked in a closure; in practice the parent's onTypeLoaded
-  // tick guarantees we re-render once the fetch resolves, so we use a
-  // small inline state-attached-to-promise pattern.
-  const schema = readResolved(promise);
-  if (!schema) {
-    return (
-      <div
+// ── Tab: More ────────────────────────────────────────────────────
+// Position + Identifiers — small metadata not big enough for its own tab.
+function MoreTab(props: { node: ExternalNode }) {
+  const { node } = props;
+  const Row = (p: { label: string; value: string; mono?: boolean }) => (
+    <Fragment>
+      <dt style={{ color: "#64748B", fontSize: 12 }}>{p.label}</dt>
+      <dd
         style={{
-          marginLeft: depth * 16,
-          padding: "4px 0 4px 16px",
-          color: "#94A3B8",
-          fontSize: 12,
+          margin: 0,
+          fontFamily: p.mono
+            ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+            : "inherit",
+          fontSize: p.mono ? 11 : 13,
+          color: "#0F172A",
         }}
       >
-        Loading {prettyFqn(typeFqn)}…
-      </div>
-    );
-  }
-  if (schema === "error") {
+        {p.value}
+      </dd>
+    </Fragment>
+  );
+  return (
+    <>
+      <Section title="Position">
+        <dl
+          style={{
+            margin: 0,
+            display: "grid",
+            gridTemplateColumns: "max-content 1fr",
+            rowGap: 4,
+            columnGap: 10,
+          }}
+        >
+          <Row label="Parent" value={node.parentId ?? "—"} />
+          <Row
+            label="x, y"
+            value={`${Math.round(node.x)}, ${Math.round(node.y)}`}
+          />
+          <Row
+            label="Size"
+            value={`${Math.round(node.width)} × ${Math.round(node.height)}`}
+          />
+        </dl>
+      </Section>
+      <Section title="Identifiers">
+        <dl
+          style={{
+            margin: 0,
+            display: "grid",
+            gridTemplateColumns: "max-content 1fr",
+            rowGap: 4,
+            columnGap: 10,
+          }}
+        >
+          <Row label="Step ID" value={node.id} mono />
+          <Row label="BPMN kind" value={node.type} />
+          <Row label="webMethods TYPE" value={String(node.rawType ?? "—")} />
+        </dl>
+      </Section>
+    </>
+  );
+}
+
+// ── Tab: Pipeline ────────────────────────────────────────────────
+// Master-detail. When drillPath is empty, render the list of IN/OUT
+// documents. When the user picks one, swap to the schema view (full
+// field grid + filter + breadcrumb back) so big schemas like
+// BusinessDoc don't bury the rest of the drawer in scroll.
+function PipelineTab(props: {
+  node: ExternalNode;
+  drillPath: string[];
+  setDrillPath: (path: string[]) => void;
+  onTypeLoaded: () => void;
+}) {
+  const { node, drillPath, setDrillPath, onTypeLoaded } = props;
+  if (drillPath.length === 0) {
     return (
-      <div
-        style={{
-          marginLeft: depth * 16,
-          padding: "4px 0 4px 16px",
-          color: "#B91C1C",
-          fontSize: 12,
-        }}
-      >
-        Couldn't load {prettyFqn(typeFqn)} — IS unreachable or type missing.
-      </div>
-    );
-  }
-  if (schema.fields.length === 0) {
-    return (
-      <div
-        style={{
-          marginLeft: depth * 16,
-          padding: "4px 0 4px 16px",
-          color: "#94A3B8",
-          fontSize: 12,
-        }}
-      >
-        (no fields)
-      </div>
+      <PipelineListView
+        node={node}
+        onSelect={(direction, idx) =>
+          setDrillPath([direction, String(idx)])
+        }
+      />
     );
   }
   return (
-    <div>
-      {schema.fields.map((f) => (
-        <FieldRow
-          key={f.name}
-          field={f}
-          pathKey={`${pathKey}:${f.name}`}
-          depth={depth}
-          expanded={expanded}
-          setExpanded={setExpanded}
-          onTypeLoaded={onTypeLoaded}
-        />
+    <SchemaView
+      node={node}
+      drillPath={drillPath}
+      setDrillPath={setDrillPath}
+      onTypeLoaded={onTypeLoaded}
+    />
+  );
+}
+
+// Top-level pipeline IN/OUT list. Clicking a row drills into the
+// schema viewer — no inline expansion, no nested scroll.
+function PipelineListView(props: {
+  node: ExternalNode;
+  onSelect: (direction: "in" | "out", idx: number) => void;
+}) {
+  const { node, onSelect } = props;
+  const sections: Array<{
+    direction: "in" | "out";
+    title: string;
+    docs: PipelineDoc[];
+  }> = [];
+  if ((node.pipelineIn?.length ?? 0) > 0) {
+    sections.push({
+      direction: "in",
+      title: "Input",
+      docs: node.pipelineIn!,
+    });
+  }
+  if ((node.pipelineOut?.length ?? 0) > 0) {
+    sections.push({
+      direction: "out",
+      title: "Output",
+      docs: node.pipelineOut!,
+    });
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {sections.map((s) => (
+        <div key={s.direction}>
+          <div
+            style={{
+              color: "#64748B",
+              fontSize: 11,
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: 0.4,
+              marginBottom: 6,
+            }}
+          >
+            {s.title}
+          </div>
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: 4 }}
+          >
+            {s.docs.map((doc, i) => (
+              <button
+                key={`${s.direction}-${i}`}
+                type="button"
+                onClick={() => doc.typeFqn && onSelect(s.direction, i)}
+                disabled={!doc.typeFqn}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  padding: "8px 10px",
+                  background: "#F8FAFC",
+                  border: "1px solid #E2E8F0",
+                  borderRadius: 6,
+                  cursor: doc.typeFqn ? "pointer" : "default",
+                  color: "#0F172A",
+                  fontSize: 13,
+                  textAlign: "left",
+                  width: "100%",
+                }}
+              >
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontWeight: 500,
+                  }}
+                >
+                  {doc.label}
+                </span>
+                {doc.typeFqn && (
+                  <>
+                    <span
+                      title={doc.typeFqn}
+                      style={{
+                        color: "#94A3B8",
+                        fontSize: 11,
+                        fontFamily:
+                          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        maxWidth: 180,
+                      }}
+                    >
+                      {prettyFqn(doc.typeFqn)}
+                    </span>
+                    <span style={{ color: "#94A3B8", fontSize: 12 }}>›</span>
+                  </>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Resolves the drillPath segments into a chain of (label, fqn) pairs.
+// Path shape: ["in"|"out", idx, fieldName?, fieldName?, …]
+//   - segments 0/1 always come from the node's pipelineIn/Out
+//   - subsequent segments are recref field names; each requires the
+//     parent schema to be cached so we can look up the field's
+//     recrefFqn. Fetches missing parents and re-renders via
+//     onTypeLoaded.
+//
+// State:
+//   "loading" — at least one schema in the chain is still in flight
+//   "broken"  — the path doesn't resolve (bad index / unknown field /
+//               IS error). Caller renders an error + back-arrow.
+//   "ready"   — all segments resolved, current.fqn is the deepest type
+function useDrillPath(
+  node: ExternalNode,
+  path: string[],
+  onTypeLoaded: () => void,
+): {
+  segments: Array<{ label: string; fqn: string }>;
+  state: "loading" | "broken" | "ready";
+} {
+  if (path.length < 2) return { segments: [], state: "broken" };
+  const direction = path[0] as "in" | "out";
+  const idx = Number(path[1]);
+  const docs = direction === "in" ? node.pipelineIn : node.pipelineOut;
+  const root = docs?.[idx];
+  if (!root || !root.typeFqn) return { segments: [], state: "broken" };
+
+  const segments: Array<{ label: string; fqn: string }> = [
+    { label: root.label, fqn: root.typeFqn },
+  ];
+
+  for (let i = 2; i < path.length; i++) {
+    const parentFqn = segments[segments.length - 1].fqn;
+    const cached = TYPE_SCHEMA_CACHE.get(parentFqn);
+    if (!cached) {
+      fetchTypeSchema(parentFqn)
+        .then(() => onTypeLoaded())
+        .catch(() => onTypeLoaded());
+      return { segments, state: "loading" };
+    }
+    const resolved = readResolved(cached);
+    if (resolved === null) return { segments, state: "loading" };
+    if (resolved === "error") return { segments, state: "broken" };
+    const field = resolved.fields.find((f) => f.name === path[i]);
+    if (!field?.recrefFqn) return { segments, state: "broken" };
+    segments.push({ label: field.name, fqn: field.recrefFqn });
+  }
+
+  // Make sure the deepest level itself has been fetched too.
+  const deepest = segments[segments.length - 1].fqn;
+  const deepestCached = TYPE_SCHEMA_CACHE.get(deepest);
+  if (!deepestCached) {
+    fetchTypeSchema(deepest)
+      .then(() => onTypeLoaded())
+      .catch(() => onTypeLoaded());
+    return { segments, state: "loading" };
+  }
+  const deepestResolved = readResolved(deepestCached);
+  if (deepestResolved === null) return { segments, state: "loading" };
+  if (deepestResolved === "error") return { segments, state: "broken" };
+  return { segments, state: "ready" };
+}
+
+// Schema viewer for ONE document type. Renders breadcrumb (each
+// segment clickable to pop back) + a filter input + a field grid.
+// Clicking a recref field's drill chevron pushes a new segment onto
+// the path → the parent re-renders the schema for the nested type.
+function SchemaView(props: {
+  node: ExternalNode;
+  drillPath: string[];
+  setDrillPath: (path: string[]) => void;
+  onTypeLoaded: () => void;
+}) {
+  const { node, drillPath, setDrillPath, onTypeLoaded } = props;
+  const { segments, state } = useDrillPath(node, drillPath, onTypeLoaded);
+  const [filter, setFilter] = useState("");
+  // Reset the filter whenever the drill changes so going one level
+  // deeper doesn't carry the previous level's search forward.
+  useEffect(() => setFilter(""), [drillPath.join(":")]);
+
+  const directionLabel = drillPath[0] === "out" ? "Output" : "Input";
+  const back = () => setDrillPath([]);
+
+  const deepest = segments[segments.length - 1]?.fqn;
+  const schema =
+    deepest && state === "ready"
+      ? readResolved(TYPE_SCHEMA_CACHE.get(deepest))
+      : null;
+  const fields = schema && schema !== "error" ? schema.fields : [];
+  const filtered = filter
+    ? fields.filter((f) =>
+        f.name.toLowerCase().includes(filter.toLowerCase()),
+      )
+    : fields;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* Breadcrumb row */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: "#475569",
+          flexWrap: "wrap",
+        }}
+      >
+        <button
+          type="button"
+          onClick={back}
+          aria-label="Back to pipeline list"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "2px 6px",
+            borderRadius: 4,
+            border: "1px solid #E2E8F0",
+            background: "#fff",
+            cursor: "pointer",
+            fontSize: 11,
+            color: "#475569",
+          }}
+        >
+          ‹ {directionLabel}
+        </button>
+        {segments.map((seg, i) => {
+          const isLast = i === segments.length - 1;
+          return (
+            <Fragment key={i}>
+              <span style={{ color: "#CBD5E1" }}>/</span>
+              {isLast ? (
+                <span
+                  title={seg.fqn}
+                  style={{
+                    color: "#0F172A",
+                    fontWeight: 600,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 240,
+                  }}
+                >
+                  {seg.label}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setDrillPath(drillPath.slice(0, 2 + i))}
+                  title={`Back to ${seg.label}`}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    color: "#4338CA",
+                    textDecoration: "underline",
+                    textDecorationStyle: "dotted",
+                    fontSize: 12,
+                  }}
+                >
+                  {seg.label}
+                </button>
+              )}
+            </Fragment>
+          );
+        })}
+      </div>
+
+      {/* FQN line */}
+      {deepest && (
+        <div
+          title={deepest}
+          style={{
+            color: "#94A3B8",
+            fontSize: 11,
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {prettyFqn(deepest)}
+        </div>
+      )}
+
+      {/* State surfaces */}
+      {state === "loading" && (
+        <div style={{ color: "#94A3B8", fontSize: 12, padding: "16px 0" }}>
+          Loading schema…
+        </div>
+      )}
+      {state === "broken" && (
+        <div
+          style={{
+            color: "#B91C1C",
+            fontSize: 12,
+            padding: "10px 12px",
+            background: "#FEF2F2",
+            border: "1px solid #FECACA",
+            borderRadius: 6,
+          }}
+        >
+          Couldn't resolve this schema — the type may not exist on the IS, or
+          the field reference is broken. Use the breadcrumb to go back.
+        </div>
+      )}
+
+      {state === "ready" && (
+        <>
+          {/* Filter */}
+          <input
+            type="text"
+            placeholder={`Filter ${fields.length} fields…`}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            style={{
+              padding: "6px 8px",
+              border: "1px solid #E2E8F0",
+              borderRadius: 6,
+              fontSize: 12,
+              color: "#0F172A",
+              outline: "none",
+            }}
+          />
+          {/* Field grid */}
+          {filtered.length === 0 ? (
+            <div
+              style={{ color: "#94A3B8", fontSize: 12, padding: "12px 0" }}
+            >
+              {fields.length === 0
+                ? "(no fields)"
+                : `No fields match "${filter}".`}
+            </div>
+          ) : (
+            <FieldGrid
+              fields={filtered}
+              onDrill={(fieldName) =>
+                setDrillPath([...drillPath, fieldName])
+              }
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Tabular field list. 3 columns: name, type+optional marker, drill
+// chevron (only present for recref fields). Field name truncates with
+// ellipsis; full type FQN goes in the tooltip.
+function FieldGrid(props: {
+  fields: IsField[];
+  onDrill: (fieldName: string) => void;
+}) {
+  const { fields, onDrill } = props;
+  return (
+    <div
+      role="table"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "1fr auto auto",
+        columnGap: 10,
+        rowGap: 2,
+        fontFamily:
+          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        fontSize: 12,
+      }}
+    >
+      {fields.map((f) => (
+        <Fragment key={f.name}>
+          <span
+            title={f.comment ?? f.name}
+            style={{
+              color: "#0F172A",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {f.name}
+          </span>
+          <span
+            title={f.recrefFqn ?? undefined}
+            style={{
+              color: f.type === "recref" ? "#4338CA" : "#64748B",
+              fontSize: 11,
+              alignSelf: "center",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {fieldTypeLabel(f)}
+            {f.optional && (
+              <span style={{ color: "#94A3B8", marginLeft: 4 }}>·opt</span>
+            )}
+          </span>
+          {f.recrefFqn ? (
+            <button
+              type="button"
+              onClick={() => onDrill(f.name)}
+              title={`Drill into ${f.name}`}
+              style={{
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                color: "#4338CA",
+                fontSize: 13,
+                padding: "0 4px",
+              }}
+            >
+              ›
+            </button>
+          ) : (
+            <span style={{ width: 16 }} />
+          )}
+        </Fragment>
       ))}
     </div>
   );
@@ -941,101 +1325,6 @@ function readResolved(
   return null;
 }
 
-/** One field row inside an expanded Document Type. recref fields are
- *  themselves expandable — clicking their chevron lazy-loads the
- *  referenced type and renders its fields indented one further level.
- *  Self-referential types stop at "(recursive)" so we never loop. */
-function FieldRow(
-  props: {
-    field: IsField;
-    pathKey: string;
-    depth: number;
-  } & ExpansionProps,
-) {
-  const { field, pathKey, depth, expanded, setExpanded, onTypeLoaded } = props;
-  const recursive =
-    !!field.recrefFqn && pathKey.split(":").filter((p) => p === field.name).length > 1;
-  const canExpand = !!field.recrefFqn && !recursive;
-  const open = expanded.has(pathKey);
-
-  const toggle = () => {
-    if (!canExpand) return;
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(pathKey)) next.delete(pathKey);
-      else {
-        next.add(pathKey);
-        if (field.recrefFqn) {
-          fetchTypeSchema(field.recrefFqn)
-            .then(() => onTypeLoaded())
-            .catch(() => onTypeLoaded());
-        }
-      }
-      return next;
-    });
-  };
-
-  return (
-    <div style={{ marginLeft: depth * 16 }}>
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={!canExpand}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "baseline",
-          gap: 6,
-          padding: "1px 0",
-          background: "transparent",
-          border: "none",
-          cursor: canExpand ? "pointer" : "default",
-          color: "#0F172A",
-          fontSize: 12,
-          textAlign: "left",
-          fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        }}
-      >
-        <span
-          style={{ color: "#94A3B8", fontSize: 10, width: 10, flexShrink: 0 }}
-        >
-          {canExpand ? (open ? "▾" : "▸") : ""}
-        </span>
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {field.name}
-        </span>
-        <span
-          title={field.recrefFqn ?? undefined}
-          style={{
-            color: field.type === "recref" ? "#4338CA" : "#64748B",
-            fontSize: 11,
-            flexShrink: 0,
-          }}
-        >
-          {fieldTypeLabel(field)}
-          {field.optional && (
-            <span style={{ color: "#94A3B8", marginLeft: 4 }}>·opt</span>
-          )}
-          {recursive && (
-            <span style={{ color: "#94A3B8", marginLeft: 4 }}>(recursive)</span>
-          )}
-        </span>
-      </button>
-      {open && field.recrefFqn && (
-        <TypeFieldList
-          typeFqn={field.recrefFqn}
-          pathKey={pathKey}
-          depth={depth + 1}
-          expanded={expanded}
-          setExpanded={setExpanded}
-          onTypeLoaded={onTypeLoaded}
-        />
-      )}
-    </div>
-  );
-}
-
 function PreviewInner() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -1054,13 +1343,63 @@ function PreviewInner() {
   // canvas or hitting Esc clears it. Reading the value off the URL on
   // every render keeps drawer state and URL state in lock-step.
   const selectedStepId = params.get("stepId");
+  // Drawer tab + pipeline drill path — both URL-backed so a teammate's
+  // link drops them in the same view (useful for the future cross-app
+  // KPI workflow where stepId + path become coordinates).
+  const drawerTab = (params.get("tab") as DrawerTab) ?? "overview";
+  const drillPathRaw = params.get("path") ?? "";
+  const drillPath = useMemo(
+    () => (drillPathRaw ? drillPathRaw.split(":") : []),
+    [drillPathRaw],
+  );
   const setSelectedStepId = useCallback(
     (id: string | null) => {
       setParams(
         (prev) => {
           const next = new URLSearchParams(prev);
           if (id) next.set("stepId", id);
-          else next.delete("stepId");
+          else {
+            next.delete("stepId");
+            // tab + path are step-scoped — clear them when no step is
+            // selected (and below, also when a different step is picked).
+            next.delete("tab");
+            next.delete("path");
+          }
+          // Pipeline drill segments encode the current step's pipeline
+          // indices, so they must clear on every step change.
+          next.delete("path");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
+  const setDrawerTab = useCallback(
+    (tab: DrawerTab) => {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("tab", tab);
+          // Switching tabs leaves any deep drill behind — schema drill
+          // only makes sense while on the Pipeline tab.
+          if (tab !== "pipeline") next.delete("path");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
+  const setDrillPath = useCallback(
+    (path: string[]) => {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (path.length > 0) next.set("path", path.join(":"));
+          else next.delete("path");
+          // Drill is meaningful only on the Pipeline tab.
+          if (path.length > 0) next.set("tab", "pipeline");
           return next;
         },
         { replace: true },
@@ -1071,11 +1410,14 @@ function PreviewInner() {
   useEffect(() => {
     if (!selectedStepId) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelectedStepId(null);
+      if (e.key === "Escape") {
+        if (drillPath.length > 0) setDrillPath([]);
+        else setSelectedStepId(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedStepId, setSelectedStepId]);
+  }, [selectedStepId, drillPath.length, setSelectedStepId, setDrillPath]);
   const selectedNode = useMemo(
     () =>
       selectedStepId && graph
@@ -1687,6 +2029,10 @@ function PreviewInner() {
             node={selectedNode}
             allNodes={graph.nodes}
             allEdges={graph.edges}
+            tab={drawerTab}
+            setTab={setDrawerTab}
+            drillPath={drillPath}
+            setDrillPath={setDrillPath}
             onClose={() => setSelectedStepId(null)}
           />
         )}
