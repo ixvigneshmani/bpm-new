@@ -1235,63 +1235,119 @@ function FieldGrid(props: {
     <div
       role="table"
       style={{
-        display: "grid",
-        gridTemplateColumns: "1fr auto auto",
-        columnGap: 10,
-        rowGap: 2,
+        display: "flex",
+        flexDirection: "column",
         fontFamily:
           "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
         fontSize: 12,
       }}
     >
       {fields.map((f) => (
-        <Fragment key={f.name}>
-          <span
-            title={f.comment ?? f.name}
-            style={{
-              color: "#0F172A",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {f.name}
-          </span>
-          <span
-            title={f.recrefFqn ?? undefined}
-            style={{
-              color: f.type === "recref" ? "#4338CA" : "#64748B",
-              fontSize: 11,
-              alignSelf: "center",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {fieldTypeLabel(f)}
-            {f.optional && (
-              <span style={{ color: "#94A3B8", marginLeft: 4 }}>·opt</span>
-            )}
-          </span>
-          {f.recrefFqn ? (
-            <button
-              type="button"
-              onClick={() => onDrill(f.name)}
-              title={`Drill into ${f.name}`}
-              style={{
-                background: "transparent",
-                border: "none",
-                cursor: "pointer",
-                color: "#4338CA",
-                fontSize: 13,
-                padding: "0 4px",
-              }}
-            >
-              ›
-            </button>
-          ) : (
-            <span style={{ width: 16 }} />
-          )}
-        </Fragment>
+        <FieldRow key={f.name} field={f} onDrill={onDrill} />
       ))}
+    </div>
+  );
+}
+
+/** One row of the field grid. For recref fields the whole row is a
+ *  single button so clicking anywhere — field name, type chip, or
+ *  the trailing `›` — drills in. Primitive fields render as a plain
+ *  3-cell row (no hover, no pointer) since there's nowhere to drill
+ *  to.
+ *
+ *  Each row is its own grid (`1fr auto auto`) rather than a shared
+ *  outer grid so a per-row hover state is easy to style and so the
+ *  whole row can be a single tabbable button for keyboard users. */
+function FieldRow(props: {
+  field: IsField;
+  onDrill: (fieldName: string) => void;
+}) {
+  const { field: f, onDrill } = props;
+  const [hover, setHover] = useState(false);
+  const rowStyle: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "1fr auto auto",
+    columnGap: 10,
+    alignItems: "center",
+    padding: "2px 6px",
+    margin: "0 -6px", // bleed the hover background past the body padding
+    borderRadius: 4,
+    background: f.recrefFqn && hover ? "#EEF2FF" : "transparent",
+    transition: "background 120ms",
+  };
+  const nameCell = (
+    <span
+      title={f.comment ?? f.name}
+      style={{
+        color: "#0F172A",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        textAlign: "left",
+      }}
+    >
+      {f.name}
+    </span>
+  );
+  const typeCell = (
+    <span
+      title={f.recrefFqn ?? undefined}
+      style={{
+        color: f.type === "recref" ? "#4338CA" : "#64748B",
+        fontSize: 11,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {fieldTypeLabel(f)}
+      {f.optional && (
+        <span style={{ color: "#94A3B8", marginLeft: 4 }}>·opt</span>
+      )}
+    </span>
+  );
+  const chevronCell = f.recrefFqn ? (
+    <span
+      aria-hidden
+      style={{
+        color: "#4338CA",
+        fontSize: 13,
+        padding: "0 4px",
+        lineHeight: 1,
+      }}
+    >
+      ›
+    </span>
+  ) : (
+    <span style={{ width: 16 }} />
+  );
+  if (f.recrefFqn) {
+    return (
+      <button
+        type="button"
+        onClick={() => onDrill(f.name)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title={`Drill into ${f.name}`}
+        style={{
+          ...rowStyle,
+          background: hover ? "#EEF2FF" : "transparent",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          fontSize: "inherit",
+          width: "auto",
+        }}
+      >
+        {nameCell}
+        {typeCell}
+        {chevronCell}
+      </button>
+    );
+  }
+  return (
+    <div style={rowStyle}>
+      {nameCell}
+      {typeCell}
+      {chevronCell}
     </div>
   );
 }
