@@ -117,6 +117,37 @@ interface ExternalNode {
   component?: string | null;
   /** IS host this step runs on. */
   server?: string | null;
+  /** Pipeline INPUT documents — names + resolved Document Type FQN.
+   *  Empty for gateways / end / error steps. */
+  pipelineIn?: PipelineDoc[];
+  /** Pipeline OUTPUT documents — same shape as pipelineIn. */
+  pipelineOut?: PipelineDoc[];
+}
+
+/** One pipeline document slot on a step. `label` strips the
+ *  `{namespace}` prefix for friendly display; `typeFqn` is the
+ *  Document Type the IS Admin client resolves on demand. */
+interface PipelineDoc {
+  name: string;
+  label: string;
+  typeFqn: string | null;
+}
+
+/** Type schema returned by GET /external-bpm/types/:fqn — used by
+ *  the drawer's expandable Pipeline tree to render Document Type
+ *  fields. Cached client-side keyed by fqn so re-expanding is free. */
+interface IsTypeSchema {
+  fqn: string;
+  kind: string;
+  fields: IsField[];
+}
+interface IsField {
+  name: string;
+  type: string;
+  optional: boolean;
+  isArray: boolean;
+  comment: string | null;
+  recrefFqn: string | null;
 }
 
 interface ExternalEdge {
@@ -237,6 +268,23 @@ function StepDetailsDrawer(props: {
   const [identifiersOpen, setIdentifiersOpen] = useState(false);
   const [positionOpen, setPositionOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Pipeline expansion state — a set of dot-path keys ("in:0",
+  // "in:0:taskConfig", "in:0:taskConfig:actions", …) so the same UI
+  // primitive handles top-level docs AND recursive recref drilldowns.
+  // Lives inside the drawer so it resets when a different step is
+  // selected, while module-level TYPE_SCHEMA_CACHE keeps already-
+  // fetched schemas so re-expanding is instant.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Trigger to nudge re-renders when async type fetches resolve;
+  // module cache returns the same Promise so we can't useState on it
+  // directly. Bumped after each successful fetch.
+  const [, setTick] = useState(0);
+  const onTypeLoaded = useCallback(() => setTick((t) => t + 1), []);
+  const hasPipeline =
+    (node.pipelineIn?.length ?? 0) > 0 || (node.pipelineOut?.length ?? 0) > 0;
+  // Auto-widen the drawer once anything in the pipeline tree opens —
+  // 380 reads cramped at 3+ levels of indent, 440 stays comfortable.
+  const drawerWidth = expanded.size > 0 ? 440 : 380;
   const onCopyStepId = useCallback(() => {
     void navigator.clipboard?.writeText(node.id).then(() => {
       setCopied(true);
@@ -266,7 +314,8 @@ function StepDetailsDrawer(props: {
         top: 12,
         right: 12,
         bottom: 12,
-        width: 380,
+        width: drawerWidth,
+        transition: "width 200ms ease-out",
         background: "#fff",
         border: "1px solid #E5E7EB",
         borderRadius: 10,
@@ -408,6 +457,61 @@ function StepDetailsDrawer(props: {
                 </Fragment>
               ))}
             </dl>
+          </Section>
+        )}
+
+        {hasPipeline && (
+          <Section
+            title={`Pipeline (${node.pipelineIn?.length ?? 0} in · ${node.pipelineOut?.length ?? 0} out)`}
+          >
+            {(node.pipelineIn?.length ?? 0) > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div
+                  style={{
+                    color: "#64748B",
+                    fontSize: 11,
+                    marginBottom: 4,
+                  }}
+                >
+                  Input
+                </div>
+                {node.pipelineIn!.map((doc, i) => (
+                  <PipelineDocRow
+                    key={`in-${i}`}
+                    doc={doc}
+                    pathKey={`in:${i}`}
+                    expanded={expanded}
+                    setExpanded={setExpanded}
+                    onTypeLoaded={onTypeLoaded}
+                    depth={0}
+                  />
+                ))}
+              </div>
+            )}
+            {(node.pipelineOut?.length ?? 0) > 0 && (
+              <div>
+                <div
+                  style={{
+                    color: "#64748B",
+                    fontSize: 11,
+                    marginBottom: 4,
+                  }}
+                >
+                  Output
+                </div>
+                {node.pipelineOut!.map((doc, i) => (
+                  <PipelineDocRow
+                    key={`out-${i}`}
+                    doc={doc}
+                    pathKey={`out:${i}`}
+                    expanded={expanded}
+                    setExpanded={setExpanded}
+                    onTypeLoaded={onTypeLoaded}
+                    depth={0}
+                  />
+                ))}
+              </div>
+            )}
           </Section>
         )}
 
@@ -603,6 +707,332 @@ function Section(props: {
       )}
       {(!collapsible || open) && <div>{children}</div>}
     </section>
+  );
+}
+
+// ── Pipeline type tree ────────────────────────────────────────────
+// Module-level cache of resolved Document Type schemas, keyed by the
+// diagram's `{folder}name` FQN. The backend already caches for 24 h,
+// so this client cache only saves the network round-trip during the
+// same session — but it makes re-expand instant after the user has
+// drilled into a tree once.
+const TYPE_SCHEMA_CACHE = new Map<string, Promise<IsTypeSchema>>();
+function fetchTypeSchema(typeFqn: string): Promise<IsTypeSchema> {
+  let p = TYPE_SCHEMA_CACHE.get(typeFqn);
+  if (!p) {
+    p = apiGet<IsTypeSchema>(
+      `/external-bpm/types/${encodeURIComponent(typeFqn)}`,
+    );
+    TYPE_SCHEMA_CACHE.set(typeFqn, p);
+  }
+  return p;
+}
+
+/** Drop the `{namespace}` prefix off a webMethods FQN for friendlier
+ *  display in the drawer. `{DOEEnforcement.documents}BusinessDoc` →
+ *  `DOEEnforcement.documents:BusinessDoc`. */
+function prettyFqn(fqn: string): string {
+  const m = fqn.match(/^\{([^}]*)\}(.+)$/);
+  return m ? `${m[1]}:${m[2]}` : fqn;
+}
+
+/** Format a field type for the right-aligned chip: scalar gets the
+ *  type as-is, arrays append `[]`, recrefs hide the raw "recref" word
+ *  in favour of the referenced FQN. */
+function fieldTypeLabel(f: IsField): string {
+  if (f.type === "recref") {
+    return (f.recrefFqn ? prettyFqn(f.recrefFqn) : "recref") + (f.isArray ? "[]" : "");
+  }
+  return f.type + (f.isArray ? "[]" : "");
+}
+
+interface ExpansionProps {
+  expanded: Set<string>;
+  setExpanded: (updater: (prev: Set<string>) => Set<string>) => void;
+  onTypeLoaded: () => void;
+}
+
+/** One row in the Input or Output list — the top-level entry. Click
+ *  the chevron → lazy-fetch the Document Type schema and expand the
+ *  field list underneath. */
+function PipelineDocRow(
+  props: { doc: PipelineDoc; pathKey: string; depth: number } & ExpansionProps,
+) {
+  const { doc, pathKey, depth, expanded, setExpanded, onTypeLoaded } = props;
+  const open = expanded.has(pathKey);
+  const canExpand = !!doc.typeFqn;
+
+  const toggle = () => {
+    if (!canExpand) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(pathKey)) next.delete(pathKey);
+      else {
+        next.add(pathKey);
+        // Kick the fetch off if we've never seen this type before; the
+        // cache returns the same Promise next time.
+        if (doc.typeFqn) {
+          fetchTypeSchema(doc.typeFqn)
+            .then(() => onTypeLoaded())
+            .catch(() => onTypeLoaded());
+        }
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ marginLeft: depth * 16, marginBottom: 2 }}>
+      <button
+        type="button"
+        onClick={toggle}
+        disabled={!canExpand}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "baseline",
+          gap: 6,
+          padding: "2px 0",
+          background: "transparent",
+          border: "none",
+          cursor: canExpand ? "pointer" : "default",
+          color: "#0F172A",
+          fontSize: 13,
+          textAlign: "left",
+        }}
+      >
+        <span style={{ color: "#94A3B8", fontSize: 10, width: 10, flexShrink: 0 }}>
+          {canExpand ? (open ? "▾" : "▸") : ""}
+        </span>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {doc.label}
+        </span>
+        {doc.typeFqn && (
+          <span
+            title={doc.typeFqn}
+            style={{
+              color: "#94A3B8",
+              fontSize: 11,
+              fontFamily:
+                "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              flexShrink: 0,
+            }}
+          >
+            {prettyFqn(doc.typeFqn)}
+          </span>
+        )}
+      </button>
+      {open && doc.typeFqn && (
+        <TypeFieldList
+          typeFqn={doc.typeFqn}
+          pathKey={pathKey}
+          depth={depth + 1}
+          expanded={expanded}
+          setExpanded={setExpanded}
+          onTypeLoaded={onTypeLoaded}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Resolved-or-loading list of fields under a type FQN. Reads from
+ *  the module cache (always populated by the time the parent renders
+ *  this — we kicked the fetch off in the toggle handler). */
+function TypeFieldList(
+  props: {
+    typeFqn: string;
+    pathKey: string;
+    depth: number;
+  } & ExpansionProps,
+) {
+  const { typeFqn, pathKey, depth, expanded, setExpanded, onTypeLoaded } = props;
+  const promise = TYPE_SCHEMA_CACHE.get(typeFqn);
+  // Read the cache's settled value synchronously via the embedded `.then`
+  // result tracked in a closure; in practice the parent's onTypeLoaded
+  // tick guarantees we re-render once the fetch resolves, so we use a
+  // small inline state-attached-to-promise pattern.
+  const schema = readResolved(promise);
+  if (!schema) {
+    return (
+      <div
+        style={{
+          marginLeft: depth * 16,
+          padding: "4px 0 4px 16px",
+          color: "#94A3B8",
+          fontSize: 12,
+        }}
+      >
+        Loading {prettyFqn(typeFqn)}…
+      </div>
+    );
+  }
+  if (schema === "error") {
+    return (
+      <div
+        style={{
+          marginLeft: depth * 16,
+          padding: "4px 0 4px 16px",
+          color: "#B91C1C",
+          fontSize: 12,
+        }}
+      >
+        Couldn't load {prettyFqn(typeFqn)} — IS unreachable or type missing.
+      </div>
+    );
+  }
+  if (schema.fields.length === 0) {
+    return (
+      <div
+        style={{
+          marginLeft: depth * 16,
+          padding: "4px 0 4px 16px",
+          color: "#94A3B8",
+          fontSize: 12,
+        }}
+      >
+        (no fields)
+      </div>
+    );
+  }
+  return (
+    <div>
+      {schema.fields.map((f) => (
+        <FieldRow
+          key={f.name}
+          field={f}
+          pathKey={`${pathKey}:${f.name}`}
+          depth={depth}
+          expanded={expanded}
+          setExpanded={setExpanded}
+          onTypeLoaded={onTypeLoaded}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Resolve a cached Promise<IsTypeSchema> synchronously by stashing
+ *  the settled value on the Promise itself. React forces a re-render
+ *  via the `onTypeLoaded` tick once the fetch lands. Returns
+ *  - `null` while pending,
+ *  - `"error"` on failure,
+ *  - the parsed schema once resolved. */
+type SchemaOrError = IsTypeSchema | "error" | null;
+function readResolved(
+  p: Promise<IsTypeSchema> | undefined,
+): SchemaOrError {
+  if (!p) return null;
+  const tagged = p as Promise<IsTypeSchema> & {
+    __resolved?: IsTypeSchema | "error";
+  };
+  if (tagged.__resolved) return tagged.__resolved;
+  // Attach the resolver only once.
+  if (!(tagged as { __tagged?: boolean }).__tagged) {
+    (tagged as { __tagged?: boolean }).__tagged = true;
+    tagged
+      .then((s) => {
+        tagged.__resolved = s;
+      })
+      .catch(() => {
+        tagged.__resolved = "error";
+      });
+  }
+  return null;
+}
+
+/** One field row inside an expanded Document Type. recref fields are
+ *  themselves expandable — clicking their chevron lazy-loads the
+ *  referenced type and renders its fields indented one further level.
+ *  Self-referential types stop at "(recursive)" so we never loop. */
+function FieldRow(
+  props: {
+    field: IsField;
+    pathKey: string;
+    depth: number;
+  } & ExpansionProps,
+) {
+  const { field, pathKey, depth, expanded, setExpanded, onTypeLoaded } = props;
+  const recursive =
+    !!field.recrefFqn && pathKey.split(":").filter((p) => p === field.name).length > 1;
+  const canExpand = !!field.recrefFqn && !recursive;
+  const open = expanded.has(pathKey);
+
+  const toggle = () => {
+    if (!canExpand) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(pathKey)) next.delete(pathKey);
+      else {
+        next.add(pathKey);
+        if (field.recrefFqn) {
+          fetchTypeSchema(field.recrefFqn)
+            .then(() => onTypeLoaded())
+            .catch(() => onTypeLoaded());
+        }
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ marginLeft: depth * 16 }}>
+      <button
+        type="button"
+        onClick={toggle}
+        disabled={!canExpand}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "baseline",
+          gap: 6,
+          padding: "1px 0",
+          background: "transparent",
+          border: "none",
+          cursor: canExpand ? "pointer" : "default",
+          color: "#0F172A",
+          fontSize: 12,
+          textAlign: "left",
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        }}
+      >
+        <span
+          style={{ color: "#94A3B8", fontSize: 10, width: 10, flexShrink: 0 }}
+        >
+          {canExpand ? (open ? "▾" : "▸") : ""}
+        </span>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {field.name}
+        </span>
+        <span
+          title={field.recrefFqn ?? undefined}
+          style={{
+            color: field.type === "recref" ? "#4338CA" : "#64748B",
+            fontSize: 11,
+            flexShrink: 0,
+          }}
+        >
+          {fieldTypeLabel(field)}
+          {field.optional && (
+            <span style={{ color: "#94A3B8", marginLeft: 4 }}>·opt</span>
+          )}
+          {recursive && (
+            <span style={{ color: "#94A3B8", marginLeft: 4 }}>(recursive)</span>
+          )}
+        </span>
+      </button>
+      {open && field.recrefFqn && (
+        <TypeFieldList
+          typeFqn={field.recrefFqn}
+          pathKey={pathKey}
+          depth={depth + 1}
+          expanded={expanded}
+          setExpanded={setExpanded}
+          onTypeLoaded={onTypeLoaded}
+        />
+      )}
+    </div>
   );
 }
 

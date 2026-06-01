@@ -13,16 +13,21 @@ import {
   BadRequestException,
   Controller,
   Get,
+  Param,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ExternalBpmService } from './external-bpm.service';
+import { WmIsService } from './wm-is.service';
 
 @Controller('external-bpm')
 @UseGuards(JwtAuthGuard)
 export class ExternalBpmController {
-  constructor(private readonly svc: ExternalBpmService) {}
+  constructor(
+    private readonly svc: ExternalBpmService,
+    private readonly wmIs: WmIsService,
+  ) {}
 
   @Get('models')
   async list() {
@@ -45,5 +50,15 @@ export class ExternalBpmController {
       throw new BadRequestException('deploymentVersion must be an integer');
     }
     return this.svc.getModelGraph(processKey, modelVersion, dep);
+  }
+
+  /** Resolve a Document Type FQN to its field schema, via the IS Admin
+   *  API. `fqn` accepts both the diagram's `{folder}name` form and the
+   *  IS `folder:name` form; both are URL-encoded in the path segment.
+   *  Server-cached for 24 h per type. */
+  @Get('types/:fqn')
+  async getType(@Param('fqn') fqn: string) {
+    if (!fqn) throw new BadRequestException('type fqn is required');
+    return this.wmIs.getType(decodeURIComponent(fqn));
   }
 }

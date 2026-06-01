@@ -66,6 +66,27 @@ export interface ExternalBpmNode {
   /** webMethods IS host this step runs on, when set. From
    *  WMSTEPDEFINITION.SERVER. */
   server: string | null;
+  /** Pipeline INPUT documents the step reads — derived from the BPD
+   *  XML's `<input>` children. Each entry carries the raw pipeline name
+   *  AND the resolved Document Type FQN (via the diagram's
+   *  `<logicalDataItem>` registry) which the IS Admin client uses to
+   *  fetch the field schema on demand. */
+  pipelineIn: ExternalBpmPipelineDoc[];
+  /** Pipeline OUTPUT documents the step writes — same shape as
+   *  `pipelineIn`, from `<output>` elements. */
+  pipelineOut: ExternalBpmPipelineDoc[];
+}
+
+/** One pipeline document slot on a step. `name` is the in-process
+ *  reference (e.g. "{ProcessNamespace}BusinessDoc"); `typeFqn` is the
+ *  IS Document Type it resolves to (e.g.
+ *  "{DOEEnforcement.documents}BusinessDoc") or null when the diagram's
+ *  registry didn't carry one. `label` strips the `{namespace}` prefix
+ *  for friendlier display. */
+export interface ExternalBpmPipelineDoc {
+  name: string;
+  label: string;
+  typeFqn: string | null;
 }
 
 export interface ExternalBpmContainer {
@@ -289,6 +310,18 @@ export class ExternalBpmService implements OnModuleDestroy {
     const lanesById = new Map<string, (typeof containerMap.lanes)[number]>();
     for (const l of containerMap.lanes) lanesById.set(l.id, l);
 
+    /** Resolve a pipeline document name (e.g. "{ProcessNamespace}BusinessDoc")
+     *  against the diagram's `<logicalDataItem>` registry. Returns the
+     *  raw name, a friendly label (with the `{namespace}` prefix
+     *  stripped), and the Document Type FQN the IS Admin client can be
+     *  asked for. */
+    const resolvePipelineDoc = (rawName: string): ExternalBpmPipelineDoc => {
+      const typeFqn = containerMap.logicalDataItems.get(rawName) ?? null;
+      const labelMatch = rawName.match(/^\{[^}]*\}(.*)$/);
+      const label = (labelMatch ? labelMatch[1] : rawName).trim();
+      return { name: rawName, label, typeFqn };
+    };
+
     const nodes: ExternalBpmNode[] = stepsRes.recordset.map((s) => {
       const mappedType = resolveNodeKind(s.TYPE, s.ICON_WIDTH, s.ICON_HEIGHT);
       const isImplicitStart = !incoming.has(s.STEPID) && mappedType !== 'endEvent';
@@ -326,6 +359,14 @@ export class ExternalBpmService implements OnModuleDestroy {
             : null,
         server:
           typeof s.SERVER === 'string' && s.SERVER.trim() ? s.SERVER : null,
+        pipelineIn:
+          containerMap.stepIo
+            .get(s.STEPID)
+            ?.pipelineIn.map(resolvePipelineDoc) ?? [],
+        pipelineOut:
+          containerMap.stepIo
+            .get(s.STEPID)
+            ?.pipelineOut.map(resolvePipelineDoc) ?? [],
       };
     });
 

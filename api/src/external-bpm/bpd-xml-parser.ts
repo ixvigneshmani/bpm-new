@@ -79,6 +79,18 @@ export interface BpdTransitionMeta {
   conditionText: string | null;
 }
 
+/** Per-step pipeline IN/OUT — the document names webMethods threads
+ *  through this step. Each name resolves via `logicalDataItems` to a
+ *  fully-qualified Document Type that lives on the IS server (use the
+ *  IS Admin client to expand its field schema). Empty when the step
+ *  has no pipeline footprint (gateways, end events). */
+export interface BpdStepIo {
+  /** Pipeline document names this step READS (`<input name="…"/>`). */
+  pipelineIn: string[];
+  /** Pipeline document names this step WRITES (`<output name="…"/>`). */
+  pipelineOut: string[];
+}
+
 export interface BpdContainerMap {
   /** All pools in the diagram, top-level. */
   pools: BpdPool[];
@@ -90,6 +102,14 @@ export interface BpdContainerMap {
   stepToLane: Map<string, string>;
   /** Per-transition geometry + condition harvested from <transition> elements. */
   transitionMeta: BpdTransitionMeta[];
+  /** stepUid → pipeline IN/OUT names. Absent when the step element had
+   *  no <input>/<output> children. */
+  stepIo: Map<string, BpdStepIo>;
+  /** Top-level `<logicalDataItem>` map — pipeline-name → fully qualified
+   *  Document Type ("{folder.path}DocName") referenced by it. The drawer
+   *  uses this to resolve each pipeline input/output's TYPE so the IS
+   *  Admin client can be asked for its field schema. */
+  logicalDataItems: Map<string, string>;
 }
 
 /** Every BPD element that represents a "step" we want to render as a
@@ -123,6 +143,11 @@ const parser = new XMLParser({
     name === 'swimlane' ||
     name === 'transition' ||
     name === 'bendpoint' ||
+    // Pipeline IN/OUT and the top-level type registry — required for the
+    // step-details drawer's Pipeline section.
+    name === 'input' ||
+    name === 'output' ||
+    name === 'logicalDataItem' ||
     (STEP_ELEMENT_NAMES as readonly string[]).includes(name),
 });
 
@@ -166,8 +191,32 @@ function num(v: unknown, fallback: number): number {
  *  STEP_ELEMENT_NAMES. fast-xml-parser wraps these in arrays via
  *  isArray, but we also handle the single-object fallback in case the
  *  config ever drifts. */
-function stepChildren(container: Record<string, unknown>): Array<{ uid: string; x: number; y: number; w: number; h: number }> {
-  const out: Array<{ uid: string; x: number; y: number; w: number; h: number }> = [];
+interface StepChild {
+  uid: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  pipelineIn: string[];
+  pipelineOut: string[];
+}
+
+/** Pull every direct child step plus its pipeline IN/OUT names. The
+ *  `<input name="…">` / `<output name="…">` elements live as children of
+ *  the step element and only exist on steps that actually thread the
+ *  pipeline (invokeStep, receiveStep). Gateways / end events come back
+ *  with empty arrays, which is what the drawer expects (it hides the
+ *  Pipeline section when both are empty). */
+function stepChildren(container: Record<string, unknown>): StepChild[] {
+  const out: StepChild[] = [];
+  const namesOf = (el: Record<string, unknown>, key: 'input' | 'output'): string[] => {
+    const raw = el[key];
+    if (raw == null) return [];
+    const arr = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [raw as Record<string, unknown>];
+    return arr
+      .map((io) => (typeof io['@name'] === 'string' ? (io['@name'] as string) : null))
+      .filter((n): n is string => !!n && n.trim() !== '');
+  };
   for (const name of STEP_ELEMENT_NAMES) {
     const raw = container[name];
     if (raw == null) continue;
@@ -183,6 +232,8 @@ function stepChildren(container: Record<string, unknown>): Array<{ uid: string; 
         y: num(el['@y'], 0),
         w: num(el['@width'], 60),
         h: num(el['@height'], 60),
+        pipelineIn: namesOf(el, 'input'),
+        pipelineOut: namesOf(el, 'output'),
       });
     }
   }
@@ -273,6 +324,8 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
     stepToPool: new Map(),
     stepToLane: new Map(),
     transitionMeta: [],
+    stepIo: new Map(),
+    logicalDataItems: new Map(),
   };
   if (!xml || typeof xml !== 'string' || xml.trim() === '') return empty;
 
@@ -292,6 +345,20 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
   const stepToPool = new Map<string, string>();
   const stepToLane = new Map<string, string>();
   const transitionMeta: BpdTransitionMeta[] = [];
+  const stepIo = new Map<string, BpdStepIo>();
+
+  // Top-level <logicalDataItem name="…" type="…"/> declarations — the
+  // diagram's type registry that resolves each pipeline document name
+  // to its IS Document Type FQN.
+  const logicalDataItems = new Map<string, string>();
+  const ldiEls = (diagram['logicalDataItem'] ?? []) as Array<Record<string, unknown>>;
+  for (const ldi of ldiEls) {
+    const n = ldi['@name'];
+    const t = ldi['@type'];
+    if (typeof n === 'string' && typeof t === 'string') {
+      logicalDataItems.set(n, t);
+    }
+  }
 
   // Stack pools vertically when the XML doesn't carry pool-level
   // coordinates. Use a small gap so they read as separate swimlanes.
@@ -371,6 +438,12 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
     // the step's coordinate.
     for (const s of poolSteps) {
       stepToPool.set(s.uid, poolUid);
+      if (s.pipelineIn.length > 0 || s.pipelineOut.length > 0) {
+        stepIo.set(s.uid, {
+          pipelineIn: s.pipelineIn,
+          pipelineOut: s.pipelineOut,
+        });
+      }
       for (const sw of laneRecords) {
         const inside =
           sw.orientation === 'vertical'
@@ -422,5 +495,13 @@ export function parseBpdXml(xml: string | null | undefined): BpdContainerMap {
     poolStackY = poolY + poolH + POOL_GAP;
   }
 
-  return { pools, lanes, stepToPool, stepToLane, transitionMeta };
+  return {
+    pools,
+    lanes,
+    stepToPool,
+    stepToLane,
+    transitionMeta,
+    stepIo,
+    logicalDataItems,
+  };
 }
